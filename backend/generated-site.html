@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TechFlow Innovations</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+
+    <!-- Hero Section -->
+    <div class="bg-gradient-to-r from-blue-600 to-indigo-900 text-white py-24">
+        <div class="container mx-auto px-4 flex items-center justify-between">
+            <div>
+                <h1 class="text-5xl font-bold">TechFlow Innovations</h1>
+                <p class="mt-4 text-lg">Empowering businesses through intelligent automation</p>
+            </div>
+            <a href="#services" class="bg-white text-blue-600 px-4 py-2 rounded hover:bg-gray-100">Learn More</a>
+        </div>
+    </div>
+
+    <!-- About Section -->
+    <section id="about" class="py-24 bg-white">
+        <div class="container mx-auto px-4">
+            <h2 class="text-3xl font-bold mb-8 text-center">About Us</h2>
+            <p>We are a cutting-edge technology company specializing in AI-driven solutions for modern businesses. Our team of experts combines deep technical knowledge with business acumen to deliver transformative results.</p>
+        </div>
+    </section>
+
+    <!-- Services Section -->
+    <section id="services" class="py-24 bg-gray-100">
+        <div class="container mx-auto px-4">
+            <h2 class="text-3xl font-bold mb-8 text-center">Our Services</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div class="bg-white p-6 rounded shadow hover:bg-gray-50">
+                    <h3 class="text-xl font-bold mb-4">AI Chatbots</h3>
+                    <p>Automate customer service with intelligent chatbots.</p>
+                </div>
+                <div class="bg-white p-6 rounded shadow hover:bg-gray-50">
+                    <h3 class="text-xl font-bold mb-4">Process Automation</h3>
+                    <p>Simplify workflows and increase efficiency.</p>
+                </div>
+                <div class="bg-white p-6 rounded shadow hover:bg-gray-50">
+                    <h3 class="text-xl font-bold mb-4">Data Analytics</h3>
+                    <p>Gain insights with advanced data analytics solutions.</p>
+                </div>
+                <div class="bg-white p-6 rounded shadow hover:bg-gray-50">
+                    <h3 class="text-xl font-bold mb-4">Custom Software Development</h3>
+                    <p>Create tailored software solutions for your business.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Contact Form Section -->
+    <footer id="contact" class="bg-gray-800 text-white py-12">
+        <div class="container mx-auto px-4">
+            <h2 class="text-3xl font-bold mb-8 text-center">Contact Us</h2>
+            <form action="https://api.softaware.co.za/v1/leads/submit" method="POST" class="max-w-md mx-auto space-y-6">
+                <input type="hidden" name="client_id" value="client_demo_001">
+                <input type="text" name="bot_check_url" style="display:none" tabindex="-1" autocomplete="off">
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-200">Name</label>
+                    <input id="name" name="name" type="text" required class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="email" class="block text-sm font-medium text-gray-200">Email</label>
+                    <input id="email" name="email" type="email" required class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                </div>
+                <div>
+                    <label for="message" class="block text-sm font-medium text-gray-200">Message</label>
+                    <textarea id="message" name="message" required rows="4" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"></textarea>
+                </div>
+                <button type="submit" class="w-full bg-indigo-600 text-white py-2 px-4 border border-transparent rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Send Message</button>
+            </form>
+        </div>
+    </footer>
+
+    <!-- SoftAware Widget -->
+    <script src="https://api.softaware.co.za/widget.js" data-client-id="client_demo_001" defer></script>
+
+</body>
+</html>

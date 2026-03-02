@@ -1,0 +1,13 @@
+{
+  "businessName": "African Tech Solutions",
+  "tagline": "Innovative technology for emerging markets",
+  "aboutText": "We are a South African technology company providing cutting-edge software solutions tailored for African businesses. Our mission is to bridge the digital divide and empower enterprises with world-class technology at affordable prices.",
+  "services": [
+    "Mobile App Development",
+    "Cloud Infrastructure Setup",
+    "AI & Machine Learning Consulting",
+    "Cybersecurity Solutions",
+    "Legacy System Modernization"
+  ],
+  "clientId": "african_tech_client_2026"
+}

@@ -1,0 +1,18 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: softaware-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: softaware
+      MYSQL_USER: softaware
+      MYSQL_PASSWORD: softaware
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - softaware_mysql_data:/var/lib/mysql
+    command: ["--default-authentication-plugin=mysql_native_password"]
+
+volumes:
+  softaware_mysql_data:

@@ -1,0 +1,645 @@
+import React, { ReactNode, useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { 
+  HomeIcon, 
+  DocumentTextIcon, 
+  DocumentDuplicateIcon,
+  UsersIcon,
+  CogIcon,
+  ChartBarIcon,
+  ArchiveBoxIcon,
+  TagIcon,
+  BanknotesIcon,
+  ClipboardDocumentListIcon,
+  ArrowRightOnRectangleIcon,
+  KeyIcon,
+  ShieldCheckIcon,
+  UserGroupIcon,
+  AdjustmentsHorizontalIcon,
+  ArrowPathIcon,
+  ChevronDownIcon,
+  ChevronRightIcon
+} from '@heroicons/react/24/outline';
+import { useAppStore } from '../../store';
+import { AuthModel } from '../../models';
+import AppSettingsModel from '../../models/AppSettingsModel';
+import Swal from 'sweetalert2';
+import Can from '../Can';
+import { getApiBaseUrl, getAssetUrl } from '../../config/app';
+import NotificationDropdown from '../Notifications/NotificationDropdown';
+import UserAccountMenu from '../User/UserAccountMenu';
+
+interface LayoutProps {
+  children: ReactNode;
+}
+
+const navigation = [
+  { name: 'Dashboard', href: '/', icon: HomeIcon },
+  { name: 'Transactions', href: '/transactions', icon: BanknotesIcon },
+  { name: 'Balance Sheet', href: '/reports/balance-sheet', icon: ClipboardDocumentListIcon },
+  { name: 'Profit & Loss', href: '/reports/profit-loss', icon: ChartBarIcon },
+  { name: 'Transaction Listing', href: '/reports/transaction-listing', icon: DocumentTextIcon },
+  { name: 'VAT Reports', href: '/vat-reports', icon: ClipboardDocumentListIcon },
+  { name: 'Quotations', href: '/quotations', icon: DocumentTextIcon },
+  { name: 'Invoices', href: '/invoices', icon: DocumentDuplicateIcon },
+  { name: 'Contacts', href: '/contacts', icon: UsersIcon },
+  { name: 'Pricing', href: '/pricing', icon: ArchiveBoxIcon },
+  { name: 'Categories', href: '/categories', icon: TagIcon },
+  { name: 'Settings', href: '/settings', icon: CogIcon },
+];
+
+const systemNavigation = [
+  { name: 'Users', href: '/system/users', icon: UsersIcon },
+  { name: 'Roles', href: '/system/roles', icon: UserGroupIcon },
+  { name: 'Permissions', href: '/system/permissions', icon: ShieldCheckIcon },
+  { name: 'Credentials', href: '/credentials', icon: KeyIcon },
+  { name: 'System Settings', href: '/system/settings', icon: AdjustmentsHorizontalIcon },
+];
+
+const Layout: React.FC<LayoutProps> = ({ children }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { user, logout } = useAppStore();
+  const [siteLogo, setSiteLogo] = useState<string>('');
+  const [siteName, setSiteName] = useState<string>('');
+
+  useEffect(() => {
+    loadSettings();
+  }, []);
+
+  const loadSettings = async () => {
+    try {
+      const settings = await AppSettingsModel.get();
+      const baseUrl = settings.site_base_url || getApiBaseUrl();
+      
+      if (settings.site_logo) {
+        setSiteLogo(getAssetUrl(`/assets/images/${settings.site_logo}`));
+      }
+      if (settings.site_name) {
+        setSiteName(settings.site_name);
+      }
+      // Update favicon if site_icon exists
+      if (settings.site_icon) {
+        const favicon = document.querySelector("link[rel='icon']") as HTMLLinkElement;
+        if (favicon) {
+          favicon.href = `${baseUrl}/assets/images/${settings.site_icon}`;
+        } else {
+          const newFavicon = document.createElement('link');
+          newFavicon.rel = 'icon';
+          newFavicon.href = `${baseUrl}/assets/images/${settings.site_icon}`;
+          document.head.appendChild(newFavicon);
+        }
+      }
+      // Update page title if site_name exists
+      if (settings.site_name) {
+        document.title = settings.site_title || settings.site_name;
+      }
+
+      const brandingCache = {
+        logoUrl: settings.site_logo ? `${baseUrl}/assets/images/${settings.site_logo}` : '',
+        name: settings.site_name || 'SoftAware Billing',
+        description: settings.site_description || 'Sign in to continue.',
+      };
+      localStorage.setItem('app_branding', JSON.stringify(brandingCache));
+    } catch (error) {
+      console.error('Failed to load settings:', error);
+      localStorage.removeItem('app_branding');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await AuthModel.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      AuthModel.clearAuth();
+      logout();
+      navigate('/login');
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      {/* Sidebar */}
+      <div className="hidden md:flex md:w-64 md:flex-col">
+        <div className="flex min-h-0 flex-1 flex-col bg-white border-r border-gray-200 shadow-sm">
+          <div className="flex flex-1 flex-col overflow-y-auto pt-5 pb-4">
+            <div className="flex flex-shrink-0 items-center px-4 pb-4 border-b border-gray-200">
+              {siteLogo ? (
+                <img 
+                  src={siteLogo} 
+                  alt={siteName || 'Logo'} 
+                  className="h-10 w-auto"
+                  onError={(e) => {
+                    // Fallback to default logo if custom logo fails
+                    (e.target as HTMLImageElement).src = '/images/logo_small.png';
+                  }}
+                />
+              ) : (
+                <span className="text-xl font-bold text-gray-900">
+                  {siteName || 'SoftAware Billing'}
+                </span>
+              )}
+            </div>
+            <nav className="mt-6 flex-1 space-y-1 px-3">
+              {/* Dashboard - Always visible */}
+              {(() => {
+                const item = navigation[0]; // Dashboard
+                const isActive = location.pathname === '/';
+                return (
+                  <Link
+                    key={item.name}
+                    to={item.href}
+                    className={`${
+                      isActive
+                        ? 'bg-picton-blue text-white shadow-sm'
+                        : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                    } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                  >
+                    <item.icon
+                      className={`${
+                        isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                      } mr-3 h-5 w-5 flex-shrink-0`}
+                    />
+                    {item.name}
+                  </Link>
+                );
+              })()}
+
+              {/* Transactions - Requires transactions.view */}
+              <Can permission="transactions.view">
+                {(() => {
+                  const item = navigation[1]; // Transactions
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Balance Sheet - Requires reports.view */}
+              <Can permission="reports.view">
+                {(() => {
+                  const item = navigation[2]; // Balance Sheet
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Profit & Loss - Requires reports.view */}
+              <Can permission="reports.view">
+                {(() => {
+                  const item = navigation[3]; // Profit & Loss
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Transaction Listing - Requires reports.view */}
+              <Can permission="reports.view">
+                {(() => {
+                  const item = navigation[4]; // Transaction Listing
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* VAT Reports - Requires reports.view */}
+              <Can permission="reports.view">
+                {(() => {
+                  const item = navigation[5]; // VAT Reports
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Quotations - Requires quotations.view */}
+              <Can permission="quotations.view">
+                {(() => {
+                  const item = navigation[6]; // Quotations
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Invoices - Requires invoices.view */}
+              <Can permission="invoices.view">
+                {(() => {
+                  const item = navigation[7]; // Invoices
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Contacts - Requires contacts.view */}
+              <Can permission="contacts.view">
+                {(() => {
+                  const item = navigation[8]; // Contacts
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Pricing - Requires pricing.view */}
+              <Can permission="pricing.view">
+                {(() => {
+                  const item = navigation[9]; // Pricing
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Categories - Requires categories.view */}
+              <Can permission="categories.view">
+                {(() => {
+                  const item = navigation[10]; // Categories
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+
+              {/* Settings - Requires settings.view */}
+              <Can permission="settings.view">
+                {(() => {
+                  const item = navigation[11]; // Settings
+                  const isActive = location.pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={`${
+                        isActive
+                          ? 'bg-picton-blue text-white shadow-sm'
+                          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                    >
+                      <item.icon
+                        className={`${
+                          isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                        } mr-3 h-5 w-5 flex-shrink-0`}
+                      />
+                      {item.name}
+                    </Link>
+                  );
+                })()}
+              </Can>
+              
+              {/* System Management Section - Permission-Based */}
+              <Can anyPermission={['users.view', 'roles.view', 'permissions.view', 'credentials.view', 'settings.view']}>
+                <div className="pt-6 pb-2">
+                  <div className="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    System Management
+                  </div>
+                </div>
+                
+                {/* Users - Show if user has users.view permission */}
+                <Can permission="users.view">
+                  {(() => {
+                    const item = systemNavigation.find(nav => nav.href === '/system/users');
+                    if (!item) return null;
+                    const isActive = location.pathname.startsWith(item.href);
+                    
+                    return (
+                      <Link
+                        key={item.name}
+                        to={item.href}
+                        className={`${
+                          isActive
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                        } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                      >
+                        <item.icon
+                          className={`${
+                            isActive ? 'text-white' : 'text-purple-500 group-hover:text-purple-700'
+                          } mr-3 h-5 w-5 flex-shrink-0`}
+                        />
+                        {item.name}
+                      </Link>
+                    );
+                  })()}
+                </Can>
+
+                {/* Roles - Show if user has roles.view permission */}
+                <Can permission="roles.view">
+                  {(() => {
+                    const item = systemNavigation.find(nav => nav.href === '/system/roles');
+                    if (!item) return null;
+                    const isActive = location.pathname.startsWith(item.href);
+                    
+                    return (
+                      <Link
+                        key={item.name}
+                        to={item.href}
+                        className={`${
+                          isActive
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                        } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                      >
+                        <item.icon
+                          className={`${
+                            isActive ? 'text-white' : 'text-purple-500 group-hover:text-purple-700'
+                          } mr-3 h-5 w-5 flex-shrink-0`}
+                        />
+                        {item.name}
+                      </Link>
+                    );
+                  })()}
+                </Can>
+
+                {/* Permissions - Show if user has permissions.view permission */}
+                <Can permission="permissions.view">
+                  {(() => {
+                    const item = systemNavigation.find(nav => nav.href === '/system/permissions');
+                    if (!item) return null;
+                    const isActive = location.pathname.startsWith(item.href);
+                    
+                    return (
+                      <Link
+                        key={item.name}
+                        to={item.href}
+                        className={`${
+                          isActive
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                        } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                      >
+                        <item.icon
+                          className={`${
+                            isActive ? 'text-white' : 'text-purple-500 group-hover:text-purple-700'
+                          } mr-3 h-5 w-5 flex-shrink-0`}
+                        />
+                        {item.name}
+                      </Link>
+                    );
+                  })()}
+                </Can>
+
+                {/* Credentials - Show if user has credentials.view permission */}
+                <Can permission="credentials.view">
+                  {(() => {
+                    const item = systemNavigation.find(nav => nav.href === '/credentials');
+                    if (!item) return null;
+                    const isActive = location.pathname.startsWith(item.href);
+                    
+                    return (
+                      <Link
+                        key={item.name}
+                        to={item.href}
+                        className={`${
+                          isActive
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                        } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                      >
+                        <item.icon
+                          className={`${
+                            isActive ? 'text-white' : 'text-purple-500 group-hover:text-purple-700'
+                          } mr-3 h-5 w-5 flex-shrink-0`}
+                        />
+                        {item.name}
+                      </Link>
+                    );
+                  })()}
+                </Can>
+
+                {/* System Settings - Show if user has settings.view permission */}
+                <Can permission="settings.view">
+                  {(() => {
+                    const item = systemNavigation.find(nav => nav.href === '/system/settings');
+                    if (!item) return null;
+                    const isActive = location.pathname.startsWith(item.href);
+                    
+                    return (
+                      <Link
+                        key={item.name}
+                        to={item.href}
+                        className={`${
+                          isActive
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                        } group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200`}
+                      >
+                        <item.icon
+                          className={`${
+                            isActive ? 'text-white' : 'text-purple-500 group-hover:text-purple-700'
+                          } mr-3 h-5 w-5 flex-shrink-0`}
+                        />
+                        {item.name}
+                      </Link>
+                    );
+                  })()}
+                </Can>
+              </Can>
+            </nav>
+          </div>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Top header */}
+        <header className="bg-white shadow-md border-b-2 border-picton-blue/20">
+          <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
+            <h2 className="text-xl font-bold text-gray-900">
+              {navigation.find(item => item.href === location.pathname)?.name || 
+               navigation.find(item => location.pathname.startsWith(item.href) && item.href !== '/')?.name ||
+               systemNavigation.find(item => item.href === location.pathname)?.name || 
+               systemNavigation.find(item => location.pathname.startsWith(item.href))?.name || 
+               'Dashboard'}
+            </h2>
+            <div className="flex items-center space-x-3">
+              {/* Notification Dropdown */}
+              <NotificationDropdown />
+              
+              {/* User Account Menu */}
+              <UserAccountMenu 
+                user={user!} 
+                onLogout={handleLogout}
+              />
+            </div>
+          </div>
+        </header>
+
+        {/* Page content */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="p-4 sm:p-6 lg:p-8">
+            {children}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+};
+
+export default Layout;

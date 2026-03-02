@@ -1,0 +1,301 @@
+/**
+ * Knowledge Categorizer Service
+ * 
+ * Analyzes ingested content to determine which business-critical categories
+ * are present in the knowledge base. Used to calculate the Knowledge Health Score.
+ * 
+ * Categories:
+ * - has_pricing: Pricing information, costs, packages, plans
+ * - has_contact_info: Contact details, email, phone, address, hours
+ * - has_services_described: Services, products, offerings, features
+ * - has_return_policy: Return/refund policies, guarantees, warranties
+ * - has_about_history: About us, company history, mission, team
+ */
+
+import axios from 'axios';
+import { env } from '../config/env.js';
+import { db, toMySQLDate } from '../db/mysql.js';
+
+const OLLAMA_API = env.OLLAMA_BASE_URL;
+const CATEGORIZER_MODEL = 'qwen2.5:3b-instruct'; // Fast local model for categorization
+
+export interface KnowledgeCategories {
+  has_pricing: boolean;
+  has_contact_info: boolean;
+  has_services_described: boolean;
+  has_return_policy: boolean;
+  has_about_history: boolean;
+}
+
+export interface KnowledgeHealth {
+  score: number;          // 0-100 percentage
+  categories: KnowledgeCategories;
+  missing: string[];      // Human-readable list of missing categories
+  recommendations: {
+    category: string;
+    action: string;
+    type: 'url' | 'file';
+  }[];
+}
+
+const CATEGORY_LABELS: Record<keyof KnowledgeCategories, string> = {
+  has_pricing: 'Pricing Information',
+  has_contact_info: 'Contact Details',
+  has_services_described: 'Services/Products',
+  has_return_policy: 'Return/Refund Policy',
+  has_about_history: 'About/Company Info'
+};
+
+const CATEGORY_RECOMMENDATIONS: Record<keyof KnowledgeCategories, { action: string; type: 'url' | 'file' }> = {
+  has_pricing: { action: 'Upload your pricing page or PDF with rates', type: 'file' },
+  has_contact_info: { action: 'Add your contact page URL', type: 'url' },
+  has_services_described: { action: 'Upload your services/products page', type: 'url' },
+  has_return_policy: { action: 'Add your returns/refund policy document', type: 'file' },
+  has_about_history: { action: 'Add your About Us page', type: 'url' }
+};
+
+/**
+ * Analyze text content to determine which categories are present
+ */
+export async function categorizeContent(content: string): Promise<KnowledgeCategories> {
+  // Truncate content to prevent overloading the model
+  const truncated = content.slice(0, 8000);
+  
+  const prompt = `Analyze this business website content and determine which information categories are present.
+
+CONTENT TO ANALYZE:
+"""
+${truncated}
+"""
+
+Return ONLY a JSON object with these boolean fields (true if the content contains substantial information about that category):
+{
+  "has_pricing": boolean,      // Contains pricing, costs, packages, plans, rates
+  "has_contact_info": boolean, // Contains contact email, phone, address, business hours
+  "has_services_described": boolean, // Describes services, products, offerings, features
+  "has_return_policy": boolean, // Contains return/refund policies, guarantees, warranties
+  "has_about_history": boolean  // Contains about us, company history, mission, team info
+}
+
+Important: Only mark as true if there is SUBSTANTIAL information, not just a brief mention.
+Return ONLY the JSON object, no other text.`;
+
+  try {
+    const response = await axios.post(
+      `${OLLAMA_API}/api/generate`,
+      {
+        model: CATEGORIZER_MODEL,
+        prompt,
+        stream: false,
+        options: {
+          temperature: 0.1, // Very low temperature for consistent categorization
+          top_p: 0.9,
+        }
+      },
+      { timeout: 30000 }
+    );
+
+    const responseText = response.data.response || '';
+    
+    // Extract JSON from response (handle markdown code blocks)
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/\{[\s\S]*?\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    
+    return {
+      has_pricing: Boolean(parsed.has_pricing),
+      has_contact_info: Boolean(parsed.has_contact_info),
+      has_services_described: Boolean(parsed.has_services_described),
+      has_return_policy: Boolean(parsed.has_return_policy),
+      has_about_history: Boolean(parsed.has_about_history)
+    };
+  } catch (error) {
+    console.error('[Categorizer] Error analyzing content:', error);
+    // Return all false on error - will be re-categorized on next ingestion
+    return {
+      has_pricing: false,
+      has_contact_info: false,
+      has_services_described: false,
+      has_return_policy: false,
+      has_about_history: false
+    };
+  }
+}
+
+/**
+ * Update assistant's knowledge categories by analyzing all their indexed content
+ */
+export async function updateAssistantCategories(assistantId: string): Promise<KnowledgeCategories> {
+  // Get all content chunks for this assistant
+  const chunks = await db.query<{ content: string }>(
+    `SELECT content FROM assistant_knowledge WHERE assistant_id = ? ORDER BY created_at DESC LIMIT 50`,
+    [assistantId]
+  );
+
+  if (chunks.length === 0) {
+    // No content indexed yet
+    const emptyCategories: KnowledgeCategories = {
+      has_pricing: false,
+      has_contact_info: false,
+      has_services_described: false,
+      has_return_policy: false,
+      has_about_history: false
+    };
+    
+    await db.execute(
+      `UPDATE assistants SET knowledge_categories = ? WHERE id = ?`,
+      [JSON.stringify(emptyCategories), assistantId]
+    );
+    
+    return emptyCategories;
+  }
+
+  // Combine chunks for analysis (sample to avoid overwhelming the model)
+  const combinedContent = chunks.map(c => c.content).join('\n\n---\n\n');
+  
+  // Analyze the combined content
+  const categories = await categorizeContent(combinedContent);
+  
+  // Save to database
+  await db.execute(
+    `UPDATE assistants SET knowledge_categories = ?, updated_at = ? WHERE id = ?`,
+    [JSON.stringify(categories), toMySQLDate(new Date()), assistantId]
+  );
+
+  console.log(`[Categorizer] Updated categories for ${assistantId}:`, categories);
+  
+  return categories;
+}
+
+/**
+ * Merge new content categories with existing ones (OR operation)
+ * This allows incremental updates as more content is indexed
+ */
+export async function mergeCategories(
+  assistantId: string, 
+  newCategories: KnowledgeCategories
+): Promise<KnowledgeCategories> {
+  // Get existing categories
+  const assistant = await db.queryOne<{ knowledge_categories: string | null }>(
+    `SELECT knowledge_categories FROM assistants WHERE id = ?`,
+    [assistantId]
+  );
+
+  let existing: KnowledgeCategories = {
+    has_pricing: false,
+    has_contact_info: false,
+    has_services_described: false,
+    has_return_policy: false,
+    has_about_history: false
+  };
+
+  if (assistant?.knowledge_categories) {
+    try {
+      existing = JSON.parse(assistant.knowledge_categories);
+    } catch {}
+  }
+
+  // Merge with OR - once a category is true, it stays true
+  const merged: KnowledgeCategories = {
+    has_pricing: existing.has_pricing || newCategories.has_pricing,
+    has_contact_info: existing.has_contact_info || newCategories.has_contact_info,
+    has_services_described: existing.has_services_described || newCategories.has_services_described,
+    has_return_policy: existing.has_return_policy || newCategories.has_return_policy,
+    has_about_history: existing.has_about_history || newCategories.has_about_history
+  };
+
+  // Save merged categories
+  await db.execute(
+    `UPDATE assistants SET knowledge_categories = ?, updated_at = ? WHERE id = ?`,
+    [JSON.stringify(merged), toMySQLDate(new Date()), assistantId]
+  );
+
+  return merged;
+}
+
+/**
+ * Calculate Knowledge Health Score and recommendations
+ */
+export function calculateHealthScore(categories: KnowledgeCategories | null): KnowledgeHealth {
+  if (!categories) {
+    categories = {
+      has_pricing: false,
+      has_contact_info: false,
+      has_services_described: false,
+      has_return_policy: false,
+      has_about_history: false
+    };
+  }
+
+  const categoryKeys = Object.keys(categories) as (keyof KnowledgeCategories)[];
+  const trueCount = categoryKeys.filter(k => categories![k]).length;
+  const score = Math.round((trueCount / 5) * 100);
+
+  const missing: string[] = [];
+  const recommendations: KnowledgeHealth['recommendations'] = [];
+
+  for (const key of categoryKeys) {
+    if (!categories[key]) {
+      missing.push(CATEGORY_LABELS[key]);
+      const rec = CATEGORY_RECOMMENDATIONS[key];
+      recommendations.push({
+        category: CATEGORY_LABELS[key],
+        action: rec.action,
+        type: rec.type
+      });
+    }
+  }
+
+  return {
+    score,
+    categories,
+    missing,
+    recommendations
+  };
+}
+
+/**
+ * Get Knowledge Health for an assistant
+ */
+export async function getAssistantKnowledgeHealth(assistantId: string): Promise<KnowledgeHealth & { 
+  pagesIndexed: number;
+  tier: 'free' | 'paid';
+  pageLimit: number;
+  storageFull: boolean;
+}> {
+  const assistant = await db.queryOne<{ 
+    knowledge_categories: string | null;
+    pages_indexed: number;
+    tier: 'free' | 'paid';
+  }>(
+    `SELECT knowledge_categories, pages_indexed, tier FROM assistants WHERE id = ?`,
+    [assistantId]
+  );
+
+  if (!assistant) {
+    throw new Error(`Assistant ${assistantId} not found`);
+  }
+
+  let categories: KnowledgeCategories | null = null;
+  if (assistant.knowledge_categories) {
+    try {
+      categories = JSON.parse(assistant.knowledge_categories);
+    } catch {}
+  }
+
+  const health = calculateHealthScore(categories);
+  const pageLimit = assistant.tier === 'paid' ? 500 : 50;
+  const storageFull = assistant.pages_indexed >= pageLimit;
+
+  return {
+    ...health,
+    pagesIndexed: assistant.pages_indexed,
+    tier: assistant.tier,
+    pageLimit,
+    storageFull
+  };
+}

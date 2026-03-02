@@ -1,0 +1,1969 @@
+# Soft Aware API Documentation
+## Developer Integration Guide
+
+**Version:** 1.0  
+**Base URL:** `https://api.softaware.net.za`  
+**Protocol:** HTTPS/REST  
+**Format:** JSON  
+**Last Updated:** February 28, 2026
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Getting Started](#getting-started)
+3. [Authentication](#authentication)
+4. [API Endpoints](#api-endpoints)
+   - [Authentication & Users](#authentication--users)
+   - [Profile Management](#profile-management)
+   - [Subscriptions](#subscriptions)
+   - [Credits & Billing](#credits--billing)
+   - [AI Services](#ai-services)
+   - [Team Management](#team-management)
+   - [Admin Operations](#admin-operations)
+   - [Updates System](#updates-system)
+5. [SDKs & Code Examples](#sdks--code-examples)
+6. [Webhooks](#webhooks)
+7. [Rate Limits & Quotas](#rate-limits--quotas)
+8. [Error Handling](#error-handling)
+9. [Security Best Practices](#security-best-practices)
+10. [Changelog](#changelog)
+11. [Support](#support)
+
+---
+
+## Overview
+
+The Soft Aware API provides programmatic access to our AI-powered platform, enabling developers to:
+
+- **Authenticate users** and manage accounts
+- **Integrate AI capabilities** into applications (chat, code generation, vision)
+- **Manage subscriptions** and billing programmatically
+- **Access credit-based services** for AI operations
+- **Build custom dashboards** and admin tools
+- **Automate workflows** via webhooks
+
+### Key Features
+
+✅ **RESTful Architecture** — Standard HTTP methods (GET, POST, PUT, DELETE)  
+✅ **JWT Authentication** — Secure, stateless token-based auth  
+✅ **API Key Support** — Alternative authentication for server-to-server calls  
+✅ **Multi-Provider AI** — OpenAI, Anthropic, Google Gemini, local Ollama, and more  
+✅ **Credit System** — Pay-as-you-go pricing with transparent costs  
+✅ **CORS Enabled** — Works from browsers, mobile apps, and servers  
+✅ **Webhook Support** — Real-time notifications for events  
+
+---
+
+## Getting Started
+
+### 1. Create an Account
+
+Register at [https://softaware.net.za/register](https://softaware.net.za/register) or via API:
+
+```bash
+curl -X POST https://api.softaware.net.za/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "developer@example.com",
+    "password": "SecurePass123!",
+    "teamName": "My Company"
+  }'
+```
+
+**Response:**
+```json
+{
+  "accessToken": "eyJhbGci...",
+  "user": {
+    "id": "uuid-here",
+    "email": "developer@example.com"
+  },
+  "team": {
+    "id": "team-uuid",
+    "name": "My Company"
+  },
+  "activationKey": "USER-XXXX"
+}
+```
+
+### 2. Obtain API Credentials
+
+After registration, generate an API key for server-side integrations:
+
+```bash
+curl -X POST https://api.softaware.net.za/api-keys \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production API Key",
+    "expiresInDays": 365
+  }'
+```
+
+**Response:**
+```json
+{
+  "id": "key-uuid",
+  "name": "Production API Key",
+  "key": "sk_live_abc123...xyz789",
+  "isActive": true,
+  "warning": "Save this key! It will not be shown again."
+}
+```
+
+⚠️ **Store this key securely** — it provides full access to your account.
+
+### 3. Make Your First Request
+
+Test your credentials:
+
+```bash
+curl https://api.softaware.net.za/profile \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+Or using API key:
+
+```bash
+curl https://api.softaware.net.za/credits/balance \
+  -H "X-API-Key: sk_live_abc123...xyz789"
+```
+
+---
+
+## Authentication
+
+The Soft Aware API supports **two authentication methods**:
+
+### Method 1: JWT Token (Recommended for user-facing apps)
+
+Used for web and mobile applications where users log in.
+
+**How it works:**
+1. User logs in with email/password
+2. API returns a JWT token (valid 1 hour by default, or 30 days with `rememberMe: true`)
+3. Include token in `Authorization` header for subsequent requests
+
+**Login Request:**
+```http
+POST /auth/login
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "password123",
+  "rememberMe": true
+}
+```
+
+**Response:**
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresIn": "30d",
+  "user": {
+    "id": "user-uuid",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "role": "admin"
+  },
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp",
+    "role": "ADMIN"
+  }
+}
+```
+
+**Using the token:**
+```http
+GET /profile
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**Token Refresh:**
+```http
+POST /auth/refresh
+Content-Type: application/json
+
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### Method 2: API Key (Recommended for server-to-server)
+
+Used for backend services, cron jobs, and automated workflows.
+
+**Using an API key:**
+```http
+GET /credits/balance
+X-API-Key: sk_live_abc123...xyz789
+```
+
+**API Key Management:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api-keys` | GET | List your API keys (masked) |
+| `/api-keys` | POST | Create new API key |
+| `/api-keys/:id` | DELETE | Revoke an API key |
+| `/api-keys/:id/toggle` | PATCH | Enable/disable key |
+
+---
+
+## API Endpoints
+
+### Authentication & Users
+
+#### `POST /auth/register`
+Create a new user account.
+
+**Request:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepass123",
+  "teamName": "My Team" // optional
+}
+```
+
+**Response:** `201 Created`
+```json
+{
+  "accessToken": "jwt_token_here",
+  "user": { "id": "...", "email": "..." },
+  "team": { "id": "...", "name": "My Team" },
+  "activationKey": "USER-XXXX"
+}
+```
+
+**Errors:**
+- `400` — Email already registered
+- `400` — Invalid email format
+- `400` — Password too short (min 8 chars)
+
+---
+
+#### `POST /auth/login`
+Authenticate a user and receive a JWT token.
+
+**Request:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepass123",
+  "rememberMe": false  // true = 30 day token, false = 1 hour
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "accessToken": "eyJhbGci...",
+  "token": "eyJhbGci...",
+  "expiresIn": "1h",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "phone": "+27821234567",
+    "role": "admin"
+  },
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp",
+    "role": "ADMIN"
+  }
+}
+```
+
+**Errors:**
+- `400` — Invalid email or password
+
+---
+
+#### `POST /auth/refresh`
+Refresh an existing JWT token before it expires.
+
+**Request:**
+```json
+{
+  "accessToken": "current_token_here"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "accessToken": "new_token_here"
+}
+```
+
+---
+
+### Profile Management
+
+All profile endpoints require JWT authentication (`Authorization: Bearer <token>`).
+
+#### `GET /profile`
+Get the authenticated user's complete profile including team, subscription, and credits.
+
+**Response:** `200 OK`
+```json
+{
+  "user": {
+    "id": "user-uuid",
+    "email": "user@example.com",
+    "name": "John Doe",
+    "phone": "+27821234567",
+    "avatarUrl": "https://cdn.example.com/avatar.jpg",
+    "createdAt": "2026-01-15T10:30:00Z"
+  },
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp",
+    "role": "ADMIN"
+  },
+  "subscription": {
+    "id": "sub-uuid",
+    "status": "ACTIVE",
+    "tier": "TEAM",
+    "planName": "Team Plan",
+    "currentPeriodEnd": "2026-03-15T00:00:00Z"
+  },
+  "credits": {
+    "balance": 15000,
+    "totalPurchased": 20000,
+    "totalUsed": 5000
+  }
+}
+```
+
+---
+
+#### `PUT /profile`
+Update the authenticated user's profile.
+
+**Request:**
+```json
+{
+  "name": "Jane Doe",
+  "phone": "+27821234567",
+  "avatarUrl": "https://cdn.example.com/new-avatar.jpg"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "message": "Profile updated",
+  "user": {
+    "id": "user-uuid",
+    "email": "user@example.com",
+    "name": "Jane Doe",
+    "phone": "+27821234567",
+    "avatarUrl": "https://cdn.example.com/new-avatar.jpg",
+    "updatedAt": "2026-02-28T14:20:00Z"
+  }
+}
+```
+
+---
+
+#### `POST /profile/change-password`
+Change the authenticated user's password.
+
+**Request:**
+```json
+{
+  "currentPassword": "oldpassword123",
+  "newPassword": "newsecurepass456"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "message": "Password changed successfully"
+}
+```
+
+**Errors:**
+- `400` — Current password is incorrect
+- `400` — New password too short
+
+---
+
+#### `GET /profile/team`
+Get team details and all members.
+
+**Response:** `200 OK`
+```json
+{
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp",
+    "createdAt": "2026-01-01T00:00:00Z"
+  },
+  "members": [
+    {
+      "userId": "user1-uuid",
+      "email": "john@acme.com",
+      "name": "John Doe",
+      "role": "ADMIN",
+      "joinedAt": "2026-01-01T00:00:00Z"
+    },
+    {
+      "userId": "user2-uuid",
+      "email": "jane@acme.com",
+      "name": "Jane Smith",
+      "role": "OPERATOR",
+      "joinedAt": "2026-01-15T00:00:00Z"
+    }
+  ],
+  "myRole": "ADMIN"
+}
+```
+
+---
+
+#### `GET /profile/invoices`
+List all invoices for the team.
+
+**Response:** `200 OK`
+```json
+{
+  "invoices": [
+    {
+      "id": "inv-uuid",
+      "invoiceNumber": "INV-2026-001",
+      "description": "Team Plan - February 2026",
+      "subtotal": 50000,
+      "subtotalDisplay": "R500.00",
+      "vatAmount": 7500,
+      "vatDisplay": "R75.00",
+      "total": 57500,
+      "totalDisplay": "R575.00",
+      "periodStart": "2026-02-01T00:00:00Z",
+      "periodEnd": "2026-02-28T23:59:59Z",
+      "dueDate": "2026-03-07T00:00:00Z",
+      "paidAt": "2026-02-05T10:30:00Z",
+      "status": "PAID",
+      "pdfUrl": "https://cdn.softaware.net.za/invoices/inv-uuid.pdf"
+    }
+  ]
+}
+```
+
+---
+
+### Subscriptions
+
+#### `GET /subscriptions/plans`
+Get all available subscription plans.
+
+**Authentication:** None required (public endpoint)
+
+**Response:** `200 OK`
+```json
+{
+  "plans": [
+    {
+      "id": "plan-personal",
+      "tier": "PERSONAL",
+      "name": "Personal Plan",
+      "description": "Perfect for individual developers",
+      "priceMonthly": 29900,
+      "priceMonthlyDisplay": "R299",
+      "priceAnnually": 299900,
+      "priceAnnuallyDisplay": "R2,999",
+      "trialDays": 14,
+      "features": {
+        "maxUsers": 1,
+        "maxAgents": 5,
+        "maxDevices": 3,
+        "cloudSync": true,
+        "vault": false,
+        "prioritySupport": false
+      },
+      "isActive": true
+    },
+    {
+      "id": "plan-team",
+      "tier": "TEAM",
+      "name": "Team Plan",
+      "description": "Collaboration for small teams",
+      "priceMonthly": 99900,
+      "priceMonthlyDisplay": "R999",
+      "priceAnnually": 999900,
+      "priceAnnuallyDisplay": "R9,999",
+      "trialDays": 14,
+      "features": {
+        "maxUsers": 10,
+        "maxAgents": 50,
+        "maxDevices": 20,
+        "cloudSync": true,
+        "vault": true,
+        "prioritySupport": true
+      },
+      "isActive": true
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /subscriptions/current`
+Get the current user's active subscription.
+
+**Authentication:** JWT required
+
+**Response:** `200 OK`
+```json
+{
+  "subscription": {
+    "id": "sub-uuid",
+    "status": "ACTIVE",
+    "currentPeriodStart": "2026-02-01T00:00:00Z",
+    "currentPeriodEnd": "2026-03-01T00:00:00Z",
+    "trialEndsAt": null,
+    "cancelledAt": null,
+    "plan": {
+      "tier": "TEAM",
+      "name": "Team Plan",
+      "priceMonthlyDisplay": "R999"
+    }
+  },
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp"
+  }
+}
+```
+
+**Response when no subscription:** `200 OK`
+```json
+{
+  "subscription": null,
+  "status": "NO_SUBSCRIPTION",
+  "team": {
+    "id": "team-uuid",
+    "name": "ACME Corp"
+  }
+}
+```
+
+---
+
+#### `POST /subscriptions/start-trial`
+Start a free trial subscription.
+
+**Authentication:** JWT required
+
+**Request:**
+```json
+{
+  "tier": "TEAM"
+}
+```
+
+**Response:** `201 Created`
+```json
+{
+  "message": "Trial started successfully",
+  "subscription": {
+    "id": "sub-uuid",
+    "status": "TRIAL",
+    "trialEndsAt": "2026-03-14T00:00:00Z"
+  }
+}
+```
+
+**Errors:**
+- `400` — Team already has an active subscription
+
+---
+
+#### `POST /subscriptions/change-plan`
+Change the subscription plan.
+
+**Authentication:** JWT required (ADMIN role)
+
+**Request:**
+```json
+{
+  "tier": "ENTERPRISE",
+  "billingCycle": "annually"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "message": "Plan changed successfully",
+  "subscription": {
+    "id": "sub-uuid",
+    "status": "ACTIVE",
+    "plan": {
+      "tier": "ENTERPRISE",
+      "name": "Enterprise Plan"
+    }
+  }
+}
+```
+
+**Errors:**
+- `403` — Only team admins can change plans
+
+---
+
+#### `POST /subscriptions/cancel`
+Cancel the current subscription.
+
+**Authentication:** JWT required (ADMIN role)
+
+**Response:** `200 OK`
+```json
+{
+  "message": "Subscription cancelled. Access will continue until end of billing period.",
+  "subscription": {
+    "id": "sub-uuid",
+    "status": "CANCELLED",
+    "cancelledAt": "2026-02-28T14:00:00Z"
+  },
+  "accessEndsAt": "2026-03-01T00:00:00Z"
+}
+```
+
+---
+
+### Credits & Billing
+
+#### `GET /credits/packages`
+Get available credit packages for purchase.
+
+**Authentication:** None required (public endpoint)
+
+**Response:** `200 OK`
+```json
+{
+  "packages": [
+    {
+      "id": "pkg-starter",
+      "name": "Starter Pack",
+      "description": "Perfect for trying out our AI services",
+      "credits": 1000,
+      "bonusCredits": 100,
+      "totalCredits": 1100,
+      "price": 10000,
+      "formattedPrice": "R100.00",
+      "featured": false
+    },
+    {
+      "id": "pkg-pro",
+      "name": "Pro Pack",
+      "description": "Most popular choice",
+      "credits": 10000,
+      "bonusCredits": 2000,
+      "totalCredits": 12000,
+      "price": 90000,
+      "formattedPrice": "R900.00",
+      "featured": true
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /credits/balance`
+Get the team's current credit balance.
+
+**Authentication:** API Key or JWT required
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "balance": {
+    "id": "balance-uuid",
+    "teamId": "team-uuid",
+    "balance": 15000,
+    "totalPurchased": 20000,
+    "totalUsed": 5000,
+    "formattedBalance": "R150.00",
+    "updatedAt": "2026-02-28T14:30:00Z"
+  }
+}
+```
+
+---
+
+#### `GET /credits/transactions`
+Get credit transaction history.
+
+**Authentication:** API Key or JWT required
+
+**Query Parameters:**
+- `limit` (integer, default: 50) — Number of transactions to return
+- `offset` (integer, default: 0) — Pagination offset
+- `type` (string, optional) — Filter by type: `PURCHASE`, `USAGE`, `BONUS`
+- `startDate` (ISO8601, optional) — Filter from date
+- `endDate` (ISO8601, optional) — Filter to date
+
+**Example:**
+```
+GET /credits/transactions?limit=10&type=USAGE&startDate=2026-02-01T00:00:00Z
+```
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "transactions": [
+    {
+      "id": "tx-uuid-1",
+      "type": "USAGE",
+      "amount": -50,
+      "balanceAfter": 14950,
+      "requestType": "TEXT_CHAT",
+      "description": "AI chat request",
+      "formattedAmount": "-50",
+      "formattedBalance": "R149.50",
+      "createdAt": "2026-02-28T14:25:00Z"
+    },
+    {
+      "id": "tx-uuid-2",
+      "type": "PURCHASE",
+      "amount": 10000,
+      "balanceAfter": 15000,
+      "description": "Purchased Starter Pack",
+      "formattedAmount": "+10000",
+      "formattedBalance": "R150.00",
+      "createdAt": "2026-02-28T10:00:00Z"
+    }
+  ],
+  "pagination": {
+    "total": 45,
+    "limit": 10,
+    "offset": 0,
+    "hasMore": true
+  }
+}
+```
+
+---
+
+#### `POST /credits/purchase`
+Purchase a credit package.
+
+**Authentication:** API Key or JWT required
+
+**Request:**
+```json
+{
+  "packageId": "pkg-pro",
+  "paymentMethod": "PAYFAST",
+  "returnUrl": "https://yourapp.com/payment/success",
+  "cancelUrl": "https://yourapp.com/payment/cancel"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "message": "Payment created successfully",
+  "package": {
+    "id": "pkg-pro",
+    "name": "Pro Pack",
+    "credits": 12000,
+    "price": 90000,
+    "formattedPrice": "R900.00"
+  },
+  "paymentUrl": "https://payment.gateway.com/pay/abc123",
+  "paymentId": "payment-uuid"
+}
+```
+
+---
+
+### AI Services
+
+#### `POST /ai/chat`
+Send a chat request to the AI.
+
+**Authentication:** API Key required
+
+**Headers:**
+```
+X-API-Key: sk_live_abc123...
+Content-Type: application/json
+```
+
+**Request:**
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful coding assistant."
+    },
+    {
+      "role": "user",
+      "content": "Write a Python function to calculate Fibonacci numbers."
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "temperature": 0.7,
+  "max_tokens": 500,
+  "provider": "openai"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "content": "Here's a Python function to calculate Fibonacci numbers:\n\n```python\ndef fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n```",
+  "model": "gpt-4o-mini",
+  "usage": {
+    "promptTokens": 45,
+    "completionTokens": 85,
+    "totalTokens": 130
+  }
+}
+```
+
+**Supported Providers:**
+- `openai` — GPT-4, GPT-3.5, etc.
+- `anthropic` — Claude 3 family
+- `gemini` — Google Gemini
+- `groq` — Fast inference
+- `ollama` — Local models
+- `softaware` — Auto-select best model
+
+**Credit Cost:** Variable based on model and tokens used (typically 20-100 credits)
+
+---
+
+#### `POST /ai/simple`
+Simplified AI request with a single prompt.
+
+**Authentication:** API Key required
+
+**Request:**
+```json
+{
+  "prompt": "Explain quantum computing in simple terms",
+  "systemPrompt": "You are a science educator.",
+  "provider": "softaware",
+  "temperature": 0.7
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "content": "Quantum computing is a type of computing that uses quantum mechanics..."
+}
+```
+
+**Credit Cost:** 10-20 credits per request
+
+---
+
+### Team Management
+
+#### `POST /teams/:id/invite`
+Invite a user to join your team.
+
+**Authentication:** JWT required (ADMIN role)
+
+**Request:**
+```json
+{
+  "email": "newmember@example.com",
+  "role": "OPERATOR"
+}
+```
+
+**Roles:**
+- `ADMIN` — Full access
+- `ARCHITECT` — Can configure AI and agents
+- `OPERATOR` — Standard user access
+- `AUDITOR` — Read-only access
+
+**Response:** `201 Created`
+```json
+{
+  "invite": {
+    "id": "invite-uuid",
+    "email": "newmember@example.com",
+    "role": "OPERATOR",
+    "createdAt": "2026-02-28T15:00:00Z"
+  }
+}
+```
+
+---
+
+#### `PUT /teams/:id/members/:userId`
+Update a team member's role.
+
+**Authentication:** JWT required (ADMIN role)
+
+**Request:**
+```json
+{
+  "role": "ARCHITECT"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "member": {
+    "userId": "user-uuid",
+    "teamId": "team-uuid",
+    "role": "ARCHITECT"
+  }
+}
+```
+
+---
+
+#### `DELETE /teams/:id/members/:userId`
+Remove a member from the team.
+
+**Authentication:** JWT required (ADMIN role)
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "message": "Member removed from team"
+}
+```
+
+---
+
+### Admin Operations
+
+Admin endpoints require JWT authentication with ADMIN role.
+
+#### `GET /admin/stats`
+Get platform statistics.
+
+**Response:** `200 OK`
+```json
+{
+  "totalClients": 1547,
+  "activeClients": 892,
+  "totalAgents": 4521,
+  "totalTeams": 1230
+}
+```
+
+---
+
+#### `GET /admin/subscriptions`
+Get all subscriptions (paginated).
+
+**Query Parameters:**
+- `status` (string, optional) — Filter by: `TRIAL`, `ACTIVE`, `PAST_DUE`, `CANCELLED`, `EXPIRED`
+- `tier` (string, optional) — Filter by: `PERSONAL`, `TEAM`, `ENTERPRISE`
+- `limit` (integer, default: 50)
+- `offset` (integer, default: 0)
+
+**Response:** `200 OK`
+```json
+{
+  "subscriptions": [
+    {
+      "id": "sub-uuid",
+      "status": "ACTIVE",
+      "plan": {
+        "tier": "TEAM",
+        "name": "Team Plan"
+      },
+      "team": {
+        "id": "team-uuid",
+        "name": "ACME Corp"
+      },
+      "currentPeriodEnd": "2026-03-01T00:00:00Z",
+      "createdAt": "2026-02-01T00:00:00Z"
+    }
+  ],
+  "total": 1230,
+  "pagination": {
+    "limit": 50,
+    "offset": 0,
+    "hasMore": true
+  }
+}
+```
+
+---
+
+#### `POST /admin/credits/balances/:teamId/adjust`
+Manually adjust a team's credit balance.
+
+**Request:**
+```json
+{
+  "amount": 5000,
+  "description": "Promotional bonus",
+  "type": "BONUS"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "balance": {
+    "id": "balance-uuid",
+    "teamId": "team-uuid",
+    "balance": 20000,
+    "totalPurchased": 15000,
+    "totalUsed": 0
+  }
+}
+```
+
+---
+
+## SDKs & Code Examples
+
+### JavaScript / Node.js
+
+```javascript
+const SoftAware = require('softaware-sdk');
+
+const client = new SoftAware({
+  apiKey: 'sk_live_abc123...',
+  baseUrl: 'https://api.softaware.net.za'
+});
+
+// Get profile
+const profile = await client.profile.get();
+console.log(profile.user.email);
+
+// Get credit balance
+const balance = await client.credits.getBalance();
+console.log(`Credits: ${balance.balance}`);
+
+// Send AI chat request
+const response = await client.ai.chat({
+  messages: [
+    { role: 'user', content: 'Hello, AI!' }
+  ],
+  model: 'gpt-4o-mini'
+});
+console.log(response.content);
+```
+
+### Python
+
+```python
+from softaware import SoftAware
+
+client = SoftAware(api_key='sk_live_abc123...')
+
+# Get profile
+profile = client.profile.get()
+print(profile['user']['email'])
+
+# Get credit balance
+balance = client.credits.get_balance()
+print(f"Credits: {balance['balance']}")
+
+# Send AI chat request
+response = client.ai.chat(
+    messages=[
+        {'role': 'user', 'content': 'Hello, AI!'}
+    ],
+    model='gpt-4o-mini'
+)
+print(response['content'])
+```
+
+### cURL Examples
+
+**Login:**
+```bash
+curl -X POST https://api.softaware.net.za/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"pass123","rememberMe":true}'
+```
+
+**Get Profile:**
+```bash
+curl https://api.softaware.net.za/profile \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Get Credit Balance:**
+```bash
+curl https://api.softaware.net.za/credits/balance \
+  -H "X-API-Key: sk_live_abc123..."
+```
+
+**AI Chat:**
+```bash
+curl -X POST https://api.softaware.net.za/ai/simple \
+  -H "X-API-Key: sk_live_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Explain REST APIs in 3 sentences",
+    "provider": "softaware"
+  }'
+```
+
+### PHP
+
+```php
+<?php
+use SoftAware\Client;
+
+$client = new Client([
+    'api_key' => 'sk_live_abc123...',
+    'base_url' => 'https://api.softaware.net.za'
+]);
+
+// Get profile
+$profile = $client->profile->get();
+echo $profile['user']['email'];
+
+// Get credit balance
+$balance = $client->credits->getBalance();
+echo "Credits: " . $balance['balance'];
+
+// AI chat
+$response = $client->ai->chat([
+    'messages' => [
+        ['role' => 'user', 'content' => 'Hello, AI!']
+    ],
+    'model' => 'gpt-4o-mini'
+]);
+echo $response['content'];
+```
+
+### Ruby
+
+```ruby
+require 'softaware'
+
+client = SoftAware::Client.new(api_key: 'sk_live_abc123...')
+
+# Get profile
+profile = client.profile.get
+puts profile.user.email
+
+# Get credit balance
+balance = client.credits.get_balance
+puts "Credits: #{balance.balance}"
+
+# AI chat
+response = client.ai.chat(
+  messages: [
+    { role: 'user', content: 'Hello, AI!' }
+  ],
+  model: 'gpt-4o-mini'
+)
+puts response.content
+```
+
+---
+
+## Webhooks
+
+Receive real-time notifications when events occur in your account.
+
+### Supported Events
+
+| Event | Description |
+|-------|-------------|
+| `subscription.created` | New subscription started |
+| `subscription.updated` | Subscription plan changed |
+| `subscription.cancelled` | Subscription cancelled |
+| `payment.completed` | Payment successfully processed |
+| `payment.failed` | Payment failed |
+| `credits.purchased` | Credits added to account |
+| `credits.low_balance` | Credit balance below threshold |
+| `team.member_added` | New team member joined |
+| `team.member_removed` | Team member removed |
+
+### Webhook Configuration
+
+Configure webhooks via the dashboard or API:
+
+```bash
+curl -X POST https://api.softaware.net.za/webhooks \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://yourapp.com/webhooks/softaware",
+    "events": ["payment.completed", "credits.purchased"],
+    "secret": "whsec_abc123..."
+  }'
+```
+
+### Webhook Payload
+
+```json
+{
+  "id": "evt_abc123",
+  "type": "payment.completed",
+  "created": "2026-02-28T15:30:00Z",
+  "data": {
+    "object": "payment",
+    "id": "pay_xyz789",
+    "amount": 90000,
+    "currency": "ZAR",
+    "status": "completed",
+    "teamId": "team-uuid"
+  }
+}
+```
+
+### Webhook Signature Verification
+
+```javascript
+const crypto = require('crypto');
+
+function verifyWebhook(payload, signature, secret) {
+  const hmac = crypto.createHmac('sha256', secret);
+  const digest = hmac.update(payload).digest('hex');
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(digest)
+  );
+}
+
+// Express.js example
+app.post('/webhooks/softaware', (req, res) => {
+  const signature = req.headers['x-softaware-signature'];
+  const isValid = verifyWebhook(
+    JSON.stringify(req.body),
+    signature,
+    'whsec_abc123...'
+  );
+  
+  if (!isValid) {
+    return res.status(401).send('Invalid signature');
+  }
+  
+  // Process webhook
+  const event = req.body;
+  console.log(`Received ${event.type}`);
+  
+  res.status(200).send('OK');
+});
+```
+
+---
+
+## Rate Limits & Quotas
+
+### Rate Limits
+
+| Endpoint Category | Limit | Window |
+|-------------------|-------|--------|
+| Authentication | 10 requests | 1 minute |
+| Profile/User | 100 requests | 1 minute |
+| AI Services | Credit-based | N/A |
+| Admin | 1000 requests | 1 minute |
+| Webhooks (outbound) | N/A | N/A |
+
+**Rate Limit Headers:**
+```
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 95
+X-RateLimit-Reset: 1709134800
+```
+
+**Rate Limit Exceeded Response:**
+```json
+{
+  "error": "RATE_LIMITED",
+  "message": "Too many requests. Please try again later.",
+  "retryAfterSeconds": 60
+}
+```
+
+### Credit Costs
+
+| Operation | Cost (credits) |
+|-----------|----------------|
+| Simple AI prompt | 10 |
+| AI chat (with history) | 20 |
+| Code generation | 50 |
+| File operation | 5 |
+| MCP tool call | 15 |
+
+Credits are deducted in real-time. When balance reaches zero, AI requests will fail with:
+
+```json
+{
+  "error": "INSUFFICIENT_CREDITS",
+  "message": "Your credit balance is insufficient. Please purchase more credits.",
+  "balance": 0
+}
+```
+
+---
+
+## Error Handling
+
+### Standard Error Format
+
+All errors follow this structure:
+
+```json
+{
+  "error": "ERROR_CODE",
+  "message": "Human-readable error description"
+}
+```
+
+### HTTP Status Codes
+
+| Status | Meaning | Description |
+|--------|---------|-------------|
+| `200` | OK | Request succeeded |
+| `201` | Created | Resource created successfully |
+| `400` | Bad Request | Invalid request parameters |
+| `401` | Unauthorized | Missing or invalid authentication |
+| `403` | Forbidden | Insufficient permissions |
+| `404` | Not Found | Resource doesn't exist |
+| `429` | Too Many Requests | Rate limit exceeded |
+| `500` | Internal Server Error | Server error |
+| `502` | Bad Gateway | Upstream service unavailable |
+
+### Common Error Codes
+
+| Code | Status | Description |
+|------|--------|-------------|
+| `INVALID_REQUEST` | 400 | Request validation failed |
+| `UNAUTHORIZED` | 401 | Authentication required |
+| `INVALID_TOKEN` | 401 | JWT token expired or invalid |
+| `INVALID_API_KEY` | 401 | API key not found or inactive |
+| `FORBIDDEN` | 403 | Insufficient permissions |
+| `NOT_FOUND` | 404 | Resource not found |
+| `RATE_LIMITED` | 429 | Too many requests |
+| `INSUFFICIENT_CREDITS` | 402 | Not enough credits |
+| `ASSISTANT_UNAVAILABLE` | 502 | AI service unavailable |
+| `INTERNAL_ERROR` | 500 | Server error |
+
+### Error Handling Best Practices
+
+```javascript
+async function makeRequest() {
+  try {
+    const response = await fetch('https://api.softaware.net.za/profile', {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      
+      switch (error.error) {
+        case 'UNAUTHORIZED':
+          // Redirect to login
+          window.location.href = '/login';
+          break;
+        case 'RATE_LIMITED':
+          // Wait and retry
+          await sleep(error.retryAfterSeconds * 1000);
+          return makeRequest();
+        case 'INSUFFICIENT_CREDITS':
+          // Prompt user to purchase credits
+          showCreditPurchaseModal();
+          break;
+        default:
+          // Show generic error
+          showError(error.message);
+      }
+      throw new Error(error.message);
+    }
+    
+    return await response.json();
+  } catch (err) {
+    console.error('API request failed:', err);
+    throw err;
+  }
+}
+```
+
+---
+
+## Updates System
+
+The Updates system manages software product registrations, update distribution, client heartbeat tracking, module management, and remote control. All endpoints are prefixed with `/updates/`.
+
+### System Overview
+
+The Updates API supports:
+- **Software Registry** — Track multiple software products with unique keys
+- **Update Distribution** — Upload, manage, and distribute versioned update packages
+- **Client Heartbeats** — Monitor connected client installations in real-time
+- **Remote Control** — Force logout, send messages to connected clients
+- **Module Management** — Track software modules and developer assignments
+- **Password Reset** — OTP-based email password recovery
+
+---
+
+### Updates Info
+
+```
+GET /updates/info
+```
+
+Public. Returns API metadata and endpoint directory.
+
+**Response:**
+```json
+{
+  "name": "Softaware Updates API",
+  "version": "2.0.0",
+  "status": "API is running",
+  "endpoints": { ... }
+}
+```
+
+---
+
+### Updates Dashboard
+
+```
+GET /updates/dashboard
+```
+
+🔒 **Authenticated.** Returns summary statistics for the admin panel.
+
+**Response:**
+```json
+{
+  "success": true,
+  "summary": {
+    "software_count": 7,
+    "update_count": 3,
+    "user_count": 11,
+    "active_clients_24h": 4
+  },
+  "latest_clients": [ ... ],
+  "recent_updates": [ ... ]
+}
+```
+
+---
+
+### Software Products
+
+```
+GET    /updates/software          — Public: list all
+GET    /updates/software?id=N     — Public: single
+POST   /updates/software          — Admin: create
+PUT    /updates/software          — Admin: update
+DELETE /updates/software?id=N     — Admin: delete (cascades)
+```
+
+#### List Software
+
+```bash
+curl https://api.softaware.net.za/updates/software
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "software": [
+    {
+      "id": 2,
+      "name": "Silulumanzi Portal",
+      "software_key": "20251001SILU",
+      "created_by_name": "admin",
+      "latest_version": "2.1.14",
+      "total_updates": 1,
+      "has_external_integration": 0
+    }
+  ]
+}
+```
+
+#### Create Software (Admin)
+
+```bash
+curl -X POST https://api.softaware.net.za/updates/software \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "My App",
+    "software_key": "my-unique-key",
+    "description": "Description"
+  }'
+```
+
+---
+
+### Update Packages
+
+```
+GET    /updates/updates             — Public: list all
+GET    /updates/updates?id=N        — Public: single
+GET    /updates/updates?limit=N     — Public: limit results
+POST   /updates/updates             — Admin: create record
+PUT    /updates/updates             — Admin: modify
+DELETE /updates/updates?id=N        — Admin: delete + file
+```
+
+#### List Updates
+
+```bash
+curl https://api.softaware.net.za/updates/updates?limit=5
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "updates": [
+    {
+      "id": 64,
+      "software_id": 2,
+      "software_name": "Silulumanzi Portal",
+      "version": "2.1.14",
+      "description": "Release notes...",
+      "file_path": "uploads/updates/2.1.14_file.zip",
+      "uploaded_by_name": "admin",
+      "has_migrations": 0
+    }
+  ]
+}
+```
+
+---
+
+### Upload Update Package
+
+```
+POST /updates/upload
+```
+
+🔑 **API Key Required** (`X-API-Key` header). Multipart/form-data.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `updatePackage` | File | Yes | The update archive file |
+| `software_id` | Number | Yes | Target software ID |
+| `version` | String | Yes | Version string |
+| `description` | String | Yes | Release notes |
+| `has_migrations` | Number | No | `1` or `0` |
+| `migration_notes` | String | No | Migration instructions |
+| `update_id` | Number | No | Existing update ID (replace) |
+
+```bash
+curl -X POST https://api.softaware.net.za/updates/upload \
+  -H "X-API-Key: <api-key>" \
+  -F "updatePackage=@./myapp-2.0.zip" \
+  -F "software_id=2" \
+  -F "version=2.0.0" \
+  -F "description=New release"
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "update_id": 65,
+  "file_path": "uploads/updates/2.0.0_1709123456_myapp-2.0.zip",
+  "checksum": "sha256..."
+}
+```
+
+---
+
+### Download Update
+
+```
+GET /updates/download?update_id=N
+```
+
+Public (requires `X-Software-Key` header or `?software_key=` param). Returns the file as `application/octet-stream`.
+
+```bash
+curl -H "X-Software-Key: 20251001SILU" \
+  https://api.softaware.net.za/updates/download?update_id=64 \
+  -o update.zip
+```
+
+---
+
+### Client Heartbeat
+
+```
+POST /updates/heartbeat
+```
+
+Public (requires `software_key`). Client apps call this periodically to:
+1. Register or update their presence
+2. Check for available updates
+3. Receive remote control commands
+
+**Request:**
+```json
+{
+  "software_key": "20251001SILU",
+  "hostname": "WORKSTATION-01",
+  "machine_name": "WIN-PC01",
+  "os_info": "Windows 11 Pro",
+  "app_version": "2.1.0",
+  "user_name": "John Doe",
+  "active_page": "/dashboard",
+  "ai_sessions_active": 2,
+  "ai_model": "gpt-4"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "client_id": 15,
+  "action": "updated",
+  "software": "Silulumanzi Portal",
+  "update_available": true,
+  "latest_update": {
+    "id": 64,
+    "version": "2.1.14",
+    "description": "...",
+    "has_migrations": 0
+  },
+  "force_logout": false,
+  "server_message": null,
+  "is_blocked": false
+}
+```
+
+**Blocked clients** receive `403` with `{ "blocked": true, "reason": "..." }`.
+
+**One-shot commands** (`force_logout`, `server_message`) are delivered once and then cleared.
+
+---
+
+### Client Management (Admin)
+
+```
+GET    /updates/clients              — Admin: list all
+GET    /updates/clients?id=N         — Admin: single client
+GET    /updates/clients?software_id= — Admin: filter by software
+PUT    /updates/clients              — Admin: actions
+DELETE /updates/clients?id=N         — Admin: delete client
+```
+
+🔒🛡️ **Admin only.**
+
+#### Client Status
+
+Computed from heartbeat recency:
+
+| Status | Condition |
+|--------|----------|
+| `online` | < 5 minutes ago |
+| `recent` | < 24 hours ago |
+| `inactive` | < 7 days ago |
+| `offline` | ≥ 7 days ago |
+
+#### Client Actions (PUT)
+
+```json
+{ "id": 15, "action": "block", "reason": "Unauthorized" }
+{ "id": 15, "action": "unblock" }
+{ "id": 15, "action": "force_logout" }
+{ "id": 15, "action": "send_message", "message": "Please update" }
+```
+
+---
+
+### Modules
+
+```
+GET    /updates/modules                          — Authenticated: list
+GET    /updates/modules?software_id=N            — Authenticated: filter
+POST   /updates/modules                          — Admin: create
+PUT    /updates/modules?id=N                     — Admin: update
+DELETE /updates/modules?id=N                     — Admin: delete
+```
+
+🔒 **Authenticated** (read). 🛡️ **Admin** (write).
+
+**Response:**
+```json
+{
+  "success": true,
+  "modules": [
+    {
+      "id": 18,
+      "software_id": 2,
+      "name": "Authentication System",
+      "software_name": "Silulumanzi Portal",
+      "developer_count": 2
+    }
+  ]
+}
+```
+
+#### Module Developers
+
+```
+GET    /updates/modules/:id/developers           — Authenticated: list
+POST   /updates/modules/:id/developers           — Admin: assign
+DELETE /updates/modules/:id/developers?user_id=  — Admin: remove
+```
+
+---
+
+### Installed Updates
+
+```
+GET /updates/installed
+```
+
+Public. Returns updates that have been marked as installed.
+
+---
+
+### Update Schema
+
+```
+GET /updates/schema?id=N
+```
+
+Public. Returns the SQL schema file content for a specific update.
+
+---
+
+### Password Reset (Updates)
+
+```
+POST /updates/password_reset    — Request OTP
+POST /updates/verify_otp        — Verify OTP
+POST /updates/reset_password    — Execute reset
+```
+
+All public. Three-step flow:
+
+**Step 1 — Request OTP:**
+```bash
+curl -X POST https://api.softaware.net.za/updates/password_reset \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": "admin@softaware.co.za"}'
+```
+```json
+{ "success": true, "message": "If the account exists, a reset code has been sent." }
+```
+
+**Step 2 — Verify OTP:**
+```bash
+curl -X POST https://api.softaware.net.za/updates/verify_otp \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": "admin@softaware.co.za", "otp": "123456"}'
+```
+
+**Step 3 — Reset Password:**
+```bash
+curl -X POST https://api.softaware.net.za/updates/reset_password \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": "admin@softaware.co.za", "otp": "123456", "new_password": "newSecurePass"}'
+```
+
+---
+
+### API Status
+
+```
+GET /updates/api_status
+```
+
+Public. Returns system health including database connectivity and table row counts.
+
+```json
+{
+  "timestamp": "2026-02-28T14:00:00.000Z",
+  "api_version": "2.0.0",
+  "status": "operational",
+  "database": {
+    "connected": true,
+    "total_users": 11,
+    "tables": { "clients": 20, "software": 7, "updates": 3, "modules": 83 }
+  }
+}
+```
+
+---
+
+## Security Best Practices
+
+### 1. API Key Security
+
+✅ **DO:**
+- Store API keys in environment variables
+- Use different keys for dev/staging/production
+- Rotate keys regularly (every 90 days)
+- Revoke compromised keys immediately
+- Use server-side code only (never expose in client-side JavaScript)
+
+❌ **DON'T:**
+- Commit keys to version control
+- Share keys via email or chat
+- Use production keys in development
+- Expose keys in mobile apps
+
+### 2. JWT Token Security
+
+✅ **DO:**
+- Store tokens securely (Keychain/Encrypted storage on mobile)
+- Use HTTPS for all requests
+- Implement token refresh before expiry
+- Clear tokens on logout
+
+❌ **DON'T:**
+- Store tokens in localStorage (XSS risk)
+- Share tokens between users
+- Log tokens in console or files
+
+### 3. HTTPS Only
+
+Always use `https://api.softaware.net.za` in production. HTTP requests will be rejected.
+
+### 4. Webhook Signature Verification
+
+Always verify webhook signatures to prevent spoofing:
+
+```python
+import hmac
+import hashlib
+
+def verify_webhook(payload, signature, secret):
+    expected = hmac.new(
+        secret.encode(),
+        payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+```
+
+### 5. Rate Limit Handling
+
+Implement exponential backoff for rate-limited requests:
+
+```javascript
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    const response = await fetch(url, options);
+    
+    if (response.status !== 429) {
+      return response;
+    }
+    
+    const retryAfter = response.headers.get('Retry-After') || Math.pow(2, i);
+    await sleep(retryAfter * 1000);
+  }
+  throw new Error('Max retries exceeded');
+}
+```
+
+### 6. Input Validation
+
+Always validate and sanitize user input before sending to the API:
+
+```javascript
+function validateEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+}
+
+function sanitizeInput(input) {
+  return input.trim().slice(0, 500); // Limit length
+}
+```
+
+---
+
+## Changelog
+
+### Version 2.0 (February 2026)
+
+**Updates System Absorbed:**
+- ✨ Full software registry management (`/updates/software` CRUD)
+- ✨ Update package distribution (`/updates/updates` CRUD + file upload/download)
+- ✨ Client heartbeat tracking with real-time status (`/updates/heartbeat`)
+- ✨ Remote control: force logout, server messages, client blocking (`/updates/clients`)
+- ✨ Module management with developer assignments (`/updates/modules`)
+- ✨ OTP-based password reset flow (`/updates/password_reset`, `/verify_otp`, `/reset_password`)
+- ✨ Dashboard analytics and API status endpoints
+- 🔄 Migrated all software, latest updates, clients, modules, and developer assignments from legacy PHP system
+- 🔒 JWT authentication replaces Base64 Bearer tokens from old system
+- 📁 Update files preserved and accessible via new endpoints
+
+### Version 1.0 (February 2026)
+
+**New Features:**
+- ✨ Profile self-service endpoints (`/profile`, `/profile/team`, `/profile/invoices`)
+- ✨ `rememberMe` flag for 30-day JWT tokens (mobile support)
+- ✨ User profile fields: `name`, `phone`, `avatarUrl`
+- ✨ Enhanced login response with team info
+- ✨ Lead assistant endpoint (`/public/leads/assistant`)
+- ✨ IP-based rate limiting for public endpoints
+
+**Improvements:**
+- 🔒 Enhanced security with webhook signature verification
+- 📝 Comprehensive API documentation with SDK examples
+- 🌍 Full CORS support for browser clients
+
+**Breaking Changes:**
+- None (initial release)
+
+---
+
+## Support
+
+### Documentation & Resources
+
+- **API Documentation:** [https://api.softaware.net.za/docs](https://api.softaware.net.za/docs)
+- **Status Page:** [https://status.softaware.net.za](https://status.softaware.net.za)
+- **GitHub:** [https://github.com/softaware](https://github.com/softaware)
+
+### Getting Help
+
+- **Email:** [developers@softaware.net.za](mailto:developers@softaware.net.za)
+- **Discord:** [https://discord.gg/softaware](https://discord.gg/softaware)
+- **Twitter:** [@softaware_dev](https://twitter.com/softaware_dev)
+
+### SLA & Uptime
+
+- **Uptime Target:** 99.9%
+- **Response Time:** < 200ms (p95)
+- **Support Response:** < 24 hours
+
+### Reporting Issues
+
+Found a bug or security issue? Please email [security@softaware.net.za](mailto:security@softaware.net.za) with:
+
+1. Description of the issue
+2. Steps to reproduce
+3. Expected vs actual behavior
+4. API request/response logs (redact sensitive data)
+
+---
+
+**© 2026 Soft Aware. All rights reserved.**
+
+*This documentation is versioned and maintained. Last updated: February 28, 2026*
