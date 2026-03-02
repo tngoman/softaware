@@ -1,0 +1,8 @@
+# Only track frontend and backend
+api/
+desktop/
+html/
+ui/
+mcp.softaware.net.za/
+softaware.net.za/
+updates.softaware.co.za/
