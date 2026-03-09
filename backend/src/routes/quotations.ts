@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { db } from '../db/mysql.js';
+import { db, toMySQLDate } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 import type { Quotation, QuoteItem } from '../db/businessTypes.js';
@@ -9,13 +9,33 @@ import { generatePdf, loadCompanySettings, type PDFDocData } from '../utils/pdfG
 export const quotationsRouter = Router();
 
 const createQuotationSchema = z.object({
-  quotation_number: z.string().min(1),
-  contact_id: z.number().int().positive(),
-  quotation_amount: z.number().positive(),
-  quotation_date: z.string().date(),
+  quotation_number: z.string().min(1).optional(),
+  quotation_contact_id: z.number().int().positive().optional(),
+  contact_id: z.number().int().positive().optional(),
+  quotation_amount: z.number().optional(),
+  quotation_total: z.number().optional(),
+  quotation_subtotal: z.number().optional(),
+  quotation_vat: z.number().optional(),
+  quotation_discount: z.number().optional(),
+  quotation_date: z.string().optional(),
+  quotation_valid_until: z.string().optional(),
+  quotation_status: z.number().optional(),
+  quotation_notes: z.string().optional(),
   quotation_user_id: z.string().uuid().optional(),
   remarks: z.string().optional(),
   active: z.number().default(1),
+  items: z.array(z.object({
+    item_product: z.string().optional(),
+    item_description: z.string().optional(),
+    item_qty: z.number().optional(),
+    item_quantity: z.number().optional(),
+    item_price: z.number().optional(),
+    item_cost: z.number().optional(),
+    item_discount: z.number().optional(),
+    item_subtotal: z.number().optional(),
+    item_vat: z.number().optional(),
+    item_profit: z.number().optional(),
+  })).optional(),
 });
 
 const createQuoteItemSchema = z.object({
@@ -25,7 +45,7 @@ const createQuoteItemSchema = z.object({
   item_discount: z.number().nonnegative().default(0),
 });
 
-const updateQuotationSchema = createQuotationSchema.omit({ quotation_number: true }).partial();
+const updateQuotationSchema = createQuotationSchema.partial();
 
 // ── SQL fragment that aliases quotation columns to match the frontend Quotation interface ──
 const QUOTATION_SELECT = `
@@ -45,37 +65,64 @@ const QUOTATION_SELECT = `
   UNIX_TIMESTAMP(q.updated_at)  AS quotation_updated,
   c.company_name  AS contact_name,
   c.email         AS contact_email,
-  c.phone         AS contact_phone
+  c.phone         AS contact_phone,
+  c.vat_number    AS contact_vat,
+  c.location      AS contact_address
 `;
 
 /**
- * GET /quotations - List all quotations
+ * GET /quotations - List all quotations with search
  */
 quotationsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
+    // Frontend sends 0-based page, convert to 1-based for offset calculation
+    const page = parseInt(req.query.page as string) >= 0 ? parseInt(req.query.page as string) + 1 : 1;
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = (page - 1) * limit;
+    const search = (req.query.search as string) || '';
+    const sortBy = (req.query.sortBy as string) || 'quotation_id';
+    const sortOrder = (req.query.sortOrder as string) || 'desc';
 
-    const quotations = await db.query<any>(
-      `SELECT ${QUOTATION_SELECT}
+    // Map frontend column names to database columns
+    const sortColumnMap: Record<string, string> = {
+      'quotation_id': 'q.id',
+      'quotation_date': 'q.quotation_date',
+      'contact_name': 'c.company_name',
+      'quotation_total': 'q.quotation_amount',
+      'quotation_status': 'q.active'
+    };
+
+    const sortColumn = sortColumnMap[sortBy] || 'q.id';
+    const sortDirection = sortOrder.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    let query = `SELECT ${QUOTATION_SELECT}
        FROM quotations q
        LEFT JOIN contacts c ON c.id = q.contact_id
-       WHERE q.active = 1
-       ORDER BY q.quotation_date DESC
-       LIMIT ? OFFSET ?`,
-      [limit, offset]
-    );
+       WHERE q.active = 1`;
+    let countQuery = 'SELECT COUNT(*) as count FROM quotations q LEFT JOIN contacts c ON c.id = q.contact_id WHERE q.active = 1';
+    const params: any[] = [];
+    const countParams: any[] = [];
 
-    const countResult = await db.queryOne<any>(
-      'SELECT COUNT(*) as count FROM quotations WHERE active = 1'
-    );
+    if (search) {
+      const searchClause = ' AND (q.quotation_number LIKE ? OR c.company_name LIKE ? OR q.remarks LIKE ?)';
+      const searchVal = `%${search}%`;
+      query += searchClause;
+      countQuery += searchClause;
+      params.push(searchVal, searchVal, searchVal);
+      countParams.push(searchVal, searchVal, searchVal);
+    }
+
+    query += ` ORDER BY ${sortColumn} ${sortDirection} LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+
+    const quotations = await db.query<any>(query, params);
+    const countResult = await db.queryOne<any>(countQuery, countParams);
 
     res.json({
       success: true,
       data: quotations,
       pagination: {
-        page,
+        page: page - 1, // Return 0-based page to match frontend
         limit,
         total: countResult?.count || 0,
       },
@@ -130,23 +177,78 @@ quotationsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, 
   try {
     const data = createQuotationSchema.parse(req.body);
 
+    const contactId = data.quotation_contact_id || data.contact_id;
+    if (!contactId) {
+      throw badRequest('Contact ID is required');
+    }
+
     // Verify contact exists
-    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [data.contact_id]);
+    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [contactId]);
     if (!contact) {
       throw badRequest('Contact not found');
     }
 
-    // Check if quotation number is unique
-    const existing = await db.queryOne('SELECT id FROM quotations WHERE quotation_number = ?', [data.quotation_number]);
-    if (existing) {
-      throw badRequest('Quotation number already exists');
+    // Auto-generate quotation number if not provided
+    let quotationNumber = data.quotation_number;
+    if (!quotationNumber) {
+      // Get the last quotation number (not just the max ID)
+      const lastQuote = await db.queryOne<any>(
+        'SELECT quotation_number FROM quotations WHERE quotation_number LIKE "QUO-%" ORDER BY id DESC LIMIT 1'
+      );
+      
+      let nextNumber = 1;
+      if (lastQuote?.quotation_number) {
+        // Extract number from "QUO-00123" format
+        const match = lastQuote.quotation_number.match(/QUO-(\d+)/);
+        if (match) {
+          nextNumber = parseInt(match[1], 10) + 1;
+        }
+      }
+      
+      quotationNumber = `QUO-${String(nextNumber).padStart(5, '0')}`;
     }
 
+    // Check if quotation number is unique
+    const existing = await db.queryOne('SELECT id FROM quotations WHERE quotation_number = ?', [quotationNumber]);
+    if (existing) {
+      // Append timestamp to make unique
+      quotationNumber = `${quotationNumber}-${Date.now()}`;
+    }
+
+    const totalAmount = data.quotation_total || data.quotation_amount || data.quotation_subtotal || 0;
+
     const insertId = await db.insertOne('quotations', {
-      ...data,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      quotation_number: quotationNumber,
+      contact_id: contactId,
+      quotation_amount: totalAmount,
+      quotation_date: data.quotation_date || new Date().toISOString().split('T')[0],
+      quotation_user_id: req.userId,
+      remarks: data.quotation_notes || data.remarks || null,
+      active: data.quotation_status !== undefined ? data.quotation_status : 1,
+      created_at: toMySQLDate(new Date()),
+      updated_at: toMySQLDate(new Date()),
     });
+
+    // Insert line items if provided
+    if (data.items && data.items.length > 0) {
+      for (const item of data.items) {
+        const desc = item.item_product || item.item_description || '';
+        if (!desc) continue; // Skip empty items
+        const qty = item.item_qty || item.item_quantity || 1;
+        const price = item.item_price || 0;
+        const discount = item.item_discount || 0;
+
+        await db.insertOne('quote_items', {
+          quotation_id: insertId,
+          item_description: desc,
+          item_price: price,
+          item_quantity: qty,
+          item_discount: discount,
+          created_at: toMySQLDate(new Date()),
+          updated_at: toMySQLDate(new Date()),
+        });
+      }
+    }
 
     const quotation = await db.queryOne<any>(
       `SELECT ${QUOTATION_SELECT}
@@ -156,7 +258,7 @@ quotationsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, 
       [insertId]
     );
 
-    res.status(201).json({ success: true, data: quotation });
+    res.status(201).json({ success: true, id: parseInt(insertId), data: quotation });
   } catch (err) {
     next(err);
   }
@@ -171,18 +273,49 @@ quotationsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response
     const data = updateQuotationSchema.parse(req.body);
 
     const quotation = await db.queryOne<any>(
-      `SELECT ${QUOTATION_SELECT}
-       FROM quotations q
-       LEFT JOIN contacts c ON c.id = q.contact_id
-       WHERE q.id = ?`,
+      'SELECT id FROM quotations WHERE id = ?',
       [id]
     );
     if (!quotation) {
       throw notFound('Quotation not found');
     }
 
-    const updateData = { ...data, updated_at: new Date().toISOString() };
-    await db.execute('UPDATE quotations SET ? WHERE id = ?', [updateData, id]);
+    const contactId = data.quotation_contact_id || data.contact_id;
+    const totalAmount = data.quotation_total || data.quotation_amount || data.quotation_subtotal;
+
+    const updateData: any = { updated_at: toMySQLDate(new Date()) };
+    if (contactId) updateData.contact_id = contactId;
+    if (totalAmount !== undefined) updateData.quotation_amount = totalAmount;
+    if (data.quotation_date) updateData.quotation_date = data.quotation_date;
+    if (data.quotation_notes !== undefined || data.remarks !== undefined) updateData.remarks = data.quotation_notes || data.remarks || null;
+    if (data.quotation_status !== undefined) updateData.active = data.quotation_status;
+
+    await db.execute(
+      `UPDATE quotations SET ${Object.keys(updateData).map(k => `${k} = ?`).join(', ')} WHERE id = ?`,
+      [...Object.values(updateData), id]
+    );
+
+    // Replace line items if provided
+    if (data.items && data.items.length > 0) {
+      await db.execute('DELETE FROM quote_items WHERE quotation_id = ?', [id]);
+      for (const item of data.items) {
+        const desc = item.item_product || item.item_description || '';
+        if (!desc) continue;
+        const qty = item.item_qty || item.item_quantity || 1;
+        const price = item.item_price || 0;
+        const discount = item.item_discount || 0;
+
+        await db.insertOne('quote_items', {
+          quotation_id: id,
+          item_description: desc,
+          item_price: price,
+          item_quantity: qty,
+          item_discount: discount,
+          created_at: toMySQLDate(new Date()),
+          updated_at: toMySQLDate(new Date()),
+        });
+      }
+    }
 
     const updated = await db.queryOne<any>(
       `SELECT ${QUOTATION_SELECT}
@@ -212,7 +345,7 @@ quotationsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Respo
 
     await db.execute(
       'UPDATE quotations SET active = 0, updated_at = ? WHERE id = ?',
-      [new Date().toISOString(), id]
+      [toMySQLDate(new Date()), id]
     );
 
     res.json({ success: true, message: 'Quotation deleted' });
@@ -237,8 +370,8 @@ quotationsRouter.post('/:id/items', requireAuth, async (req: AuthRequest, res: R
     const insertId = await db.insertOne('quote_items', {
       quotation_id: id,
       ...itemData,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: toMySQLDate(new Date()),
+      updated_at: toMySQLDate(new Date()),
     });
 
     const item = await db.queryOne<QuoteItem>(
@@ -314,6 +447,8 @@ quotationsRouter.post('/:id/generate-pdf', requireAuth, async (req: AuthRequest,
       total: Number(quotation.quotation_total) || 0,
       contact: {
         name: quotation.contact_name || '',
+        vat: quotation.contact_vat || '',
+        address: quotation.contact_address || '',
         phone: quotation.contact_phone || '',
       },
       items: items.map((it: any) => ({
@@ -418,8 +553,8 @@ quotationsRouter.post('/:id/convert-to-invoice', requireAuth, async (req: AuthRe
         due_date,
         invoice_user_id: req.userId,
         active: 1,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: toMySQLDate(new Date()),
+        updated_at: toMySQLDate(new Date()),
       });
 
       // Copy quote items to invoice items
@@ -430,8 +565,8 @@ quotationsRouter.post('/:id/convert-to-invoice', requireAuth, async (req: AuthRe
           item_price: item.item_price,
           item_quantity: item.item_quantity,
           item_discount: item.item_discount,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: toMySQLDate(new Date()),
+          updated_at: toMySQLDate(new Date()),
         });
       }
 

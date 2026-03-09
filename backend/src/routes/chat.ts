@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { createHash } from 'crypto';
 import { readFileSync } from 'node:fs';
 import { env } from '../config/env.js';
+import { getSecret } from '../services/credentialVault.js';
 import { requireApiKey } from '../middleware/apiKey.js';
 import dns from 'node:dns';
 
@@ -270,11 +271,11 @@ async function openRouterChatWithTools(
   tools: any[],
   systemPrompt: string,
 ): Promise<{ text: string; toolCalls: Array<{ name: string; input: any; id: string }> }> {
-  const apiKey = (env as any).OPENROUTER_API_KEY;
-  const baseUrl = (env as any).OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-  const model = (env as any).OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+  const apiKey = await getSecret('OPENROUTER');
+  const baseUrl = env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+  const model = env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
 
-  if (!apiKey) throw Object.assign(new Error('OpenRouter API key not configured'), { status: 500 });
+  if (!apiKey) throw Object.assign(new Error('OpenRouter API key not found in credential vault'), { status: 500 });
 
   const openAiMessages: any[] = [{ role: 'system', content: systemPrompt }, ...messages];
 

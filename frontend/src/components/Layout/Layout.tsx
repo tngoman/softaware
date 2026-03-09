@@ -24,6 +24,16 @@ import {
   ArrowPathIcon,
   ChatBubbleLeftRightIcon,
   CircleStackIcon,
+  SparklesIcon,
+  SignalIcon,
+  GlobeAltIcon,
+  CpuChipIcon,
+  ArrowUturnLeftIcon,
+  EyeIcon,
+  FlagIcon,
+  EnvelopeIcon,
+  BugAntIcon,
+  CalendarIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { AuthModel } from '../../models';
@@ -32,6 +42,7 @@ import Can from '../Can';
 import { getApiBaseUrl, getAssetUrl } from '../../config/app';
 import NotificationDropdown from '../Notifications/NotificationDropdown';
 import UserAccountMenu from '../User/UserAccountMenu';
+import GlobalCallProvider from '../CallProvider/GlobalCallProvider';
 
 interface LayoutProps {
   children: ReactNode;
@@ -62,9 +73,41 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
       { name: 'Tasks', href: '/tasks', icon: ClipboardDocumentCheckIcon },
-      { name: 'Software', href: '/software', icon: CubeIcon },
-      { name: 'Updates', href: '/updates', icon: ArrowPathIcon },
       { name: 'Groups', href: '/groups', icon: ChatBubbleLeftRightIcon },
+      { name: 'Chat', href: '/chat', icon: ChatBubbleLeftRightIcon },
+      { name: 'Webmail', href: '/admin/webmail', icon: EnvelopeIcon },
+      { name: 'Planning', href: '/planning', icon: CalendarIcon },
+    ],
+  },
+  {
+    label: 'AI & Enterprise',
+    defaultOpen: false,
+    color: 'purple',
+    anyPermission: ['settings.view'],
+    items: [
+      { name: 'AI Overview', href: '/admin/ai', icon: SparklesIcon, permission: 'settings.view' },
+      { name: 'Client Manager', href: '/admin/clients', icon: UsersIcon, permission: 'settings.view' },
+      { name: 'Enterprise Endpoints', href: '/admin/enterprise', icon: SignalIcon, permission: 'settings.view' },
+      { name: 'AI Credits', href: '/admin/credits', icon: CurrencyDollarIcon, permission: 'settings.view' },
+    ],
+  },
+  {
+    label: 'Case Management',
+    defaultOpen: false,
+    color: 'red',
+    items: [
+      { name: 'Dashboard', href: '/cases/dashboard', icon: ChartBarIcon },
+      { name: 'My Cases', href: '/cases', icon: FlagIcon },
+      { name: 'All Cases', href: '/admin/cases', icon: FlagIcon, permission: 'settings.view' },
+    ],
+  },
+  {
+    label: 'Catalog',
+    defaultOpen: false,
+    anyPermission: ['pricing.view', 'categories.view'],
+    items: [
+      { name: 'Pricing', href: '/pricing', icon: ArchiveBoxIcon, permission: 'pricing.view' },
+      { name: 'Categories', href: '/categories', icon: TagIcon, permission: 'categories.view' },
     ],
   },
   {
@@ -88,15 +131,6 @@ const navSections: NavSection[] = [
       { name: 'Profit & Loss', href: '/reports/profit-loss', icon: ChartBarIcon, permission: 'reports.view' },
       { name: 'Transaction Listing', href: '/reports/transaction-listing', icon: DocumentTextIcon, permission: 'reports.view' },
       { name: 'VAT Reports', href: '/vat-reports', icon: PresentationChartLineIcon, permission: 'reports.view' },
-    ],
-  },
-  {
-    label: 'Catalog',
-    defaultOpen: false,
-    anyPermission: ['pricing.view', 'categories.view'],
-    items: [
-      { name: 'Pricing', href: '/pricing', icon: ArchiveBoxIcon, permission: 'pricing.view' },
-      { name: 'Categories', href: '/categories', icon: TagIcon, permission: 'categories.view' },
     ],
   },
   {
@@ -126,6 +160,10 @@ const navSections: NavSection[] = [
     color: 'purple',
     anyPermission: ['settings.view'],
     items: [
+      { name: 'Software', href: '/software', icon: CubeIcon, permission: 'settings.view' },
+      { name: 'Updates', href: '/updates', icon: ArrowPathIcon, permission: 'settings.view' },
+      { name: 'Client Monitor', href: '/client-monitor', icon: SignalIcon, permission: 'settings.view' },
+      { name: 'Error Reports', href: '/error-reports', icon: BugAntIcon, permission: 'settings.view' },
       { name: 'Database', href: '/database', icon: CircleStackIcon, permission: 'settings.view' },
     ],
   },
@@ -147,6 +185,7 @@ const SidebarSection: React.FC<{
   }, [pathname, section.items]);
 
   const isPurple = section.color === 'purple';
+  const isRed = section.color === 'red';
 
   const sectionContent = (
     <div className="mb-1">
@@ -167,9 +206,12 @@ const SidebarSection: React.FC<{
       {isOpen && (
         <div className="space-y-0.5 mt-0.5">
           {section.items.map((item) => {
-            const isActive =
-              pathname === item.href ||
-              (item.href !== '/dashboard' && pathname.startsWith(item.href + '/'));
+            // Exact match for dashboard and cases to avoid false positives
+            const isExactMatch = pathname === item.href;
+            const isSubPath = item.href !== '/dashboard' && 
+                              item.href !== '/cases' && 
+                              pathname.startsWith(item.href + '/');
+            const isActive = isExactMatch || isSubPath;
 
             const link = (
               <Link
@@ -179,10 +221,14 @@ const SidebarSection: React.FC<{
                   isActive
                     ? isPurple
                       ? 'bg-purple-600 text-white shadow-sm'
-                      : 'bg-picton-blue text-white shadow-sm'
+                      : isRed
+                        ? 'bg-red-500 text-white shadow-sm'
+                        : 'bg-picton-blue text-white shadow-sm'
                     : isPurple
                       ? 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
-                      : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                      : isRed
+                        ? 'text-gray-700 hover:bg-red-50 hover:text-red-900'
+                        : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
                 } group flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-all duration-200`}
               >
                 <item.icon
@@ -191,7 +237,9 @@ const SidebarSection: React.FC<{
                       ? 'text-white'
                       : isPurple
                         ? 'text-purple-500 group-hover:text-purple-700'
-                        : 'text-gray-500 group-hover:text-gray-700'
+                        : isRed
+                          ? 'text-red-500 group-hover:text-red-700'
+                          : 'text-gray-500 group-hover:text-gray-700'
                   } mr-3 h-5 w-5 flex-shrink-0`}
                 />
                 {item.name}
@@ -237,9 +285,16 @@ const allNavItems = navSections.flatMap((s) => s.items);
 const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout } = useAppStore();
+  const { user, logout, setUser, setIsAuthenticated } = useAppStore();
   const [siteLogo, setSiteLogo] = useState<string>('');
   const [siteName, setSiteName] = useState<string>('');
+  const [isMasquerading, setIsMasquerading] = useState(false);
+  const [exitingMasquerade, setExitingMasquerade] = useState(false);
+
+  // Check masquerade state on mount and user changes
+  useEffect(() => {
+    setIsMasquerading(AuthModel.isMasquerading());
+  }, [user]);
 
   useEffect(() => {
     loadSettings();
@@ -295,6 +350,36 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     }
   };
 
+  const handleExitMasquerade = async () => {
+    setExitingMasquerade(true);
+    try {
+      const { token, user: adminUser } = await AuthModel.exitMasquerade();
+
+      // Fetch fresh permissions for admin
+      try {
+        const permissions = await AuthModel.getUserPermissions();
+        adminUser.permissions = permissions;
+        AuthModel.storeAuth(token, adminUser);
+      } catch {
+        adminUser.permissions = [];
+      }
+
+      setUser(adminUser);
+      setIsAuthenticated(true);
+      setIsMasquerading(false);
+
+      navigate('/admin/clients');
+    } catch (error) {
+      console.error('Exit masquerade error:', error);
+      // If restore fails, force full logout
+      AuthModel.clearAuth();
+      logout();
+      navigate('/login');
+    } finally {
+      setExitingMasquerade(false);
+    }
+  };
+
   const resolveTitle = (): string => {
     const path = location.pathname;
     const exact = allNavItems.find((i) => i.href === path);
@@ -312,6 +397,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   return (
     <div className="flex h-screen bg-gray-50">
+      {/* Global incoming-call listener (persists across pages) */}
+      <GlobalCallProvider />
       {/* Sidebar */}
       <div className="hidden md:flex md:w-64 md:flex-col">
         <div className="flex min-h-0 flex-1 flex-col bg-white border-r border-gray-200 shadow-sm">
@@ -350,6 +437,31 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
       {/* Main content */}
       <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Masquerade Banner */}
+        {isMasquerading && (
+          <div className="bg-purple-600 text-white px-4 py-2 flex items-center justify-between shadow-md z-50">
+            <div className="flex items-center gap-2">
+              <EyeIcon className="w-5 h-5 text-purple-200" />
+              <span className="text-sm font-medium">
+                You are viewing as <strong>{user?.email || 'another user'}</strong>
+              </span>
+              <span className="text-xs text-purple-200 ml-1">(masquerade mode)</span>
+            </div>
+            <button
+              onClick={handleExitMasquerade}
+              disabled={exitingMasquerade}
+              className="flex items-center gap-1.5 px-3 py-1 text-sm font-medium rounded-lg bg-white/20 hover:bg-white/30 text-white border border-white/30 transition-colors disabled:opacity-50"
+            >
+              {exitingMasquerade ? (
+                <ArrowPathIcon className="w-4 h-4 animate-spin" />
+              ) : (
+                <ArrowUturnLeftIcon className="w-4 h-4" />
+              )}
+              Return to Admin
+            </button>
+          </div>
+        )}
+
         {/* Top header */}
         <header className="bg-white shadow-md border-b-2 border-picton-blue/20">
           <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
@@ -359,7 +471,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div className="flex items-center space-x-3">
               <NotificationDropdown />
               <UserAccountMenu
-                user={user!}
+                user={user}
                 onLogout={handleLogout}
               />
             </div>

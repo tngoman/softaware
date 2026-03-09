@@ -8,6 +8,7 @@
  */
 
 import { env } from '../config/env.js';
+import { getSecret } from './credentialVault.js';
 
 const CLEAN_SYSTEM_PROMPT = `You are a content extraction assistant.
 Given raw text scraped from a web page or document, extract ONLY the meaningful informational content.
@@ -32,13 +33,50 @@ export async function cleanContentWithAI(
 // Paid: OpenRouter
 // ---------------------------------------------------------------------------
 async function cleanWithOpenRouter(content: string): Promise<string> {
-  const apiKey = env.OPENROUTER_API_KEY;
+  // ── 1. Try GLM first (Anthropic-compatible Messages API) ──
+  try {
+    const glmKey = await getSecret('GLM', env.GLM);
+    if (glmKey) {
+      const glmRes = await fetch('https://api.z.ai/api/anthropic/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': glmKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: env.GLM_MODEL || 'glm-4.6',
+          max_tokens: 4096,
+          system: CLEAN_SYSTEM_PROMPT,
+          messages: [
+            { role: 'user', content: content },
+          ],
+          temperature: 0.1,
+        }),
+      });
+      if (glmRes.ok) {
+        const glmData = (await glmRes.json()) as any;
+        const glmContent = glmData.content
+          ?.filter((b: any) => b.type === 'text')
+          .map((b: any) => b.text)
+          .join('');
+        if (glmContent) return glmContent.trim();
+      } else {
+        console.warn(`[IngestionRouter] GLM ${glmRes.status} — trying OpenRouter`);
+      }
+    }
+  } catch (glmErr) {
+    console.warn(`[IngestionRouter] GLM failed: ${(glmErr as Error).message} — trying OpenRouter`);
+  }
+
+  // ── 2. Try OpenRouter ──
+  const apiKey = await getSecret('OPENROUTER');
   if (!apiKey) {
-    console.warn('[IngestionRouter] No OPENROUTER_API_KEY — falling back to Ollama for paid job');
+    console.warn('[IngestionRouter] No OPENROUTER_API_KEY in vault — falling back to Ollama for paid job');
     return cleanWithOllama(content);
   }
 
-  const model = env.INGESTION_OPENROUTER_MODEL || 'google/gemma-3-4b-it:free';
+  const model = env.INGESTION_OPENROUTER_MODEL || 'openai/gpt-4o-mini';
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',

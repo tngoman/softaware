@@ -54,18 +54,21 @@ export class ContactModel {
    */
   static async getStatementData(id: number) {
     const response = await api.get<{
-      contact: Contact;
-      transactions: any[];
-      closing_balance: number;
-      aging: {
-        current: number;
-        '30_days': number;
-        '60_days': number;
-        '90_days': number;
-        total: number;
+      success: boolean;
+      data: {
+        contact: Contact;
+        transactions: any[];
+        closing_balance: number;
+        aging: {
+          current: number;
+          '30_days': number;
+          '60_days': number;
+          '90_days': number;
+          total: number;
+        };
       };
     }>(`/contacts/${id}/statement-data`);
-    return response.data;
+    return response.data.data;
   }
 
   /**

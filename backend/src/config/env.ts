@@ -66,7 +66,12 @@ const EnvSchema = z.object({
   // Paid tier: OpenRouter model used to clean/extract scraped content
   INGESTION_OPENROUTER_MODEL: z.string().default('google/gemma-3-4b-it:free'),
   // Free tier: local Ollama model used to clean/extract scraped content
-  INGESTION_OLLAMA_MODEL: z.string().default('qwen2.5:3b-instruct'),
+  INGESTION_OLLAMA_MODEL: z.string().default('qwen2.5:1.5b-instruct'),
+
+  // Assistant chat: OpenRouter model for paid-tier assistants (free model, tried first)
+  ASSISTANT_OPENROUTER_MODEL: z.string().default('google/gemma-3-4b-it:free'),
+  // Fallback paid model when the free OpenRouter model is rate-limited or errors
+  OPENROUTER_FALLBACK_MODEL: z.string().default('openai/gpt-4o-mini'),
 
   // OpenAI
   OPENAI: z.string().optional(),
@@ -78,11 +83,20 @@ const EnvSchema = z.object({
   OLLAMA_BASE_URL: z.string().default('http://127.0.0.1:11434'),
   OLLAMA_MODEL: z.string().default('qwen2.5-coder:7b'),
   OLLAMA_VISION_MODEL: z.string().default('moondream'),
-  LEADS_OLLAMA_MODEL: z.string().default('qwen2.5:7b-instruct'),
-  // Assistant chat model — DeepSeek Coder V2 Lite MoE
-  ASSISTANT_OLLAMA_MODEL: z.string().default('deepseek-coder-v2:16b-lite-instruct-q4_K_M'),
+  LEADS_OLLAMA_MODEL: z.string().default('qwen2.5:1.5b-instruct'),
+  // Assistant chat model — Qwen 2.5 0.5/1.5B (fastest CPU inference)
+  ASSISTANT_OLLAMA_MODEL: z.string().default('qwen2.5:1.5b-instruct'),
+  // Tool-calling model — Qwen 2.5 (structured output for tool routing)
+  TOOLS_OLLAMA_MODEL: z.string().default('qwen2.5:3b-instruct'),
   // keep_alive: -1 = pin model in RAM indefinitely. Set to 0 to unload immediately.
   OLLAMA_KEEP_ALIVE: z.string().default('-1'),
+  // Site builder model — 7B instruct for best quality enrichment (async job, latency OK)
+  // ~4.7 GB RAM, ~3-4 tok/s on CPU. Falls back in paid tier after GLM + OpenRouter.
+  SITE_BUILDER_OLLAMA_MODEL: z.string().default('qwen2.5:7b-instruct'),
+  // Site builder GLM model — used for paid-tier AI generation via z.ai
+  SITE_BUILDER_GLM_MODEL: z.string().default('claude-sonnet-4-20250514'),
+  // Site builder OpenRouter model — used for paid-tier "skip the queue" generation
+  SITE_BUILDER_OPENROUTER_MODEL: z.string().default('openai/gpt-4o-mini'),
 
   // GLM API
   GLM: z.string().default(''),

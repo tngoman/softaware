@@ -11,8 +11,7 @@ dist/
 .env.*.local
 
 # Logs
-logs/*.log
-logs/*.log.*
+logs/
 *.log
 
 # Testing
@@ -38,12 +37,32 @@ Thumbs.db
 temp/
 tmp/
 
-# Database
+# Database files
+data/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
-# Uploads
+# SQL dumps
+*.sql
+!src/db/migrations/*.sql
+
+# Secrets / Keys
+keys/
+
+# Uploaded / generated content
 uploads/
+images/
 public/assets/
 public/pdfs/
+
+# Generated files
+ai-response.json
+response.json
+generated-site.html
+business-data.json
+
+# Backup files
+*.bak

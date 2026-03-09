@@ -12,9 +12,11 @@ import {
   XMarkIcon,
   PaperAirplaneIcon,
   UserCircleIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
+import Swal from 'sweetalert2';
 import api, { API_BASE_URL } from '../../services/api';
-import KnowledgeHealthScore from '../../components/KnowledgeHealthScore';
+import KnowledgeHealthBadge from '../../components/KnowledgeHealthBadge';
 
 interface DashboardMetrics {
   messages: { used: number; limit: number };
@@ -28,6 +30,8 @@ interface AssistantSummary {
   name: string;
   description: string;
   status?: string;
+  tier?: string;
+  pagesIndexed?: number;
 }
 
 interface ChatMessage {
@@ -176,6 +180,55 @@ const PortalDashboard: React.FC = () => {
   const barColor = (pct: number) =>
     pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-picton-blue';
 
+  const handleDeleteAssistant = async (assistant: AssistantSummary) => {
+    const { value: clearKnowledge } = await Swal.fire({
+      title: `Delete "${assistant.name}"?`,
+      html: `
+        <p class="text-sm text-gray-500 mb-4">This assistant will be permanently removed.</p>
+        <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none justify-center">
+          <input type="checkbox" id="swal-clear-kb" checked class="w-4 h-4 rounded border-gray-300 text-red-500 focus:ring-red-400" />
+          Also delete knowledge base data (sqlite-vec)
+        </label>
+      `,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      cancelButtonColor: '#6b7280',
+      confirmButtonText: 'Delete Assistant',
+      cancelButtonText: 'Cancel',
+      focusCancel: true,
+      preConfirm: () => {
+        const checkbox = document.getElementById('swal-clear-kb') as HTMLInputElement;
+        return checkbox?.checked ?? true;
+      },
+    });
+
+    // User cancelled
+    if (clearKnowledge === undefined) return;
+
+    try {
+      await api.delete(`/assistants/${assistant.id}?clearKnowledge=${clearKnowledge}`);
+      Swal.fire({
+        icon: 'success',
+        title: 'Deleted',
+        text: clearKnowledge
+          ? `${assistant.name} and its knowledge base have been removed.`
+          : `${assistant.name} has been removed. Knowledge base data was kept.`,
+        timer: 2500,
+        showConfirmButton: false,
+      });
+      // Reload dashboard data
+      loadData();
+    } catch (err: any) {
+      console.error('Delete assistant error:', err);
+      Swal.fire({
+        icon: 'error',
+        title: 'Delete Failed',
+        text: err?.response?.data?.error || 'Something went wrong. Please try again.',
+      });
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-6 animate-pulse">
@@ -191,6 +244,10 @@ const PortalDashboard: React.FC = () => {
 
   const tier = metrics?.tier || 'free';
   const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+
+  // Derive stats from loaded assistants — ensures top cards correlate with cards below
+  const totalPages = assistants.reduce((sum, a) => sum + (a.pagesIndexed || 0), 0);
+  const pageLimit = metrics?.pagesIndexed.limit ?? 50;
 
   return (
     <div className="space-y-8">
@@ -220,7 +277,7 @@ const PortalDashboard: React.FC = () => {
             <SparklesIcon className="h-5 w-5 text-picton-blue" />
           </div>
           <p className="text-3xl font-bold text-gray-900">
-            {metrics?.assistants.count ?? 0}
+            {assistants.length}
           </p>
           <p className="text-xs text-gray-400 mt-1">
             of {metrics?.assistants.limit ?? 5} allowed
@@ -248,22 +305,22 @@ const PortalDashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* Pages Indexed */}
+        {/* Pages Indexed — derived from loaded assistants */}
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-medium text-gray-500">Pages Indexed</span>
             <DocumentTextIcon className="h-5 w-5 text-violet-500" />
           </div>
-          <p className="text-3xl font-bold text-gray-900">{metrics?.pagesIndexed.used ?? 0}</p>
+          <p className="text-3xl font-bold text-gray-900">{totalPages}</p>
           <div className="mt-2">
             <div className="flex justify-between text-xs text-gray-400 mb-1">
-              <span>{metrics?.pagesIndexed.used ?? 0} / {metrics?.pagesIndexed.limit ?? 50}</span>
-              <span>{usagePercent(metrics?.pagesIndexed.used ?? 0, metrics?.pagesIndexed.limit ?? 50)}%</span>
+              <span>{totalPages} / {pageLimit}</span>
+              <span>{usagePercent(totalPages, pageLimit)}%</span>
             </div>
             <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
               <div
-                className={`h-full rounded-full transition-all ${barColor(usagePercent(metrics?.pagesIndexed.used ?? 0, metrics?.pagesIndexed.limit ?? 50))}`}
-                style={{ width: `${usagePercent(metrics?.pagesIndexed.used ?? 0, metrics?.pagesIndexed.limit ?? 50)}%` }}
+                className={`h-full rounded-full transition-all ${barColor(usagePercent(totalPages, pageLimit))}`}
+                style={{ width: `${usagePercent(totalPages, pageLimit)}%` }}
               />
             </div>
           </div>
@@ -303,7 +360,7 @@ const PortalDashboard: React.FC = () => {
           </Link>
 
           <Link
-            to="/portal/sites"
+            to="/portal/sites/new"
             className="group bg-white rounded-xl border-2 border-dashed border-slate-200 hover:border-emerald-400/40 p-6 text-center transition-all hover:shadow-md"
           >
             <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-50 flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
@@ -364,9 +421,9 @@ const PortalDashboard: React.FC = () => {
             {assistants.slice(0, 6).map((a) => (
               <div
                 key={a.id}
-                className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition-all"
+                className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition-all flex flex-col"
               >
-                <div className="flex items-start justify-between mb-3">
+                <div className="flex items-start justify-between mb-2">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-full bg-picton-blue/10 flex items-center justify-center">
                       <SparklesIcon className="h-5 w-5 text-picton-blue" />
@@ -378,11 +435,24 @@ const PortalDashboard: React.FC = () => {
                       </span>
                     </div>
                   </div>
+                  <button
+                    onClick={() => handleDeleteAssistant(a)}
+                    className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    title="Delete assistant"
+                  >
+                    <TrashIcon className="h-4 w-4" />
+                  </button>
                 </div>
-                <p className="text-xs text-gray-500 line-clamp-2 mb-4">
+                <p className="text-xs text-gray-500 line-clamp-2 mb-3">
                   {a.description || 'No description'}
                 </p>
-                <div className="flex items-center gap-2">
+
+                {/* Per-assistant Knowledge Health badge */}
+                <div className="mb-3 px-1">
+                  <KnowledgeHealthBadge assistantId={a.id} />
+                </div>
+
+                <div className="flex items-center gap-2 mt-auto">
                   <button
                     onClick={() => setChatModal(a)}
                     className="flex-1 text-center text-xs font-medium text-picton-blue bg-picton-blue/10 hover:bg-picton-blue/20 px-3 py-1.5 rounded-lg transition-colors"
@@ -401,14 +471,6 @@ const PortalDashboard: React.FC = () => {
           </div>
         )}
       </div>
-
-      {/* Knowledge Health Score - shows for first assistant */}
-      {assistants.length > 0 && (
-        <KnowledgeHealthScore 
-          assistantId={assistants[0].id} 
-          tier={metrics?.tier || 'free'}
-        />
-      )}
 
       {/* Chat Modal */}
       {chatModal && (

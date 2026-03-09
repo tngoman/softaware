@@ -26,7 +26,7 @@ export class QuotationModel {
    * Create a new quotation
    */
   static async create(quotation: Partial<Quotation>) {
-    const response = await api.post<{ success: boolean; id: number }>('/quotations', quotation);
+    const response = await api.post<{ success: boolean; id: number; data: any }>('/quotations', quotation);
     return response.data;
   }
 
@@ -50,7 +50,7 @@ export class QuotationModel {
    * Convert quotation to invoice
    */
   static async convertToInvoice(quoteId: number) {
-    const response = await api.post<{ success: boolean; invoice_id: number }>('/convert-quote', { quote_id: quoteId });
+    const response = await api.post<{ success: boolean; invoice_id: number }>(`/quotations/${quoteId}/convert-to-invoice`, {});
     return response.data;
   }
 

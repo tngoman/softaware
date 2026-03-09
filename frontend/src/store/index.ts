@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { Contact, Quotation, Invoice, QuoteItem, InvoiceItem, PricingItem, Category, User } from '../types';
+import { disconnectStaffChatSocket } from '../services/staffChatSocket';
 
 interface AppState {
   // Authentication
@@ -67,6 +68,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setUser: (user) => set({ user }),
   setIsAuthenticated: (isAuthenticated) => set({ isAuthenticated }),
   logout: () => {
+    disconnectStaffChatSocket();
     localStorage.removeItem('jwt_token');
     localStorage.removeItem('user');
     set({ user: null, isAuthenticated: false });

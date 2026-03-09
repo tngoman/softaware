@@ -93,7 +93,7 @@ Return ONLY the JSON object, no other text.`;
           top_p: 0.9,
         },
       },
-      { timeout: 30_000 },
+      { timeout: 120_000 },
     );
 
     const responseText = response.data.response || '';
@@ -112,7 +112,15 @@ Return ONLY the JSON object, no other text.`;
     }
     return result;
   } catch (error) {
-    console.error('[Categorizer] Error analyzing content:', error);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[Categorizer] Error analyzing content:', errMsg);
+    if (axios.isAxiosError(error)) {
+      console.error('[Categorizer] Axios error:', {
+        code: error.code,
+        status: error.response?.status,
+        isTimeout: error.code === 'ECONNABORTED'
+      });
+    }
     // Return all-false on failure — will be retried on next ingestion
     const result: Record<string, boolean> = {};
     for (const item of checklist) {
@@ -237,15 +245,30 @@ export async function getAssistantKnowledgeHealth(assistantId: string): Promise<
 
   if (!assistant) throw new Error(`Assistant ${assistantId} not found`);
 
+  // Compute real pages_indexed from completed ingestion jobs (source of truth)
+  const realCount = await db.queryOne<{ cnt: number }>(
+    `SELECT COUNT(*) AS cnt FROM ingestion_jobs WHERE assistant_id = ? AND status = 'completed'`,
+    [assistantId],
+  );
+  const pagesIndexed = realCount?.cnt ?? assistant.pages_indexed;
+
+  // Sync the column if it drifted
+  if (pagesIndexed !== assistant.pages_indexed) {
+    await db.execute(
+      `UPDATE assistants SET pages_indexed = ? WHERE id = ?`,
+      [pagesIndexed, assistantId],
+    ).catch(() => {});
+  }
+
   const checklist = parseStoredChecklist(assistant.knowledge_categories, assistant.business_type);
   const health = calculateHealthScore(checklist);
   const pageLimit = assistant.tier === 'paid' ? 500 : 50;
-  const storageFull = assistant.pages_indexed >= pageLimit;
+  const storageFull = pagesIndexed >= pageLimit;
   const pointsPerItem = checklist.length > 0 ? Math.round(100 / checklist.length) : 0;
 
   return {
     ...health,
-    pagesIndexed: assistant.pages_indexed,
+    pagesIndexed,
     tier: assistant.tier,
     pageLimit,
     storageFull,
@@ -272,14 +295,31 @@ export async function getStoredChecklist(assistantId: string): Promise<Checklist
 }
 
 /** Parse the JSON stored in knowledge_categories — handles both old and new format */
-function parseStoredChecklist(raw: string | null, businessType: string): ChecklistItem[] {
-  if (!raw) return getDefaultChecklist(businessType || 'other');
+function parseStoredChecklist(raw: string | null | any, businessType: string): ChecklistItem[] {
+  // MySQL driver may auto-parse JSON columns
+  if (typeof raw === 'object' && raw !== null) {
+    console.log('[Categorizer] Got pre-parsed object:', Object.keys(raw));
+    
+    if (raw.checklist && Array.isArray(raw.checklist)) {
+      console.log('[Categorizer] Returning checklist with', raw.checklist.length, 'items, satisfied:', raw.checklist.filter((c: any) => c.satisfied).length);
+      return raw.checklist;
+    }
+    
+    if (Array.isArray(raw) && raw.length > 0 && 'key' in raw[0]) {
+      return raw;
+    }
+  }
+  
+  if (!raw || raw === 'null') return getDefaultChecklist(businessType || 'other');
 
+  // Try parsing if it's a string
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    console.log('[Categorizer] Parsed object keys:', Object.keys(parsed));
 
     // NEW FORMAT: { checklist: ChecklistItem[] }
     if (parsed.checklist && Array.isArray(parsed.checklist)) {
+      console.log('[Categorizer] Returning checklist with', parsed.checklist.length, 'items');
       return parsed.checklist;
     }
 

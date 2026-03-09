@@ -13,6 +13,7 @@ import { db, toMySQLDate } from '../db/mysql.js';
 import nodemailer from 'nodemailer';
 import axios from 'axios';
 import { env } from '../config/env.js';
+import { getSmtpConfig } from './credentialVault.js';
 
 // ============================================================================
 // Tool Definitions (OpenAI-compatible function calling format)
@@ -443,14 +444,15 @@ interface LeadEmailData {
 }
 
 async function sendLeadNotificationEmail(to: string, data: LeadEmailData): Promise<void> {
-  // Create transporter (configure based on env)
+  // Create transporter with vault credentials
+  const smtp = await getSmtpConfig();
   const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST || 'localhost',
-    port: typeof env.SMTP_PORT === 'number' ? env.SMTP_PORT : parseInt(String(env.SMTP_PORT) || '25'),
-    secure: env.SMTP_SECURE === true || env.SMTP_SECURE === ('true' as any),
-    auth: env.SMTP_USER ? {
-      user: env.SMTP_USER,
-      pass: env.SMTP_PASS
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: smtp.user ? {
+      user: smtp.user,
+      pass: smtp.pass
     } : undefined
   });
 
@@ -490,7 +492,7 @@ async function sendLeadNotificationEmail(to: string, data: LeadEmailData): Promi
 
   try {
     await transporter.sendMail({
-      from: env.SMTP_FROM || 'noreply@softaware.co.za',
+      from: smtp.from,
       to,
       subject,
       html

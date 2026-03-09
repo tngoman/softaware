@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { glmService } from '../services/glmService.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { requireApiKey } from '../middleware/apiKey.js';
-import { db, type team_members } from '../db/mysql.js';
+import { db } from '../db/mysql.js';
 
 export const glmRouter = Router();
 
@@ -53,8 +53,8 @@ async function getTeamIdFromApiKey(req: any): Promise<string | undefined> {
   const apiKey = req.apiKey;
   if (!apiKey) return undefined;
 
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
+  const membership = await db.queryOne<any>(
+    'SELECT teamId FROM team_members WHERE userId = ? LIMIT 1',
     [apiKey.userId]
   );
 
@@ -112,13 +112,13 @@ glmRouter.post('/api/simple', requireApiKey, async (req, res, next) => {
 glmRouter.use(requireAuth);
 
 async function getTeamIdFromUser(req: AuthRequest): Promise<string> {
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
+  const membership = await db.queryOne<any>(
+    'SELECT teamId FROM team_members WHERE userId = ? LIMIT 1',
     [req.userId!]
   );
 
   if (!membership) {
-    throw new Error('No team found for user');
+    throw new Error('No credit balance found for user');
   }
 
   return membership.teamId;

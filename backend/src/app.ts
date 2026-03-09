@@ -1,6 +1,7 @@
 import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -46,10 +47,12 @@ import { updHeartbeatRouter } from './routes/updHeartbeat.js';
 import { updClientsRouter } from './routes/updClients.js';
 import { updModulesRouter } from './routes/updModules.js';
 import { updMiscRouter } from './routes/updMisc.js';
+import { updErrorReportRouter } from './routes/updErrorReport.js';
 import { contactsRouter } from './routes/contacts.js';
 import { quotationsRouter } from './routes/quotations.js';
 import { invoicesRouter } from './routes/invoices.js';
 import { accountingRouter } from './routes/accounting.js';
+import { transactionsRouter } from './routes/transactions.js';
 import { appSettingsRouter } from './routes/appSettings.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { pricingRouter } from './routes/pricing.js';
@@ -65,11 +68,26 @@ import { rolesRouter } from './routes/systemRoles.js';
 import { permissionsRouter } from './routes/systemPermissions.js';
 import { credentialsRouter } from './routes/systemCredentials.js';
 import { softawareTasksRouter } from './routes/softawareTasks.js';
-import groupsRouter from './routes/groups.js';
+import { localTasksRouter } from './routes/localTasks.js';
 import databaseManagerRouter from './routes/databaseManager.js';
 import { twoFactorRouter } from './routes/twoFactor.js';
 import { fcmTokensRouter } from './routes/fcmTokens.js';
+import enterpriseWebhookRouter from './routes/enterpriseWebhook.js';
+import { adminEnterpriseEndpointsRouter } from './routes/adminEnterpriseEndpoints.js';
+import { casesRouter } from './routes/cases.js';
+import { adminCasesRouter } from './routes/adminCases.js';
+import { emailRouter } from './routes/email.js';
+import { smsRouter } from './routes/sms.js';
+import mobileIntentRouter from './routes/mobileIntent.js';
+import staffAssistantRouter from './routes/staffAssistant.js';
+import myAssistantRouter from './routes/myAssistant.js';
+import { teamChatRouter } from './routes/teamChat.js';
+import { staffChatRouter } from './routes/staffChat.js';
+import { webmailRouter } from './routes/webmail.js';
+import { planningRouter } from './routes/planning.js';
+import { startHealthMonitoring } from './services/healthMonitor.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { apiErrorTracker } from './middleware/apiErrorTracker.js';
 
 export function createApp() {
   const app = express();
@@ -78,9 +96,17 @@ export function createApp() {
     crossOriginResourcePolicy: { policy: 'cross-origin' }
   }));
 
-  // Simple CORS - allow all origins for API
+  // CORS — support credentials (cookies) with dynamic origin
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = req.headers.origin;
+    // Reflect the request origin so credentials (cookies) work.
+    // For non-browser clients (no Origin header), fall back to '*'.
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Software-Token');
 
@@ -90,13 +116,20 @@ export function createApp() {
     return next();
   });
 
+  app.use(cookieParser());
   app.use(express.json({ limit: '10mb' }));
   app.use(morgan('dev'));
+
+  // Track API errors for health monitoring (must be before routes)
+  app.use(apiErrorTracker);
 
   // Serve generated PDFs / static assets
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const publicPath = path.join(__dirname, '..', 'public');
+  const uploadsPath = path.join(__dirname, '..', 'uploads');
+  
   app.use('/public', express.static(publicPath));
+  app.use('/uploads', express.static(uploadsPath));
   // Also serve /assets directly (frontend builds URLs like /assets/images/logo.png)
   app.use('/assets', express.static(path.join(publicPath, 'assets')));
 
@@ -111,6 +144,7 @@ export function createApp() {
 
   // Serve static assets (generated PDFs etc.) under /api/public too
   apiRouter.use('/public', express.static(publicPath));
+  apiRouter.use('/uploads', express.static(uploadsPath));
 
   apiRouter.use('/auth', authRouter);
   apiRouter.use('/auth/2fa', twoFactorRouter);
@@ -124,7 +158,10 @@ export function createApp() {
   apiRouter.use('/admin/config', adminConfigRouter);
   apiRouter.use('/admin/dashboard', adminDashboardRouter);
   apiRouter.use('/admin/clients', adminClientManagerRouter);
+  apiRouter.use('/admin/enterprise-endpoints', adminEnterpriseEndpointsRouter);
+  apiRouter.use('/admin/cases', adminCasesRouter);
   apiRouter.use('/subscriptions', subscriptionRouter);
+  apiRouter.use('/cases', casesRouter);
   apiRouter.use('/mcp', mcpRouter);
   apiRouter.use('/files', filesRouter);
   apiRouter.use('/ai', aiRouter);
@@ -140,6 +177,10 @@ export function createApp() {
   apiRouter.use('/assistants/:assistantId/ingest', checkAssistantStatus, assistantIngestRouter);
   apiRouter.use('/dashboard', dashboardRouter);
   apiRouter.use('/silulumanzi', chatRouter);
+  apiRouter.use('/v1/webhook', enterpriseWebhookRouter); // Dynamic enterprise endpoints
+  apiRouter.use('/v1/mobile', mobileIntentRouter);       // Mobile AI assistant
+  apiRouter.use('/v1/mobile/my-assistant', myAssistantRouter);    // Unified assistant CRUD (staff + clients)
+  apiRouter.use('/v1/mobile/staff-assistant', staffAssistantRouter); // Legacy staff-only (deprecated)
   apiRouter.use('/v1', checkWidgetStatus, widgetChatRouter);
   apiRouter.use('/v1/ingest', checkWidgetStatus, widgetIngestRouter);
   apiRouter.use('/v1/sites', siteBuilderRouter);
@@ -152,11 +193,15 @@ export function createApp() {
   apiRouter.use('/softaware/software', updSoftwareRouter);
   apiRouter.use('/softaware/modules', updModulesRouter);
 
+  // ── Local tasks (synced from external sources) ────────────
+  apiRouter.use('/local-tasks', localTasksRouter);
+
   // ── Updates system ────────────────────────────────────────────
   apiRouter.use('/updates/software', updSoftwareRouter);
   apiRouter.use('/updates/updates', updUpdatesRouter);
   apiRouter.use('/updates', updFilesRouter);           // /updates/upload & /updates/download
   apiRouter.use('/updates/heartbeat', updHeartbeatRouter);
+  apiRouter.use('/updates/error-report', updErrorReportRouter);
   apiRouter.use('/updates/clients', updClientsRouter);
   apiRouter.use('/updates/modules', updModulesRouter);
   apiRouter.use('/updates', updMiscRouter);            // /updates/info, /dashboard, /api_status, etc.
@@ -165,6 +210,7 @@ export function createApp() {
   apiRouter.use('/contacts', contactsRouter);
   apiRouter.use('/quotations', quotationsRouter);
   apiRouter.use('/invoices', invoicesRouter);
+  apiRouter.use('/transactions', transactionsRouter);  // VAT transactions - must be before accountingRouter
   apiRouter.use('/accounting', accountingRouter);
   apiRouter.use('/app-settings', appSettingsRouter);
   apiRouter.use('/notifications', notificationsRouter);
@@ -180,9 +226,14 @@ export function createApp() {
   apiRouter.use('/roles', rolesRouter);
   apiRouter.use('/permissions', permissionsRouter);
   apiRouter.use('/credentials', credentialsRouter);
-  apiRouter.use('/groups', groupsRouter);
+  apiRouter.use('/team-chats', teamChatRouter);
+  apiRouter.use('/staff-chat', staffChatRouter);
   apiRouter.use('/database', databaseManagerRouter);
   apiRouter.use('/fcm-tokens', fcmTokensRouter);
+  apiRouter.use('/email', emailRouter);
+  apiRouter.use('/sms', smsRouter);
+  apiRouter.use('/webmail', webmailRouter);
+  apiRouter.use('/planning', planningRouter);
 
   // ── Aliases: frontend calls /accounts, /transactions, /ledger directly ──
   // Mount accountingRouter at root so /accounts, /transactions, /ledger work
@@ -197,6 +248,9 @@ export function createApp() {
   });
 
   app.use(errorHandler);
+
+  // Start health monitoring for auto-case creation
+  startHealthMonitoring();
 
   return app;
 }

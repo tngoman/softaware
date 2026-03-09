@@ -1,7 +1,8 @@
 module.exports = {
   apps: [{
     name: 'softaware-backend',
-    script: './dist/index.js',
+    script: './node_modules/.bin/tsx',
+    args: 'src/index.ts',
     cwd: '/var/opt/backend',
     env_file: '/var/opt/backend/.env',
     instances: 1,

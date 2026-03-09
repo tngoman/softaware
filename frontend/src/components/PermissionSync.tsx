@@ -5,7 +5,7 @@ import {
   ExclamationTriangleIcon,
   InformationCircleIcon 
 } from '@heroicons/react/24/outline';
-import toast from 'react-hot-toast';
+import { notify } from '../utils/notify';
 import axios from 'axios';
 import { getApiBaseUrl } from '../config/app';
 
@@ -69,10 +69,10 @@ const PermissionSync: React.FC = () => {
         setPreview(response.data.data);
         setShowPreview(true);
       } else {
-        toast.error('Failed to fetch sync preview');
+        notify.error('Failed to fetch sync preview');
       }
     } catch (error: any) {
-      toast.error(error.response?.data?.message || 'Failed to fetch preview');
+      notify.error(error.response?.data?.message || 'Failed to fetch preview');
     } finally {
       setLoading(false);
     }
@@ -100,14 +100,14 @@ const PermissionSync: React.FC = () => {
       
       if (response.data.success) {
         setSyncStats(response.data.data.stats);
-        toast.success('Permissions synced successfully!');
+        notify.success('Permissions synced successfully!');
         setShowPreview(false);
         setPreview(null);
       } else {
-        toast.error('Failed to sync permissions');
+        notify.error('Failed to sync permissions');
       }
     } catch (error: any) {
-      toast.error(error.response?.data?.message || 'Failed to sync permissions');
+      notify.error(error.response?.data?.message || 'Failed to sync permissions');
     } finally {
       setLoading(false);
     }

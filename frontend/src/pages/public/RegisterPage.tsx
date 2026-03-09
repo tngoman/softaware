@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AuthModel } from '../../models';
 import { useAppSettings } from '../../hooks/useAppSettings';
-import Swal from 'sweetalert2';
+import { notify } from '../../utils/notify';
 
 /**
  * Public Register Page — Light theme matching frontend design patterns
@@ -108,12 +108,7 @@ const RegisterPage: React.FC = () => {
                   type="button"
                   className="text-picton-blue hover:text-picton-blue/80 text-sm font-medium transition-colors"
                   onClick={() => {
-                    Swal.fire({
-                      icon: 'info',
-                      title: 'Email Resent',
-                      text: 'A new confirmation email has been sent. Please check your inbox.',
-                      confirmButtonColor: '#00A4EE',
-                    });
+                    notify.info('A new confirmation email has been sent. Please check your inbox.');
                   }}
                 >
                   Resend confirmation email

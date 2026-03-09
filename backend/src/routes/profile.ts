@@ -24,7 +24,9 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
     const { userId } = getAuth(req);
 
     const user = await db.queryOne<User>(
-      'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+      `SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt,
+              notifications_enabled, push_notifications_enabled, web_notifications_enabled
+       FROM users WHERE id = ?`,
       [userId]
     );
     if (!user) throw notFound('User not found');
@@ -68,6 +70,9 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
         name: (user as any).name || null,
         phone: (user as any).phone || null,
         avatarUrl: (user as any).avatarUrl || null,
+        notifications_enabled: (user as any).notifications_enabled ?? true,
+        push_notifications_enabled: (user as any).push_notifications_enabled ?? true,
+        web_notifications_enabled: (user as any).web_notifications_enabled ?? true,
         createdAt: user.createdAt,
       },
       team: membership
@@ -101,12 +106,16 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
 });
 
 // ─── PUT /profile ──────────────────────────────────────────────────
-// Update the authenticated user's name, phone or avatar URL.
+// Update the authenticated user's name, phone, avatar URL, or notification preferences.
 // ────────────────────────────────────────────────────────────────────
 const UpdateProfileSchema = z.object({
   name: z.string().min(1).max(255).optional(),
-  phone: z.string().min(1).max(50).optional(),
+  email: z.string().email().max(255).optional(),
+  phone: z.string().max(50).optional(),
   avatarUrl: z.string().url().max(512).optional(),
+  notifications_enabled: z.boolean().optional(),
+  push_notifications_enabled: z.boolean().optional(),
+  web_notifications_enabled: z.boolean().optional(),
 });
 
 profileRouter.put('/', async (req: AuthRequest, res, next) => {
@@ -125,6 +134,16 @@ profileRouter.put('/', async (req: AuthRequest, res, next) => {
       sets.push('name = ?');
       params.push(input.name);
     }
+    if (input.email !== undefined) {
+      // Check for duplicate email
+      const dup = await db.queryOne<{ id: string }>(
+        'SELECT id FROM users WHERE email = ? AND id != ?',
+        [input.email, userId],
+      );
+      if (dup) throw badRequest('Email address is already in use.');
+      sets.push('email = ?');
+      params.push(input.email);
+    }
     if (input.phone !== undefined) {
       sets.push('phone = ?');
       params.push(input.phone);
@@ -132,6 +151,18 @@ profileRouter.put('/', async (req: AuthRequest, res, next) => {
     if (input.avatarUrl !== undefined) {
       sets.push('avatarUrl = ?');
       params.push(input.avatarUrl);
+    }
+    if (input.notifications_enabled !== undefined) {
+      sets.push('notifications_enabled = ?');
+      params.push(input.notifications_enabled);
+    }
+    if (input.push_notifications_enabled !== undefined) {
+      sets.push('push_notifications_enabled = ?');
+      params.push(input.push_notifications_enabled);
+    }
+    if (input.web_notifications_enabled !== undefined) {
+      sets.push('web_notifications_enabled = ?');
+      params.push(input.web_notifications_enabled);
     }
 
     sets.push('updatedAt = ?');
@@ -144,11 +175,15 @@ profileRouter.put('/', async (req: AuthRequest, res, next) => {
     );
 
     const updated = await db.queryOne<User>(
-      'SELECT id, email, name, phone, avatarUrl, updatedAt FROM users WHERE id = ?',
+      `SELECT id, email, name, phone, avatarUrl, 
+              notifications_enabled, push_notifications_enabled, web_notifications_enabled, 
+              updatedAt 
+       FROM users WHERE id = ?`,
       [userId]
     );
 
     res.json({
+      success: true,
       message: 'Profile updated',
       user: {
         id: updated!.id,
@@ -156,6 +191,9 @@ profileRouter.put('/', async (req: AuthRequest, res, next) => {
         name: (updated as any).name,
         phone: (updated as any).phone,
         avatarUrl: (updated as any).avatarUrl,
+        notifications_enabled: (updated as any).notifications_enabled,
+        push_notifications_enabled: (updated as any).push_notifications_enabled,
+        web_notifications_enabled: (updated as any).web_notifications_enabled,
         updatedAt: updated!.updatedAt,
       },
     });

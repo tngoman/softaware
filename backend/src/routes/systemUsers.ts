@@ -11,8 +11,9 @@ import { badRequest, notFound } from '../utils/httpErrors.js';
 export const systemUsersRouter = Router();
 
 /** Map a DB user row into the frontend shape */
-function mapUser(u: any, membership?: any, roles?: any[]): any {
+function mapUser(u: any, roles?: any[]): any {
   const nameParts = (u.name || '').split(' ');
+  const roleSlugs = (roles || []).map((r: any) => r.slug);
   return {
     id: u.id,
     username: u.email,
@@ -22,9 +23,9 @@ function mapUser(u: any, membership?: any, roles?: any[]): any {
     name: u.name || null,
     phone: u.phone || null,
     avatar: u.avatarUrl || null,
-    is_admin: membership?.role === 'ADMIN',
-    is_staff: membership?.role === 'STAFF',
-    is_active: true,
+    is_admin: roleSlugs.includes('admin') || roleSlugs.includes('super_admin'),
+    is_staff: roleSlugs.some((s: string) => ['developer', 'client_manager', 'qa_specialist', 'deployer'].includes(s)),
+    is_active: !!u.isActive,
     roles: roles || [],
     created_at: u.createdAt,
     updated_at: u.updatedAt,
@@ -37,22 +38,18 @@ function mapUser(u: any, membership?: any, roles?: any[]): any {
 systemUsersRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const users = await db.query<any>(
-      'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
+      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
     );
 
     const result = [];
     for (const u of users) {
-      const membership = await db.queryOne<any>(
-        'SELECT role FROM team_members WHERE userId = ? LIMIT 1',
-        [u.id]
-      );
       const roles = await db.query<any>(
         `SELECT r.id, r.name, r.slug FROM roles r
          JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id = ?`,
+         WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
         [u.id]
       );
-      result.push(mapUser(u, membership, roles));
+      result.push(mapUser(u, roles));
     }
 
     res.json({ success: true, data: result });
@@ -68,23 +65,19 @@ systemUsersRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
   try {
     const { id } = req.params;
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
     if (!u) throw notFound('User not found');
 
-    const membership = await db.queryOne<any>(
-      'SELECT role FROM team_members WHERE userId = ? LIMIT 1',
-      [u.id]
-    );
     const roles = await db.query<any>(
       `SELECT r.id, r.name, r.slug FROM roles r
        JOIN user_roles ur ON ur.role_id = r.id
-       WHERE ur.user_id = ?`,
+       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
       [u.id]
     );
 
-    res.json({ success: true, data: mapUser(u, membership, roles) });
+    res.json({ success: true, data: mapUser(u, roles) });
   } catch (err) {
     next(err);
   }
@@ -111,24 +104,28 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
       [userId, email, name || null, phone || null, passwordHash, now, now]
     );
 
-    // Assign to default team
-    const team = await db.queryOne<any>('SELECT id FROM teams LIMIT 1');
-    if (team) {
-      const memberId = generateId();
-      const teamRole = is_admin ? 'ADMIN' : is_staff ? 'STAFF' : 'OPERATOR';
+    // Assign role via user_roles
+    const roleSlug = is_admin ? 'admin' : is_staff ? 'developer' : 'viewer';
+    const role = await db.queryOne<any>('SELECT id FROM roles WHERE slug = ?', [roleSlug]);
+    if (role) {
       await db.execute(
-        'INSERT INTO team_members (id, teamId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)',
-        [memberId, team.id, userId, teamRole, now]
+        'INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)',
+        [userId, role.id]
       );
     }
 
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [userId]
     );
 
-    const assignedRole = is_admin ? 'ADMIN' : is_staff ? 'STAFF' : 'OPERATOR';
-    res.status(201).json({ success: true, data: mapUser(u, { role: assignedRole }) });
+    const roles = await db.query<any>(
+      `SELECT r.id, r.name, r.slug FROM roles r
+       JOIN user_roles ur ON ur.role_id = r.id
+       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
+      [userId]
+    );
+    res.status(201).json({ success: true, data: mapUser(u, roles) });
   } catch (err) {
     next(err);
   }
@@ -140,7 +137,7 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
 systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
-    const { email, password, name, phone, is_admin, is_staff } = req.body;
+    const { email, password, name, phone, is_admin, is_staff, is_active } = req.body;
 
     const u = await db.queryOne<any>('SELECT id FROM users WHERE id = ?', [id]);
     if (!u) throw notFound('User not found');
@@ -154,6 +151,7 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
     if (email) { updates.push('email = ?'); params.push(email); }
     if (name !== undefined) { updates.push('name = ?'); params.push(name); }
     if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
+    if (is_active !== undefined) { updates.push('isActive = ?'); params.push(is_active ? 1 : 0); }
     if (password) {
       const hash = await bcrypt.hash(password, 12);
       updates.push('passwordHash = ?'); params.push(hash);
@@ -166,20 +164,27 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
     }
 
     if (is_admin !== undefined || is_staff !== undefined) {
-      const teamRole = is_admin ? 'ADMIN' : is_staff ? 'STAFF' : 'OPERATOR';
-      await db.execute(
-        'UPDATE team_members SET role = ? WHERE userId = ?',
-        [teamRole, id]
-      );
+      const roleSlug = is_admin ? 'admin' : is_staff ? 'developer' : 'viewer';
+      const role = await db.queryOne<any>('SELECT id FROM roles WHERE slug = ?', [roleSlug]);
+      if (role) {
+        // Upsert: delete old role, insert new
+        await db.execute('DELETE FROM user_roles WHERE user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci', [id]);
+        await db.execute('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [id, role.id]);
+      }
     }
 
     const updated = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
-    const membership = await db.queryOne<any>('SELECT role FROM team_members WHERE userId = ? LIMIT 1', [id]);
+    const roles = await db.query<any>(
+      `SELECT r.id, r.name, r.slug FROM roles r
+       JOIN user_roles ur ON ur.role_id = r.id
+       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
+      [id]
+    );
 
-    res.json({ success: true, data: mapUser(updated, membership) });
+    res.json({ success: true, data: mapUser(updated, roles) });
   } catch (err) {
     next(err);
   }
@@ -198,9 +203,30 @@ systemUsersRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Resp
     const u = await db.queryOne<any>('SELECT id FROM users WHERE id = ?', [id]);
     if (!u) throw notFound('User not found');
 
-    // Remove memberships and roles first
-    await db.execute('DELETE FROM user_roles WHERE user_id = ?', [id]);
-    await db.execute('DELETE FROM team_members WHERE userId = ?', [id]);
+    // Remove all foreign-key references, then roles, then user
+    const fkCleanup = [
+      `DELETE FROM user_roles WHERE user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
+      `DELETE FROM team_members WHERE userId = ?`,
+      `DELETE FROM fcm_tokens WHERE user_id = ?`,
+      `DELETE FROM api_keys WHERE userId = ?`,
+      `DELETE FROM device_activations WHERE userId = ?`,
+      `DELETE FROM activation_keys WHERE createdByUserId = ?`,
+      `DELETE FROM agents_config WHERE createdByUserId = ?`,
+      `DELETE FROM vault_credentials WHERE createdByUserId = ?`,
+      `DELETE FROM user_two_factor WHERE user_id = ?`,
+      `DELETE FROM group_members WHERE user_id = ?`,
+      `DELETE FROM group_messages WHERE user_id = ?`,
+      `DELETE FROM widget_clients WHERE user_id = ?`,
+      `DELETE FROM generated_sites WHERE user_id = ?`,
+      `DELETE FROM notifications WHERE user_id = ?`,
+    ];
+    for (const sql of fkCleanup) {
+      try { await db.execute(sql, [id]); } catch { /* table may not exist — skip */ }
+    }
+    // Nullify ownership columns instead of deleting the rows
+    try { await db.execute(`UPDATE teams SET createdByUserId = NULL WHERE createdByUserId = ?`, [id]); } catch { /* skip */ }
+    try { await db.execute(`UPDATE \`groups\` SET created_by = NULL WHERE created_by = ?`, [id]); } catch { /* skip */ }
+
     await db.execute('DELETE FROM users WHERE id = ?', [id]);
 
     res.json({ success: true, message: 'User deleted' });

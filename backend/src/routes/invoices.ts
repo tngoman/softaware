@@ -9,14 +9,37 @@ import { generatePdf, loadCompanySettings, type PDFDocData } from '../utils/pdfG
 export const invoicesRouter = Router();
 
 const createInvoiceSchema = z.object({
-  invoice_number: z.string().min(1),
-  contact_id: z.number().int().positive(),
+  invoice_number: z.string().min(1).optional(),
+  invoice_contact_id: z.number().int().positive().optional(),
+  contact_id: z.number().int().positive().optional(),
   quotation_id: z.number().int().positive().optional(),
-  invoice_amount: z.number().positive(),
-  invoice_date: z.string().date(),
-  due_date: z.string().date().optional(),
+  invoice_quote_id: z.number().int().positive().optional(),
+  invoice_amount: z.number().optional(),
+  invoice_total: z.number().optional(),
+  invoice_subtotal: z.number().optional(),
+  invoice_vat: z.number().optional(),
+  invoice_discount: z.number().optional(),
+  invoice_date: z.string().optional(),
+  invoice_due_date: z.string().optional(),
+  invoice_valid_until: z.string().optional(),
+  due_date: z.string().optional(),
+  invoice_status: z.number().optional(),
+  invoice_payment_status: z.number().optional(),
+  invoice_notes: z.string().optional(),
   remarks: z.string().optional(),
   active: z.number().default(1),
+  items: z.array(z.object({
+    item_product: z.string().optional(),
+    item_description: z.string().optional(),
+    item_qty: z.number().optional(),
+    item_quantity: z.number().optional(),
+    item_price: z.number().optional(),
+    item_cost: z.number().optional(),
+    item_discount: z.number().optional(),
+    item_subtotal: z.number().optional(),
+    item_vat: z.number().optional(),
+    item_profit: z.number().optional(),
+  })).optional(),
 });
 
 const createInvoiceItemSchema = z.object({
@@ -34,7 +57,7 @@ const createPaymentSchema = z.object({
   remarks: z.string().optional(),
 });
 
-const updateInvoiceSchema = createInvoiceSchema.omit({ invoice_number: true }).partial();
+const updateInvoiceSchema = createInvoiceSchema.partial();
 
 // ── SQL fragment that aliases invoice columns to match the frontend Invoice interface ──
 const INVOICE_SELECT = `
@@ -55,11 +78,13 @@ const INVOICE_SELECT = `
   i.active        AS invoice_status,
   c.company_name  AS contact_name,
   c.email         AS contact_email,
-  c.phone         AS contact_phone
+  c.phone         AS contact_phone,
+  c.vat_number    AS contact_vat,
+  c.location      AS contact_address
 `;
 
 /**
- * GET /invoices - List all invoices
+ * GET /invoices - List all invoices with search
  */
 invoicesRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
@@ -67,25 +92,36 @@ invoicesRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, nex
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = (page - 1) * limit;
     const paid = req.query.paid ? parseInt(req.query.paid as string) : undefined;
+    const search = (req.query.search as string) || '';
 
     let query = `SELECT ${INVOICE_SELECT}
        FROM invoices i
        LEFT JOIN contacts c ON c.id = i.contact_id
        WHERE i.active = 1`;
+    let countQuery = 'SELECT COUNT(*) as count FROM invoices i LEFT JOIN contacts c ON c.id = i.contact_id WHERE i.active = 1';
     const params: any[] = [];
+    const countParams: any[] = [];
 
     if (paid !== undefined) {
       query += ' AND i.paid = ?';
+      countQuery += ' AND i.paid = ?';
       params.push(paid);
+      countParams.push(paid);
     }
 
-    query += ' ORDER BY i.invoice_date DESC LIMIT ? OFFSET ?';
+    if (search) {
+      const searchClause = ' AND (i.invoice_number LIKE ? OR c.company_name LIKE ? OR i.remarks LIKE ?)';
+      const searchVal = `%${search}%`;
+      query += searchClause;
+      countQuery += searchClause;
+      params.push(searchVal, searchVal, searchVal);
+      countParams.push(searchVal, searchVal, searchVal);
+    }
+
+    query += ' ORDER BY i.id DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const invoices = await db.query<any>(query, params);
-
-    const countQuery = 'SELECT COUNT(*) as count FROM invoices WHERE active = 1' + (paid !== undefined ? ' AND paid = ?' : '');
-    const countParams = paid !== undefined ? [paid] : [];
     const countResult = await db.queryOne<any>(countQuery, countParams);
 
     res.json({
@@ -157,24 +193,80 @@ invoicesRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
   try {
     const data = createInvoiceSchema.parse(req.body);
 
+    const contactId = data.invoice_contact_id || data.contact_id;
+    if (!contactId) {
+      throw badRequest('Contact ID is required');
+    }
+
     // Verify contact exists
-    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [data.contact_id]);
+    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [contactId]);
     if (!contact) {
       throw badRequest('Contact not found');
     }
 
-    // Check if invoice number is unique
-    const existing = await db.queryOne('SELECT id FROM invoices WHERE invoice_number = ?', [data.invoice_number]);
-    if (existing) {
-      throw badRequest('Invoice number already exists');
+    // Auto-generate invoice number if not provided
+    let invoiceNumber = data.invoice_number;
+    if (!invoiceNumber) {
+      // Get the last invoice number (not just the max ID)
+      const lastInv = await db.queryOne<any>(
+        'SELECT invoice_number FROM invoices WHERE invoice_number LIKE "INV-%" ORDER BY id DESC LIMIT 1'
+      );
+      
+      let nextNumber = 1;
+      if (lastInv?.invoice_number) {
+        // Extract number from "INV-00123" format
+        const match = lastInv.invoice_number.match(/INV-(\d+)/);
+        if (match) {
+          nextNumber = parseInt(match[1], 10) + 1;
+        }
+      }
+      
+      invoiceNumber = `INV-${String(nextNumber).padStart(5, '0')}`;
     }
 
+    // Check uniqueness
+    const existing = await db.queryOne('SELECT id FROM invoices WHERE invoice_number = ?', [invoiceNumber]);
+    if (existing) {
+      invoiceNumber = `${invoiceNumber}-${Date.now()}`;
+    }
+
+    const totalAmount = data.invoice_total || data.invoice_amount || data.invoice_subtotal || 0;
+    const dueDate = data.invoice_due_date || data.invoice_valid_until || data.due_date || null;
+
     const insertId = await db.insertOne('invoices', {
-      ...data,
+      invoice_number: invoiceNumber,
+      contact_id: contactId,
+      quotation_id: data.invoice_quote_id || data.quotation_id || null,
+      invoice_amount: totalAmount,
+      invoice_date: data.invoice_date || new Date().toISOString().split('T')[0],
+      due_date: dueDate,
       invoice_user_id: req.userId,
+      remarks: data.invoice_notes || data.remarks || null,
+      active: data.invoice_status !== undefined ? data.invoice_status : 1,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
+
+    // Insert line items if provided
+    if (data.items && data.items.length > 0) {
+      for (const item of data.items) {
+        const desc = item.item_product || item.item_description || '';
+        if (!desc) continue;
+        const qty = item.item_qty || item.item_quantity || 1;
+        const price = item.item_price || 0;
+        const discount = item.item_discount || 0;
+
+        await db.insertOne('invoice_items', {
+          invoice_id: insertId,
+          item_description: desc,
+          item_price: price,
+          item_quantity: qty,
+          item_discount: discount,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
 
     const invoice = await db.queryOne<any>(
       `SELECT ${INVOICE_SELECT}
@@ -184,7 +276,7 @@ invoicesRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
       [insertId]
     );
 
-    res.status(201).json({ success: true, data: invoice });
+    res.status(201).json({ success: true, id: parseInt(insertId), data: invoice });
   } catch (err) {
     next(err);
   }
@@ -199,18 +291,51 @@ invoicesRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
     const data = updateInvoiceSchema.parse(req.body);
 
     const invoice = await db.queryOne<any>(
-      `SELECT ${INVOICE_SELECT}
-       FROM invoices i
-       LEFT JOIN contacts c ON c.id = i.contact_id
-       WHERE i.id = ?`,
+      'SELECT id FROM invoices WHERE id = ?',
       [id]
     );
     if (!invoice) {
       throw notFound('Invoice not found');
     }
 
-    const updateData = { ...data, updated_at: new Date().toISOString() };
-    await db.execute('UPDATE invoices SET ? WHERE id = ?', [updateData, id]);
+    const contactId = data.invoice_contact_id || data.contact_id;
+    const totalAmount = data.invoice_total || data.invoice_amount || data.invoice_subtotal;
+    const dueDate = data.invoice_due_date || data.invoice_valid_until || data.due_date;
+
+    const updateData: any = { updated_at: new Date().toISOString() };
+    if (contactId) updateData.contact_id = contactId;
+    if (totalAmount !== undefined) updateData.invoice_amount = totalAmount;
+    if (data.invoice_date) updateData.invoice_date = data.invoice_date;
+    if (dueDate) updateData.due_date = dueDate;
+    if (data.invoice_notes !== undefined || data.remarks !== undefined) updateData.remarks = data.invoice_notes || data.remarks || null;
+    if (data.invoice_status !== undefined) updateData.active = data.invoice_status;
+
+    await db.execute(
+      `UPDATE invoices SET ${Object.keys(updateData).map(k => `${k} = ?`).join(', ')} WHERE id = ?`,
+      [...Object.values(updateData), id]
+    );
+
+    // Replace line items if provided
+    if (data.items && data.items.length > 0) {
+      await db.execute('DELETE FROM invoice_items WHERE invoice_id = ?', [id]);
+      for (const item of data.items) {
+        const desc = item.item_product || item.item_description || '';
+        if (!desc) continue;
+        const qty = item.item_qty || item.item_quantity || 1;
+        const price = item.item_price || 0;
+        const discount = item.item_discount || 0;
+
+        await db.insertOne('invoice_items', {
+          invoice_id: id,
+          item_description: desc,
+          item_price: price,
+          item_quantity: qty,
+          item_discount: discount,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
 
     const updated = await db.queryOne<any>(
       `SELECT ${INVOICE_SELECT}
@@ -414,6 +539,8 @@ invoicesRouter.post('/:id/generate-pdf', requireAuth, async (req: AuthRequest, r
       total: Number(invoice.invoice_total) || 0,
       contact: {
         name: invoice.contact_name || '',
+        vat: invoice.contact_vat || '',
+        address: invoice.contact_address || '',
         phone: invoice.contact_phone || '',
       },
       items: items.map((it: any) => ({

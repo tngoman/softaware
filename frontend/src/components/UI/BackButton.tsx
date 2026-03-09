@@ -31,14 +31,12 @@ const BackButton: React.FC<BackButtonProps> = ({
     <button
       onClick={handleClick}
       className={`
-        inline-flex items-center px-4 py-2 border border-gray-300 
-        rounded-md shadow-sm text-sm font-medium text-gray-700 
-        bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 
-        focus:ring-offset-2 focus:ring-blue-500 transition-colors duration-200
+        inline-flex items-center gap-2 text-sm font-medium
+        hover:opacity-80 transition-opacity duration-200
         ${className}
       `}
     >
-      <ArrowLeftIcon className="h-4 w-4 mr-2" />
+      <ArrowLeftIcon className="h-4 w-4" />
       {label}
     </button>
   );

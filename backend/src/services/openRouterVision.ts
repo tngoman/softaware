@@ -1,6 +1,16 @@
-import { env } from '../config/env.js';
+import { getSecret } from './credentialVault.js';
 
-const OPENROUTER_API_KEY = env.OPENROUTER_API_KEY || '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';
+// Resolved lazily on first call — reads from encrypted credential vault.
+// NEVER hardcode the key.
+let _cachedKey: string | null = null;
+async function getApiKey(): Promise<string> {
+  if (_cachedKey) return _cachedKey;
+  _cachedKey = await getSecret('OPENROUTER');
+  // Clear cache after 5 min so vault rotation takes effect
+  setTimeout(() => { _cachedKey = null; }, 5 * 60 * 1000);
+  return _cachedKey;
+}
+
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODELS = [
   'qwen/qwen-2.5-vl-7b-instruct',
@@ -60,10 +70,13 @@ async function callOpenRouter(params: {
     };
   });
 
+  const apiKey = await getApiKey();
+  if (!apiKey) throw new Error('OpenRouter API key not configured — check credential vault');
+
   const response = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'Authorization': `Bearer ${apiKey}`,
       'HTTP-Referer': SITE_URL,
       'X-Title': APP_NAME,
       'Content-Type': 'application/json',

@@ -5,6 +5,10 @@
  *   - Register / update client presence
  *   - Check for available updates
  *   - Deliver one-shot remote commands (force_logout, server_message)
+ *   - Accept piggybacked error reports (recent_errors[])
+ *
+ * GET  /updates/check — Public (requires software_key):
+ *   - Lightweight update availability check (no client registration)
  */
 
 import { Router } from 'express';
@@ -16,6 +20,119 @@ import { badRequest, forbidden } from '../utils/httpErrors.js';
 
 export const updHeartbeatRouter = Router();
 
+// ─── Helper: store piggybacked errors from heartbeat ────────────────
+async function storeRecentErrors(
+  softwareKey: string,
+  clientIdentifier: string,
+  hostname: string | null,
+  appVersion: string | null,
+  osInfo: string | null,
+  recentErrors: any[]
+): Promise<number> {
+  let stored = 0;
+  for (const error of recentErrors) {
+    if (!error.type || !error.level || !error.label || !error.message) continue;
+    try {
+      await db.insert(
+        `INSERT INTO error_reports (
+          software_key, client_identifier, hostname, source,
+          error_type, error_level, error_label, error_message,
+          error_file, error_line, error_column, error_trace, error_url,
+          app_version, os_info,
+          error_occurred_at, received_at
+        ) VALUES (?, ?, ?, 'backend', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          softwareKey, clientIdentifier, hostname,
+          error.type, error.level, error.label,
+          String(error.message).substring(0, 65000),
+          error.file || null, error.line || null, error.column || null,
+          error.trace || null, error.url || null,
+          appVersion, osInfo,
+          error.timestamp || new Date().toISOString(),
+        ]
+      );
+      stored++;
+    } catch { /* ignore individual error storage failures */ }
+  }
+
+  // Update summary
+  if (stored > 0) {
+    const errorCount = recentErrors.filter(e => e.level === 'error').length;
+    const warningCount = recentErrors.filter(e => e.level === 'warning').length;
+    const noticeCount = recentErrors.filter(e => e.level === 'notice').length;
+    try {
+      await db.execute(
+        `INSERT INTO client_error_summaries
+          (software_key, client_identifier, hostname, app_version,
+           total_errors, total_warnings, total_notices,
+           last_error_message, last_error_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           hostname = VALUES(hostname),
+           app_version = VALUES(app_version),
+           total_errors = total_errors + VALUES(total_errors),
+           total_warnings = total_warnings + VALUES(total_warnings),
+           total_notices = total_notices + VALUES(total_notices),
+           last_error_message = VALUES(last_error_message),
+           last_error_at = NOW()`,
+        [
+          softwareKey, clientIdentifier, hostname, appVersion,
+          errorCount, warningCount, noticeCount,
+          recentErrors[0]?.message || null,
+        ]
+      );
+    } catch { /* ignore summary failures */ }
+  }
+  return stored;
+}
+
+// ─── GET /check — Lightweight update check (no registration) ────────
+updHeartbeatRouter.get('/check', async (req, res, next) => {
+  try {
+    const softwareKey = (req.query.software_key as string) || req.header('X-Software-Key');
+    if (!softwareKey) throw badRequest('Missing software_key (query param or X-Software-Key header)');
+
+    const currentVersion = req.query.version as string || req.query.app_version as string;
+
+    const sw = await db.queryOne<any>(
+      'SELECT id, name FROM update_software WHERE software_key = ?',
+      [softwareKey]
+    );
+    if (!sw) throw badRequest('Invalid software_key');
+
+    const latest = await db.queryOne<any>(
+      `SELECT id, version, description, has_migrations, released_at, file_path
+       FROM update_releases WHERE software_id = ?
+       ORDER BY id DESC LIMIT 1`,
+      [sw.id]
+    );
+
+    const updateAvailable = latest && currentVersion
+      ? latest.version !== currentVersion
+      : !!latest;
+
+    res.json({
+      success: true,
+      software: sw.name,
+      software_id: sw.id,
+      current_version: currentVersion || null,
+      update_available: updateAvailable,
+      latest_update: latest ? {
+        id: latest.id,
+        version: latest.version,
+        description: latest.description,
+        has_migrations: latest.has_migrations,
+        released_at: latest.released_at,
+        has_file: !!latest.file_path,
+      } : null,
+      message: updateAvailable ? 'Update available' : 'Up to date',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST / — Full heartbeat ────────────────────────────────────────
 updHeartbeatRouter.post('/', async (req, res, next) => {
   try {
     const body = z.object({
@@ -33,6 +150,7 @@ updHeartbeatRouter.post('/', async (req, res, next) => {
       update_installed: z.boolean().optional(),
       update_id: z.number().optional(),
       metadata: z.any().optional(),
+      recent_errors: z.array(z.any()).optional(),
     }).parse(req.body);
 
     // Software key can come from body or header
@@ -148,6 +266,18 @@ updHeartbeatRouter.post('/', async (req, res, next) => {
       ? latest.version !== body.app_version
       : !!latest;
 
+    // Process piggybacked errors (recent_errors[])
+    let errorsStored = 0;
+    if (body.recent_errors && Array.isArray(body.recent_errors) && body.recent_errors.length > 0) {
+      errorsStored = await storeRecentErrors(
+        softwareKey, clientId,
+        body.hostname || null,
+        body.app_version || null,
+        body.os_info || null,
+        body.recent_errors
+      );
+    }
+
     // Build response
     const response: any = {
       success: true,
@@ -161,6 +291,7 @@ updHeartbeatRouter.post('/', async (req, res, next) => {
       blocked_reason: null,
       force_logout: false,
       server_message: null,
+      errors_received: errorsStored,
     };
 
     // Deliver one-shot commands

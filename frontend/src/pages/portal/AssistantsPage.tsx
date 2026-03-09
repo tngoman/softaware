@@ -12,6 +12,15 @@ import {
   XMarkIcon,
   PaperAirplaneIcon,
   UserCircleIcon,
+  LightBulbIcon,
+  GlobeAltIcon,
+  UserGroupIcon,
+  DocumentMagnifyingGlassIcon,
+  EnvelopeIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  RocketLaunchIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import api, { API_BASE_URL } from '../../services/api';
 import Swal from 'sweetalert2';
@@ -41,12 +50,23 @@ const AssistantsPage: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
 
-  // Chat state
+  // Chat state — persisted per assistant until user clears
+  const chatHistoryRef = useRef<Record<string, ChatMessage[]>>({});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const [showCapabilities, setShowCapabilities] = useState(false);
+
+  const CAPABILITIES = [
+    { icon: ChatBubbleLeftRightIcon, title: 'AI-Powered Chat', desc: 'Your assistant answers visitor questions 24/7 using your knowledge base content.', color: 'text-blue-600 bg-blue-50' },
+    { icon: UserGroupIcon, title: 'Lead Capture', desc: 'Automatically captures visitor details and sends lead notifications to your email.', color: 'text-emerald-600 bg-emerald-50' },
+    { icon: GlobeAltIcon, title: 'Website Embed', desc: 'Add a chat widget to any website with a single line of code — or share a direct chat link.', color: 'text-violet-600 bg-violet-50' },
+    { icon: DocumentMagnifyingGlassIcon, title: 'Knowledge Base', desc: 'Train your assistant with URLs, documents, or pasted text so it speaks your business language.', color: 'text-amber-600 bg-amber-50' },
+    { icon: EnvelopeIcon, title: 'Email Notifications', desc: 'Get email alerts when visitors chat, submit forms, or become new leads.', color: 'text-pink-600 bg-pink-50' },
+    { icon: RocketLaunchIcon, title: 'Site Builder', desc: 'Build a landing page with your assistant embedded — manage content and deploy from your dashboard.', color: 'text-indigo-600 bg-indigo-50' },
+  ];
 
   const loadAssistants = useCallback(async () => {
     setLoading(true);
@@ -64,18 +84,30 @@ const AssistantsPage: React.FC = () => {
     loadAssistants();
   }, [loadAssistants]);
 
-  // Auto-scroll and focus when chat modal opens
+  // Restore saved messages when opening a chat modal (or start empty)
+  const prevChatModalId = useRef<string | null>(null);
   useEffect(() => {
     if (chatModal) {
-      setMessages([]);
-      setChatInput('');
+      // Save previous assistant's messages before switching
+      if (prevChatModalId.current && prevChatModalId.current !== chatModal.id) {
+        chatHistoryRef.current[prevChatModalId.current] = messages;
+      }
+      prevChatModalId.current = chatModal.id;
+      // Restore this assistant's history or start fresh
+      setMessages(chatHistoryRef.current[chatModal.id] || []);
       setTimeout(() => chatInputRef.current?.focus(), 100);
+    } else if (prevChatModalId.current) {
+      // Modal closing — save current messages
+      chatHistoryRef.current[prevChatModalId.current] = messages;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatModal]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    // Keep per-assistant history in sync
+    if (chatModal) chatHistoryRef.current[chatModal.id] = messages;
+  }, [messages, chatModal]);
 
   // Chat functionality
   const sendMessage = async () => {
@@ -94,14 +126,29 @@ const AssistantsPage: React.FC = () => {
     setStreaming(true);
 
     try {
+      // Build conversation history from previous messages for context
+      const history = messages
+        .filter(m => m.content)
+        .map(m => ({ role: m.role, content: m.content }));
+
       const response = await fetch(
         `${API_BASE_URL}/assistants/chat`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assistantId: chatModal.id, message: userMsg.content }),
+          body: JSON.stringify({
+            assistantId: chatModal.id,
+            message: userMsg.content,
+            conversationHistory: history.slice(-10),
+          }),
         }
       );
+
+      // Handle HTTP errors before attempting to stream
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        throw new Error(errData?.error || `Server error (${response.status})`);
+      }
 
       const contentType = response.headers.get('content-type') || '';
 
@@ -109,13 +156,16 @@ const AssistantsPage: React.FC = () => {
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
         let fullText = '';
+        let lineBuffer = '';
 
         if (reader) {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            lineBuffer += decoder.decode(value, { stream: true });
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() ?? '';
+
             for (const line of lines) {
               if (line.startsWith('data: ')) {
                 const data = line.slice(6);
@@ -123,12 +173,14 @@ const AssistantsPage: React.FC = () => {
                 try {
                   const parsed = JSON.parse(data);
                   if (parsed.done) continue;
+                  if (parsed.error) {
+                    fullText += `\n⚠️ ${parsed.error}`;
+                    continue;
+                  }
                   fullText += parsed.token || parsed.content || parsed.text || '';
                 } catch {
-                  fullText += data;
+                  // Skip malformed JSON fragments
                 }
-              } else if (line.trim() && !line.startsWith(':')) {
-                fullText += line;
               }
             }
             setMessages((prev) =>
@@ -148,7 +200,7 @@ const AssistantsPage: React.FC = () => {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsgId
-            ? { ...m, content: 'Sorry, I encountered an error. Please try again.' }
+            ? { ...m, content: err instanceof Error ? err.message : 'Sorry, I encountered an error. Please try again.' }
             : m
         )
       );
@@ -216,30 +268,101 @@ const AssistantsPage: React.FC = () => {
             Create and manage AI chatbots for your websites
           </p>
         </div>
-        <Link
-          to="/portal/assistants/new"
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-        >
-          <PlusIcon className="h-4 w-4" />
-          New Assistant
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCapabilities(!showCapabilities)}
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-picton-blue bg-picton-blue/10 rounded-lg hover:bg-picton-blue/20 transition-all"
+          >
+            <LightBulbIcon className="h-4 w-4" />
+            What Can My Assistant Do?
+            {showCapabilities ? <ChevronUpIcon className="h-3.5 w-3.5" /> : <ChevronDownIcon className="h-3.5 w-3.5" />}
+          </button>
+          <Link
+            to="/portal/assistants/new"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+          >
+            <PlusIcon className="h-4 w-4" />
+            New Assistant
+          </Link>
+        </div>
       </div>
+
+      {/* Capabilities Helper Panel */}
+      {showCapabilities && (
+        <div className="bg-gradient-to-br from-picton-blue/5 via-white to-violet-50 rounded-xl border border-picton-blue/20 p-6 animate-in fade-in duration-300">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-picton-blue/10 flex items-center justify-center">
+                <SparklesIcon className="h-4.5 w-4.5 text-picton-blue" />
+              </div>
+              <h3 className="text-base font-semibold text-gray-900">What Your Assistant Can Do</h3>
+            </div>
+            <button onClick={() => setShowCapabilities(false)} className="text-gray-400 hover:text-gray-600 transition-colors">
+              <XMarkIcon className="h-5 w-5" />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {CAPABILITIES.map((cap) => (
+              <div key={cap.title} className="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100 hover:shadow-sm transition-all">
+                <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${cap.color}`}>
+                  <cap.icon className="h-4.5 w-4.5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-gray-900">{cap.title}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{cap.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex items-center gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200">
+            <LightBulbIcon className="h-4 w-4 text-amber-600 flex-shrink-0" />
+            <p className="text-xs text-amber-800">
+              <strong>Pro tip:</strong> Add more knowledge sources (URLs, documents, text) to make your assistant smarter. The more it knows about your business, the better it helps your visitors.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Empty State */}
       {assistants.length === 0 ? (
-        <div className="bg-white rounded-xl border border-slate-200 p-16 text-center">
-          <SparklesIcon className="h-16 w-16 text-gray-300 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-gray-700 mb-2">No assistants yet</h3>
-          <p className="text-gray-500 mb-6 max-w-sm mx-auto">
-            Create your first AI-powered chatbot to help answer questions, capture leads, and support customers on your website.
-          </p>
-          <Link
-            to="/portal/assistants/new"
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 transition-all"
-          >
-            <PlusIcon className="h-4 w-4" />
-            Create Your First Assistant
-          </Link>
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="p-12 text-center">
+            <div className="mx-auto w-20 h-20 rounded-2xl bg-gradient-to-br from-picton-blue/10 to-violet-100 flex items-center justify-center mb-5">
+              <SparklesIcon className="h-10 w-10 text-picton-blue" />
+            </div>
+            <h3 className="text-xl font-semibold text-gray-900 mb-2">Create Your First AI Assistant</h3>
+            <p className="text-gray-500 mb-8 max-w-md mx-auto">
+              Set up an AI-powered chatbot in minutes. It will answer visitor questions, capture leads, and support your customers 24/7.
+            </p>
+            <Link
+              to="/portal/assistants/new"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+            >
+              <PlusIcon className="h-4 w-4" />
+              Get Started
+            </Link>
+          </div>
+          {/* Quick overview */}
+          <div className="border-t border-slate-100 bg-slate-50/50 px-8 py-6">
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">How it works</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {[
+                { step: '1', title: 'Describe Your Business', desc: 'Tell us your business type and set a personality style.' },
+                { step: '2', title: 'Add Knowledge', desc: 'Upload docs, paste text, or share website URLs to train your assistant.' },
+                { step: '3', title: 'Embed & Go Live', desc: 'Copy one line of code to your website or share a direct chat link.' },
+              ].map((item) => (
+                <div key={item.step} className="flex items-start gap-3">
+                  <div className="w-7 h-7 rounded-full bg-picton-blue text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
+                    {item.step}
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{item.title}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{item.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -375,8 +498,17 @@ const AssistantsPage: React.FC = () => {
                 <h3 className="text-base font-semibold text-gray-900">{chatModal.name}</h3>
                 <p className="text-xs text-gray-400">AI Assistant • Test Chat</p>
               </div>
+              {messages.length > 0 && (
+                <button
+                  onClick={() => { setMessages([]); setChatInput(''); if (chatModal) chatHistoryRef.current[chatModal.id] = []; }}
+                  title="New Chat"
+                  className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                </button>
+              )}
               <button
-                onClick={() => { setChatModal(null); setMessages([]); setChatInput(''); }}
+                onClick={() => setChatModal(null)}
                 className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <XMarkIcon className="h-5 w-5" />

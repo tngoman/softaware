@@ -9,12 +9,16 @@ import {
   ChevronRightIcon,
   Bars3Icon,
   XMarkIcon,
+  EyeIcon,
+  ArrowUturnLeftIcon,
+  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { AuthModel } from '../../models';
 import { useAppSettings } from '../../hooks/useAppSettings';
 import NotificationDropdown from '../Notifications/NotificationDropdown';
 import UserAccountMenu from '../User/UserAccountMenu';
+import GlobalCallProvider from '../CallProvider/GlobalCallProvider';
 
 interface PortalLayoutProps {
   children: ReactNode;
@@ -126,9 +130,46 @@ const SidebarSection: React.FC<{ section: NavSection; pathname: string }> = ({
 const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout } = useAppStore();
+  const { user, logout, setUser, setIsAuthenticated } = useAppStore();
   const { logoUrl, siteName } = useAppSettings();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [isMasquerading, setIsMasquerading] = useState(false);
+  const [exitingMasquerade, setExitingMasquerade] = useState(false);
+
+  // Check masquerade state on mount and user changes
+  useEffect(() => {
+    setIsMasquerading(AuthModel.isMasquerading());
+  }, [user]);
+
+  const handleExitMasquerade = async () => {
+    setExitingMasquerade(true);
+    try {
+      const { token, user: adminUser } = await AuthModel.exitMasquerade();
+
+      // Fetch fresh permissions for admin
+      try {
+        const permissions = await AuthModel.getUserPermissions();
+        adminUser.permissions = permissions;
+        AuthModel.storeAuth(token, adminUser);
+      } catch {
+        adminUser.permissions = [];
+      }
+
+      setUser(adminUser);
+      setIsAuthenticated(true);
+      setIsMasquerading(false);
+
+      navigate('/admin/clients');
+    } catch (error) {
+      console.error('Exit masquerade error:', error);
+      // If restore fails, force full logout
+      AuthModel.clearAuth();
+      logout();
+      navigate('/login');
+    } finally {
+      setExitingMasquerade(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -189,6 +230,8 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
 
   return (
     <div className="flex h-screen bg-gray-50">
+      {/* Global incoming-call listener (persists across pages) */}
+      <GlobalCallProvider />
       {/* Desktop Sidebar */}
       <div className="hidden md:flex md:w-64 md:flex-col">
         <div className="flex min-h-0 flex-1 flex-col bg-white border-r border-gray-200 shadow-sm">
@@ -215,6 +258,31 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
 
       {/* Main content */}
       <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Masquerade Banner */}
+        {isMasquerading && (
+          <div className="bg-purple-600 text-white px-4 py-2 flex items-center justify-between shadow-md z-50">
+            <div className="flex items-center gap-2">
+              <EyeIcon className="w-5 h-5 text-purple-200" />
+              <span className="text-sm font-medium">
+                You are viewing as <strong>{user?.email || 'another user'}</strong>
+              </span>
+              <span className="text-xs text-purple-200 ml-1">(masquerade mode)</span>
+            </div>
+            <button
+              onClick={handleExitMasquerade}
+              disabled={exitingMasquerade}
+              className="flex items-center gap-1.5 px-3 py-1 text-sm font-medium rounded-lg bg-white/20 hover:bg-white/30 text-white border border-white/30 transition-colors disabled:opacity-50"
+            >
+              {exitingMasquerade ? (
+                <ArrowPathIcon className="w-4 h-4 animate-spin" />
+              ) : (
+                <ArrowUturnLeftIcon className="w-4 h-4" />
+              )}
+              Return to Admin
+            </button>
+          </div>
+        )}
+
         {/* Top header */}
         <header className="bg-white shadow-md border-b-2 border-picton-blue/20">
           <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
@@ -229,7 +297,7 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
             </div>
             <div className="flex items-center space-x-3">
               <NotificationDropdown />
-              <UserAccountMenu user={user!} onLogout={handleLogout} />
+              <UserAccountMenu user={user} onLogout={handleLogout} />
             </div>
           </div>
         </header>

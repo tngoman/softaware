@@ -1,46 +1,61 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
 import Layout from './components/Layout/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import PermissionRoute from './components/PermissionRoute';
-import Login from './pages/Login';
-import ForgotPassword from './pages/ForgotPassword';
-import Dashboard from './pages/Dashboard';
+import Login from './pages/auth/Login';
+import ForgotPassword from './pages/auth/ForgotPassword';
+import Dashboard from './pages/general/Dashboard';
 import AdminDashboard from './pages/admin/Dashboard';
-import FinancialDashboard from './pages/FinancialDashboard';
-import Quotations from './pages/Quotations';
-import CreateQuotation from './pages/CreateQuotation';
-import Invoices from './pages/Invoices';
-import CreateInvoice from './pages/CreateInvoice';
-import Contacts from './pages/Contacts';
-import ContactDetails from './pages/ContactDetails';
-import Pricing from './pages/Pricing';
-import Categories from './pages/Categories';
-import Settings from './pages/Settings';
-import Transactions from './pages/Transactions';
-import AddExpense from './pages/AddExpense';
-import AddIncome from './pages/AddIncome';
-import VatReports from './pages/VatReports';
-import BalanceSheet from './pages/BalanceSheet';
-import ProfitAndLoss from './pages/ProfitAndLoss';
-import TransactionListing from './pages/TransactionListing';
-import Statement from './pages/Statement';
-import Notifications from './pages/Notifications';
-import Profile from './pages/Profile';
-import AccountSettings from './pages/AccountSettings';
-import Updates from './pages/Updates';
-import UpdatesAdmin from './pages/UpdatesAdmin';
-import SoftwareManagement from './pages/SoftwareManagement';
-import TasksPage from './pages/TasksPage';
-import GroupsPage from './pages/GroupsPage';
-import DatabaseManager from './pages/DatabaseManager';
-import { Credentials } from './pages/Credentials';
-import { CreateCredential } from './pages/CreateCredential';
+import AIOverview from './pages/admin/AIOverview';
+import ClientManager from './pages/admin/ClientManager';
+import EnterpriseEndpoints from './pages/admin/EnterpriseEndpoints';
+import AICredits from './pages/admin/AICredits';
+import FinancialDashboard from './pages/finance/FinancialDashboard';
+import Quotations from './pages/finance/Quotations';
+import CreateQuotation from './pages/finance/CreateQuotation';
+import Invoices from './pages/finance/Invoices';
+import CreateInvoice from './pages/finance/CreateInvoice';
+import Contacts from './pages/contacts/Contacts';
+import ContactDetails from './pages/contacts/ContactDetails';
+import Pricing from './pages/general/Pricing';
+import Categories from './pages/general/Categories';
+import Settings from './pages/general/Settings';
+import Transactions from './pages/finance/Transactions';
+import AddExpense from './pages/finance/AddExpense';
+import AddIncome from './pages/finance/AddIncome';
+import VatReports from './pages/finance/VatReports';
+import BalanceSheet from './pages/finance/BalanceSheet';
+import ProfitAndLoss from './pages/finance/ProfitAndLoss';
+import TransactionListing from './pages/finance/TransactionListing';
+import Statement from './pages/finance/Statement';
+import Notifications from './pages/general/Notifications';
+import Profile from './pages/general/Profile';
+import AccountSettings from './pages/general/AccountSettings';
+import Updates from './pages/general/Updates';
+import UpdatesAdmin from './pages/general/UpdatesAdmin';
+import SoftwareManagement from './pages/general/SoftwareManagement';
+import TasksPage from './pages/general/TasksPage';
+import GroupsPage from './pages/general/GroupsPage';
+import ChatPage from './pages/general/ChatPage';
+import PlanningPage from './pages/general/PlanningPage';
+import DatabaseManager from './pages/general/DatabaseManager';
+import { Credentials } from './pages/general/Credentials';
+import { CreateCredential } from './pages/general/CreateCredential';
 import Users from './pages/system/Users';
 import Roles from './pages/system/Roles';
 import Permissions from './pages/system/Permissions';
 import SystemSettings from './pages/system/SystemSettings';
+import CasesList from './pages/general/CasesList';
+import CaseDetailView from './pages/general/CaseDetailView';
+import CasesDashboard from './pages/cases/CasesDashboard';
+import AdminCaseManagement from './pages/admin/AdminCaseManagement';
+import Webmail from './pages/admin/Webmail';
+import ClientMonitor from './pages/general/ClientMonitor';
+import ErrorReports from './pages/general/ErrorReports';
+import CaseReportHandle from './components/Cases/CaseReportHandle';
 import { LandingPage, AuthPage, ActivatePage } from './pages/public';
 import PortalLayout from './components/Layout/PortalLayout';
 import {
@@ -49,6 +64,7 @@ import {
   CreateAssistant,
   ChatInterface,
   SitesPage,
+  SiteBuilderEditor,
   PortalSettings,
 } from './pages/portal';
 import { useAuth } from './hooks/useAuth';
@@ -80,6 +96,14 @@ const App: React.FC = () => {
   return (
     <Router>
       <div className="App">
+        <Toaster
+          position="top-right"
+          toastOptions={{
+            duration: 3000,
+            style: { fontSize: '14px', maxWidth: '420px' },
+          }}
+        />
+        <CaseReportHandle />
         <Routes>
           {/* Public Routes — Marketing & SaaS Auth */}
           <Route path="/landing" element={<LandingPage />} />
@@ -102,6 +126,8 @@ const App: React.FC = () => {
           <Route path="/portal/assistants/:assistantId/edit" element={<ProtectedRoute><PortalLayout><CreateAssistant /></PortalLayout></ProtectedRoute>} />
           <Route path="/portal/assistants/:assistantId/chat" element={<ProtectedRoute><PortalLayout><ChatInterface /></PortalLayout></ProtectedRoute>} />
           <Route path="/portal/sites" element={<ProtectedRoute><PortalLayout><SitesPage /></PortalLayout></ProtectedRoute>} />
+          <Route path="/portal/sites/new" element={<ProtectedRoute><PortalLayout><SiteBuilderEditor /></PortalLayout></ProtectedRoute>} />
+          <Route path="/portal/sites/:siteId/edit" element={<ProtectedRoute><PortalLayout><SiteBuilderEditor /></PortalLayout></ProtectedRoute>} />
           <Route path="/portal/settings" element={<ProtectedRoute><PortalLayout><PortalSettings /></PortalLayout></ProtectedRoute>} />
           <Route path="/financial-dashboard" element={<ProtectedRoute><Layout><FinancialDashboard /></Layout></ProtectedRoute>} />
           <Route path="/notifications" element={<ProtectedRoute><Layout><Notifications /></Layout></ProtectedRoute>} />
@@ -133,8 +159,25 @@ const App: React.FC = () => {
           <Route path="/software" element={<ProtectedRoute><Layout><SoftwareManagement /></Layout></ProtectedRoute>} />
           <Route path="/tasks" element={<ProtectedRoute><Layout><TasksPage /></Layout></ProtectedRoute>} />
           <Route path="/updates" element={<ProtectedRoute><Layout><UpdatesAdmin /></Layout></ProtectedRoute>} />
+          <Route path="/client-monitor" element={<AdminRoute><Layout><ClientMonitor /></Layout></AdminRoute>} />
+          <Route path="/error-reports" element={<AdminRoute><Layout><ErrorReports /></Layout></AdminRoute>} />
           <Route path="/groups" element={<ProtectedRoute><Layout><GroupsPage /></Layout></ProtectedRoute>} />
+          <Route path="/chat" element={<ProtectedRoute><Layout><ChatPage /></Layout></ProtectedRoute>} />
+          <Route path="/planning" element={<ProtectedRoute><Layout><PlanningPage /></Layout></ProtectedRoute>} />
           <Route path="/database" element={<AdminRoute><Layout><DatabaseManager /></Layout></AdminRoute>} />
+
+          {/* AI & Enterprise Admin Routes */}
+          <Route path="/admin/ai" element={<AdminRoute><Layout><AIOverview /></Layout></AdminRoute>} />
+          <Route path="/admin/clients" element={<AdminRoute><Layout><ClientManager /></Layout></AdminRoute>} />
+          <Route path="/admin/enterprise" element={<AdminRoute><Layout><EnterpriseEndpoints /></Layout></AdminRoute>} />
+          <Route path="/admin/credits" element={<AdminRoute><Layout><AICredits /></Layout></AdminRoute>} />
+          <Route path="/admin/cases" element={<AdminRoute><Layout><AdminCaseManagement /></Layout></AdminRoute>} />
+          <Route path="/admin/webmail" element={<AdminRoute><Layout><Webmail /></Layout></AdminRoute>} />
+
+          {/* Case Management */}
+          <Route path="/cases/dashboard" element={<ProtectedRoute><Layout><CasesDashboard /></Layout></ProtectedRoute>} />
+          <Route path="/cases" element={<ProtectedRoute><Layout><CasesList /></Layout></ProtectedRoute>} />
+          <Route path="/cases/:id" element={<ProtectedRoute><Layout><CaseDetailView /></Layout></ProtectedRoute>} />
 
           <Route path="/credentials" element={<AdminRoute><Layout><Credentials /></Layout></AdminRoute>} />
           <Route path="/credentials/new" element={<AdminRoute><Layout><CreateCredential /></Layout></AdminRoute>} />

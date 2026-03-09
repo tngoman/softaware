@@ -50,7 +50,6 @@ const TEMPLATES: Record<string, PersonaTemplate> = {
       { key: 'pricing_info',      label: 'Pricing / Rates',           type: 'url'  },
       { key: 'contact_details',   label: 'Contact Details',           type: 'url'  },
       { key: 'services_offered',  label: 'Services Offered',          type: 'url'  },
-      { key: 'testimonials',      label: 'Testimonials / Reviews',    type: 'url'  },
       { key: 'about_company',     label: 'About / Company Info',      type: 'url'  },
     ],
   },

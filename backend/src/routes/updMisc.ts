@@ -28,34 +28,56 @@ export const updMiscRouter = Router();
 updMiscRouter.get('/info', (_req, res) => {
   res.json({
     name: 'Softaware Updates API',
-    version: '2.0.0',
-    description: 'Update management system — absorbed into the main backend API',
+    version: '3.0.0',
+    base_url: 'https://updates.softaware.net.za',
+    description: 'Software update distribution, client heartbeat monitoring, and error reporting system',
     endpoints: {
-      authentication: { 'POST /auth/login': 'Login with email and password (JWT)' },
+      authentication: {
+        'POST /auth/login': 'Login with email and password → JWT token',
+      },
+      heartbeat: {
+        'POST /updates/heartbeat': 'Client heartbeat — register/update presence, check for updates, receive commands (requires software_key)',
+        'GET /updates/heartbeat/check': 'Lightweight update check — no registration, just checks (requires software_key)',
+      },
+      error_reporting: {
+        'POST /updates/error-report': 'Report client errors — backend or frontend (requires software_key)',
+      },
       software: {
-        'GET /updates/software': 'List all software products',
-        'POST /updates/software': 'Create software (admin)',
-        'PUT /updates/software': 'Update software (admin)',
-        'DELETE /updates/software?id=N': 'Delete software (admin)',
+        'GET /updates/software': 'List all software products (public)',
+        'POST /updates/software': 'Create software product (admin)',
+        'PUT /updates/software': 'Update software product (admin)',
+        'DELETE /updates/software?id=N': 'Delete software product (admin)',
       },
       updates: {
-        'GET /updates/updates': 'List all updates',
+        'GET /updates/updates': 'List all update releases (admin)',
         'POST /updates/updates': 'Create update record (admin)',
-        'PUT /updates/updates': 'Modify update (admin)',
-        'DELETE /updates/updates?id=N': 'Delete update (admin)',
+        'PUT /updates/updates': 'Modify update record (admin)',
+        'DELETE /updates/updates?id=N': 'Delete update + file (admin)',
       },
       files: {
-        'POST /updates/upload': 'Upload update package (API key)',
-        'GET /updates/download?update_id=N': 'Download update file',
+        'POST /updates/upload': 'Upload update package (requires API key or JWT)',
+        'GET /updates/download?update_id=N': 'Download update file (requires software_key)',
       },
-      heartbeat: { 'POST /updates/heartbeat': 'Client heartbeat (software key)' },
-      clients: { 'GET /updates/clients': 'List clients (admin)' },
+      clients: {
+        'GET /updates/clients': 'List all clients (admin)',
+        'PUT /updates/clients': 'Client actions: block/unblock/force_logout/send_message (admin)',
+        'DELETE /updates/clients?id=N': 'Delete client record (admin)',
+      },
       modules: {
-        'GET /updates/modules': 'List modules',
-        'GET /updates/modules/:id/developers': 'Module developers',
+        'GET /updates/modules': 'List modules (authenticated)',
+        'GET /updates/modules/:id/developers': 'List module developers (authenticated)',
+        'POST /updates/modules': 'Create module (admin)',
+        'POST /updates/modules/:id/developers': 'Assign developer to module (admin)',
+      },
+      status: {
+        'GET /updates/info': 'This endpoint — API metadata',
+        'GET /updates/api_status': 'System health — DB connection, table counts',
+        'GET /updates/dashboard': 'Admin dashboard — summary stats (authenticated)',
+        'GET /updates/installed': 'List installed updates',
       },
     },
-    authentication: 'Bearer token (JWT)',
+    client_auth: 'Clients authenticate via software_key (body field or X-Software-Key header)',
+    admin_auth: 'Admins authenticate via Bearer JWT token (Authorization header)',
     status: 'API is running',
   });
 });

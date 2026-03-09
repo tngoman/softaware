@@ -407,7 +407,7 @@ Now includes tier-based routing and lead capture:
 
 **Free Tier:**
 - LLM: R0 (local Qwen 2.5 3B)
-- Storage: <R1 (50 pages in sqlite-vec)
+- Storage: <R1 (50 pages in rl)
 - Bandwidth: <R5 (500 messages)
 - **Total Cost: ~R6/month**
 - **Revenue: R0**

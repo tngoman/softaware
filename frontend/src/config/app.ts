@@ -25,17 +25,23 @@ function isLocalEnvironment(): boolean {
   if (typeof window === 'undefined') return false;
   
   const hostname = window.location.hostname;
-  const host = window.location.host;
   
   // Check for local development indicators
   return (
     hostname === 'localhost' ||
     hostname === '127.0.0.1' ||
-    hostname.includes('.local') ||
-    host.includes(':300') ||
-    host.includes(':5173') ||
-    host.includes(':8080')
+    hostname.includes('.local')
   );
+}
+
+/**
+ * Detect if running on the server's public IP (dev access via IP:3003)
+ */
+function isDirectIpAccess(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hostname = window.location.hostname;
+  // Matches any raw IP address (not a domain name)
+  return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
 }
 
 /**
@@ -46,6 +52,14 @@ function getEnvironmentConfig() {
     return config.local;
   }
   
+  // Accessing via raw IP (e.g. 75.119.141.98:3003) — use same IP with backend port
+  if (isDirectIpAccess()) {
+    return {
+      apiBaseUrl: `http://${window.location.hostname}:8787/api`,
+      environment: 'development'
+    };
+  }
+  
   return config.production;
 }
 
@@ -53,17 +67,20 @@ function getEnvironmentConfig() {
  * Get the API base URL for the current environment
  */
 export function getApiBaseUrl(): string {
-  // Try to get from app settings first (if available)
-  try {
-    const appSettings = localStorage.getItem('app_settings');
-    if (appSettings) {
-      const settings = JSON.parse(appSettings);
-      if (settings.site_base_url) {
-        return settings.site_base_url;
+  // Skip localStorage override for direct-IP or local dev access
+  // (stale settings may contain localhost:8787 from a different origin)
+  if (!isLocalEnvironment() && !isDirectIpAccess()) {
+    try {
+      const appSettings = localStorage.getItem('app_settings');
+      if (appSettings) {
+        const settings = JSON.parse(appSettings);
+        if (settings.site_base_url) {
+          return settings.site_base_url;
+        }
       }
+    } catch (error) {
+      console.warn('Failed to load app settings from localStorage:', error);
     }
-  } catch (error) {
-    console.warn('Failed to load app settings from localStorage:', error);
   }
   
   // Fall back to environment detection

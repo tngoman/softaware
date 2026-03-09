@@ -22,7 +22,9 @@ export interface GeneratedSite {
   ftp_port: number;
   ftp_protocol: 'ftp' | 'sftp';
   ftp_directory: string;
-  status: 'draft' | 'generated' | 'deployed' | 'failed';
+  generated_html: string | null;
+  status: 'draft' | 'generating' | 'generated' | 'deployed' | 'failed';
+  generation_error: string | null;
   last_deployed_at: string | null;
   deployment_error: string | null;
   theme_color: string;
@@ -63,6 +65,16 @@ export const siteBuilderService = {
       ? encryptPassword(data.ftpPassword)
       : null;
 
+    // Validate widget_client_id — only use if it's a valid UUID that exists in widget_clients
+    let validWidgetClientId: string | null = null;
+    if (data.widgetClientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.widgetClientId)) {
+      const exists = await db.queryOne<{ id: string }>(
+        'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
+        [data.widgetClientId]
+      );
+      if (exists) validWidgetClientId = data.widgetClientId;
+    }
+
     await db.execute(
       `INSERT INTO generated_sites (
         id, user_id, widget_client_id, business_name, tagline,
@@ -74,7 +86,7 @@ export const siteBuilderService = {
       [
         id,
         data.userId,
-        data.widgetClientId || null,
+        validWidgetClientId,
         data.businessName,
         data.tagline || null,
         data.logoUrl || null,
@@ -190,6 +202,21 @@ export const siteBuilderService = {
       updates.push('ftp_directory = ?');
       values.push(data.ftpDirectory);
     }
+    if (data.widgetClientId !== undefined) {
+      if (data.widgetClientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.widgetClientId)) {
+        const exists = await db.queryOne<{ id: string }>(
+          'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
+          [data.widgetClientId]
+        );
+        if (exists) {
+          updates.push('widget_client_id = ?');
+          values.push(data.widgetClientId);
+        }
+      } else {
+        updates.push('widget_client_id = ?');
+        values.push(null);
+      }
+    }
 
     if (updates.length === 0) return;
 
@@ -200,6 +227,36 @@ export const siteBuilderService = {
     await db.execute(
       `UPDATE generated_sites SET ${updates.join(', ')} WHERE id = ?`,
       values
+    );
+  },
+
+  /**
+   * Mark a site as 'generating' (AI in progress)
+   */
+  async setGenerating(siteId: string): Promise<void> {
+    await db.execute(
+      `UPDATE generated_sites SET status = 'generating', generation_error = NULL, updated_at = ? WHERE id = ?`,
+      [toMySQLDate(new Date()), siteId]
+    );
+  },
+
+  /**
+   * Store AI-generated HTML and mark as generated
+   */
+  async storeGeneratedHtml(siteId: string, html: string): Promise<void> {
+    await db.execute(
+      `UPDATE generated_sites SET generated_html = ?, status = 'generated', generation_error = NULL, updated_at = ? WHERE id = ?`,
+      [html, toMySQLDate(new Date()), siteId]
+    );
+  },
+
+  /**
+   * Store generation error
+   */
+  async setGenerationError(siteId: string, error: string): Promise<void> {
+    await db.execute(
+      `UPDATE generated_sites SET status = 'failed', generation_error = ?, updated_at = ? WHERE id = ?`,
+      [error.slice(0, 2000), toMySQLDate(new Date()), siteId]
     );
   },
 
@@ -234,8 +291,9 @@ export const siteBuilderService = {
    * Build HTML template with injected data
    */
   buildHTML(site: GeneratedSite): string {
-    const widgetScript = site.widget_client_id
-      ? `<script src="https://api.softaware.net.za/widget.js" data-client-id="${site.widget_client_id}" defer></script>`
+    const isRealAssistant = site.widget_client_id && /^(assistant-|staff-assistant-|[0-9a-f]{8}-)/i.test(site.widget_client_id);
+    const widgetScript = isRealAssistant
+      ? `<script src="https://softaware.net.za/api/assistants/widget.js" data-assistant-id="${site.widget_client_id}" defer></script>`
       : '';
 
     return `<!DOCTYPE html>

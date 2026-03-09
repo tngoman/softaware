@@ -31,6 +31,13 @@ export class PricingModel {
     const response = await api.delete<{ success: boolean }>(`/pricing/${id}`);
     return response.data;
   }
+
+  static async import(formData: FormData) {
+    const response = await api.post<{ success: boolean; created: number; updated: number; categories_created: number }>('/pricing/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
 }
 
 /**
@@ -283,18 +290,18 @@ export class VatPeriodModel {
  */
 export class VatReportModel {
   static async vat201(period_start: string, period_end: string) {
-    const response = await api.get<Vat201Report>('/vat-reports', { params: { type: 'vat201', period_start, period_end } });
-    return response.data;
+    const response = await api.get<{success: boolean; data: any}>('/vat-reports', { params: { type: 'vat201', period_start, period_end } });
+    return response.data.data || response.data;
   }
 
   static async itr14(year: number) {
-    const response = await api.get<Itr14Report>('/vat-reports', { params: { type: 'itr14', year } });
-    return response.data;
+    const response = await api.get<{success: boolean; data: any}>('/vat-reports', { params: { type: 'itr14', year } });
+    return response.data.data || response.data;
   }
 
   static async irp6(to_date?: string) {
-    const response = await api.get<Irp6Report>('/vat-reports', { params: { type: 'irp6', to_date } });
-    return response.data;
+    const response = await api.get<{success: boolean; data: any}>('/vat-reports', { params: { type: 'irp6', to_date } });
+    return response.data.data || response.data;
   }
 }
 

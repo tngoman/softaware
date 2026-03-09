@@ -32,6 +32,7 @@ export const pool = mysql.createPool({
   queueLimit: 0,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
+  timezone: '+00:00',   // toMySQLDate stores UTC — read back as UTC too
 });
 
 // Helper type for query results

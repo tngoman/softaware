@@ -34,3 +34,38 @@ export {
   VatPeriodModel,
   VatReportModel
 } from './OtherModels';
+
+// Admin AI models
+export {
+  AdminClientModel,
+  AdminEnterpriseModel,
+  AdminCreditsModel,
+  AdminConfigModel,
+} from './AdminAIModels';
+export type {
+  EnterpriseEndpoint,
+  EndpointCreateInput,
+  RequestLog,
+  ClientOverview,
+  CreditPackage,
+  CreditBalance,
+  SystemStats,
+} from './AdminAIModels';
+
+// Case Management
+export { CaseModel } from './CaseModel';
+
+// Team Chat
+export { TeamChatModel } from './TeamChatModel';
+export type { TeamChat, TeamChatMember, TeamChatMessage, AvailableUser } from './TeamChatModel';
+
+// Webmail
+export { WebmailAccountModel, WebmailModel, WebmailSettingsModel } from './WebmailModel';
+export type {
+  MailboxAccount, CreateMailboxInput, WebmailDomainSettings, MailFolder, MailAddress,
+  MailMessageHeader, MailMessage, MailAttachment, ConnectionTestResult,
+  MessageListResponse,
+} from './WebmailModel';
+
+// Local Tasks (synced from external sources)
+export { LocalTasksModel } from './LocalTasksModel';

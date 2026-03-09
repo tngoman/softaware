@@ -70,16 +70,17 @@ export interface Payment {
 // VAT-Compliant Transaction Types
 export interface Transaction {
   transaction_id?: number;
+  id?: number;
   transaction_date: string;
-  transaction_type: 'expense' | 'income';
-  party_name: string;
+  transaction_type?: 'expense' | 'income';
+  party_name?: string;
   party_vat_number?: string;
-  invoice_number: string;
+  invoice_number?: string;
   document_path?: string;
-  total_amount: number;
-  vat_type: 'standard' | 'zero' | 'exempt' | 'non-vat';
-  vat_amount: number;
-  exclusive_amount: number;
+  total_amount?: number;
+  vat_type?: 'standard' | 'zero' | 'exempt' | 'non-vat';
+  vat_amount?: number;
+  exclusive_amount?: number;
   expense_category_id?: number;
   income_type?: string;
   category_name?: string;
@@ -87,6 +88,15 @@ export interface Transaction {
   created_at?: string;
   updated_at?: string;
   transaction_payment_id?: number;
+  // Accounting fields
+  account_id?: number;
+  account_name?: string;
+  account_code?: string;
+  account_type?: string;
+  debit_amount?: number;
+  credit_amount?: number;
+  description?: string;
+  reference_number?: string;
 }
 
 export interface ExpenseCategory {
@@ -270,6 +280,9 @@ export interface User {
     name: string;
     slug: string;
   }>;
+  // Two-factor authentication
+  two_factor_enabled?: boolean;
+  two_factor_method?: 'totp' | 'email' | 'sms';
   // Legacy fields for compatibility
   user_id?: number;
   user_email?: string;
@@ -338,12 +351,16 @@ export interface Task {
   id: string | number;
   title: string;
   description?: string;
+  notes?: string;
   status: 'new' | 'in-progress' | 'completed' | 'progress' | 'pending';
   type: 'development' | 'bug-fix' | 'feature' | 'maintenance' | 'support';
   hours: string;
+  estimated_hours?: number | string;
   estimatedHours?: string;
   created_at?: string;
   start?: string;
+  end?: string;
+  time?: string;
   due_date?: string;
   actual_start?: string | null;
   actual_end?: string | null;
@@ -361,7 +378,10 @@ export interface Task {
   approved_by?: string | null;
   approved_at?: string | null;
   task_order?: number | null;
+  order?: number | null;
   parent_task_id?: number | null;
   association_type?: string | null;
+  association_notes?: string | null;
+  backgroundColor?: string;
   date?: string;
 }

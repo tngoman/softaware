@@ -1,26 +1,28 @@
 import admin from 'firebase-admin';
 import { env } from '../config/env.js';
 import { db } from '../db/mysql.js';
+import { getFirebaseConfig } from './credentialVault.js';
 
 // ─── Firebase Admin SDK Initialization ─────────────────────────────
 let firebaseInitialized = false;
 
-function initFirebase(): boolean {
+async function initFirebase(): Promise<boolean> {
   if (firebaseInitialized) return true;
 
-  // Only initialize if Firebase credentials are configured
-  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
-    console.warn('[Firebase] FCM not configured – push notifications disabled. Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in .env');
+  // Try credential vault first, then fall back to env vars
+  const config = await getFirebaseConfig();
+
+  if (!config || !config.projectId || !config.clientEmail || !config.privateKey) {
+    console.warn('[Firebase] FCM not configured – push notifications disabled. Store FIREBASE credentials in the credential vault or set env vars.');
     return false;
   }
 
   try {
     admin.initializeApp({
       credential: admin.credential.cert({
-        projectId: env.FIREBASE_PROJECT_ID,
-        clientEmail: env.FIREBASE_CLIENT_EMAIL,
-        // The private key may be stored with literal \n – convert to actual newlines
-        privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        projectId: config.projectId,
+        clientEmail: config.clientEmail,
+        privateKey: config.privateKey,
       }),
     });
     firebaseInitialized = true;
@@ -185,6 +187,7 @@ export async function sendPushToUsers(userIds: string[], payload: PushPayload): 
 /**
  * Helper: create an in-app notification AND send a push notification
  * This is the primary function to call when you want to notify a user.
+ * Respects user's notification preferences (web_notifications_enabled, push_notifications_enabled).
  */
 export async function createNotificationWithPush(
   userId: string,
@@ -195,22 +198,43 @@ export async function createNotificationWithPush(
     data?: Record<string, string>;
   },
 ): Promise<void> {
-  // 1. Insert in-app notification
-  await db.execute(
-    `INSERT INTO notifications (user_id, title, message, type, data, created_at)
-     VALUES (?, ?, ?, ?, ?, NOW())`,
-    [userId, notification.title, notification.message, notification.type || 'info', notification.data ? JSON.stringify(notification.data) : null],
+  // Check user notification preferences
+  const userPrefs = await db.queryOne<{
+    notifications_enabled: boolean;
+    web_notifications_enabled: boolean;
+    push_notifications_enabled: boolean;
+  }>(
+    `SELECT notifications_enabled, web_notifications_enabled, push_notifications_enabled 
+     FROM users WHERE id = ?`,
+    [userId]
   );
 
-  // 2. Send push notification (fire & forget — don't block on failure)
-  sendPushToUser(userId, {
-    title: notification.title,
-    body: notification.message,
-    data: {
-      type: notification.type || 'info',
-      ...(notification.data || {}),
-    },
-  }).catch((err) => {
-    console.error('[Firebase] Background push failed:', err);
-  });
+  // If master notifications toggle is off, skip everything
+  if (userPrefs && userPrefs.notifications_enabled === false) {
+    console.log(`[Notifications] User ${userId} has notifications disabled — skipping`);
+    return;
+  }
+
+  // 1. Insert in-app notification (only if web notifications enabled)
+  if (!userPrefs || userPrefs.web_notifications_enabled !== false) {
+    await db.execute(
+      `INSERT INTO notifications (user_id, title, message, type, data, created_at)
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [userId, notification.title, notification.message, notification.type || 'info', notification.data ? JSON.stringify(notification.data) : null],
+    );
+  }
+
+  // 2. Send push notification (fire & forget — only if push enabled)
+  if (!userPrefs || userPrefs.push_notifications_enabled !== false) {
+    sendPushToUser(userId, {
+      title: notification.title,
+      body: notification.message,
+      data: {
+        type: notification.type || 'info',
+        ...(notification.data || {}),
+      },
+    }).catch((err) => {
+      console.error('[Firebase] Background push failed:', err);
+    });
+  }
 }

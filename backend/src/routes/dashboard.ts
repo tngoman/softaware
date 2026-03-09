@@ -66,14 +66,14 @@ dashboardRouter.get('/metrics', requireAuth, async (req: AuthRequest, res, next)
 
     // Count assistants for this user
     const assistantCount = await db.queryOne<{ count: number }>(
-      'SELECT COUNT(*) as count FROM assistants WHERE userId = ?',
+      'SELECT COUNT(*) as count FROM assistants WHERE userId = ? OR userId IS NULL',
       [userId]
     );
     console.log('[Dashboard] Assistant count result:', assistantCount);
 
     // Count total indexed pages across all user's assistants
     const assistantIds = await db.query<{ id: string }>(
-      'SELECT id FROM assistants WHERE userId = ?',
+      'SELECT id FROM assistants WHERE userId = ? OR userId IS NULL',
       [userId]
     );
 

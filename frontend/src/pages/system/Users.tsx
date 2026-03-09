@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { PlusIcon, PencilIcon, TrashIcon, UserIcon, EnvelopeIcon, ShieldCheckIcon, CheckCircleIcon, XCircleIcon, KeyIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, TrashIcon, UserIcon, EnvelopeIcon, ShieldCheckIcon, CheckCircleIcon, XCircleIcon, KeyIcon, NoSymbolIcon } from '@heroicons/react/24/outline';
 import { ColumnDef } from '@tanstack/react-table';
 import { SystemUserModel, User, SystemRoleModel, Role } from '../../models';
 import { Input, Select, Button, Card, DataTable, BackButton } from '../../components/UI';
@@ -214,6 +214,46 @@ const Users: React.FC = () => {
     }
   };
 
+  const handleToggleActive = async (user: User) => {
+    const newStatus = !user.is_active;
+    const action = newStatus ? 'activate' : 'deactivate';
+
+    const result = await Swal.fire({
+      title: `${newStatus ? 'Activate' : 'Deactivate'} User?`,
+      text: `Are you sure you want to ${action} "${user.username}"?${!newStatus ? ' They will no longer be able to log in.' : ''}`,
+      icon: newStatus ? 'question' : 'warning',
+      showCancelButton: true,
+      confirmButtonColor: newStatus ? '#10B981' : '#F59E0B',
+      cancelButtonColor: '#6B7280',
+      confirmButtonText: `Yes, ${action}!`,
+      cancelButtonText: 'Cancel'
+    });
+
+    if (!result.isConfirmed) return;
+
+    try {
+      setLoading(true);
+      await SystemUserModel.update(user.id, { is_active: newStatus } as any);
+      Swal.fire({
+        icon: 'success',
+        title: newStatus ? 'Activated!' : 'Deactivated!',
+        text: `User ${action}d successfully`,
+        timer: 2000,
+        showConfirmButton: false
+      });
+      loadUsers();
+    } catch (error: any) {
+      console.error(`Failed to ${action} user:`, error);
+      Swal.fire({
+        icon: 'error',
+        title: 'Error',
+        text: `Failed to ${action} user: ` + (error.response?.data?.message || error.message)
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Table columns configuration
   const columns = useMemo<ColumnDef<User>[]>(() => [
     {
@@ -323,23 +363,40 @@ const Users: React.FC = () => {
       id: 'actions',
       header: 'Actions',
       cell: ({ row }) => (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <Can permission="users.edit">
             <button
               onClick={() => handleEdit(row.original)}
-              className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-secondary-600 bg-secondary-500/10 hover:bg-secondary-500/20 rounded-lg transition-colors"
+              className="p-1.5 text-secondary-600 hover:bg-secondary-500/10 rounded-lg transition-colors"
+              title="Edit user"
             >
-              <PencilIcon className="h-3.5 w-3.5 mr-1" />
-              Edit
+              <PencilIcon className="h-4 w-4" />
+            </button>
+          </Can>
+          <Can permission="users.edit">
+            <button
+              onClick={() => handleToggleActive(row.original)}
+              className={`p-1.5 rounded-lg transition-colors ${
+                row.original.is_active
+                  ? 'text-amber-600 hover:bg-amber-50'
+                  : 'text-green-600 hover:bg-green-50'
+              }`}
+              title={row.original.is_active ? 'Deactivate user' : 'Activate user'}
+            >
+              {row.original.is_active ? (
+                <NoSymbolIcon className="h-4 w-4" />
+              ) : (
+                <CheckCircleIcon className="h-4 w-4" />
+              )}
             </button>
           </Can>
           <Can permission="users.delete">
             <button
               onClick={() => handleDelete(row.original)}
-              className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-white bg-scarlet hover:bg-scarlet/90 rounded-lg transition-colors"
+              className="p-1.5 text-scarlet hover:bg-scarlet/10 rounded-lg transition-colors"
+              title="Delete user"
             >
-              <TrashIcon className="h-3.5 w-3.5 mr-1" />
-              Delete
+              <TrashIcon className="h-4 w-4" />
             </button>
           </Can>
         </div>

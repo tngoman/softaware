@@ -60,7 +60,7 @@ const KEY_EMOJI: Record<string, string> = {
   return_policy: '↩️', shipping_info: '🚚', delivery_info: '🚚',
   about_company: '🏢', about_team: '🏢', about_restaurant: '🏢', about_practice: '🏢',
   about_institution: '🏢', about_agency: '🏢',
-  testimonials: '⭐', faq: '❓', integrations: '🔗', onboarding_docs: '📖',
+  faq: '❓', integrations: '🔗', onboarding_docs: '📖',
   courses_programs: '🎓', enrollment_info: '📝', practitioners: '👨‍⚕️',
   insurance_info: '🏥', listings: '🏠', area_info: '📍', location: '📍',
 };

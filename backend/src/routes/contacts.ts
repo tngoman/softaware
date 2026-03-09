@@ -9,15 +9,23 @@ export const contactsRouter = Router();
 
 // Validation schemas
 const createContactSchema = z.object({
-  company_name: z.string().min(1),
+  company_name: z.string().optional(),
+  contact_name: z.string().optional(),
   contact_person: z.string().optional(),
-  email: z.string().email().optional(),
+  email: z.string().email().optional().or(z.literal('')),
+  contact_email: z.string().email().optional().or(z.literal('')),
   phone: z.string().optional(),
+  contact_phone: z.string().optional(),
   fax: z.string().optional(),
+  contact_alt_phone: z.string().optional(),
   website: z.string().optional(),
   location: z.string().optional(),
+  contact_address: z.string().optional(),
   contact_code: z.string().optional(),
+  contact_vat: z.string().optional(),
+  contact_notes: z.string().optional(),
   remarks: z.string().optional(),
+  contact_type: z.number().optional(),
   active: z.number().default(1),
 });
 
@@ -33,10 +41,11 @@ const CONTACT_SELECT = `
   phone         AS contact_phone,
   fax           AS contact_alt_phone,
   remarks       AS contact_notes,
+  vat_number    AS contact_vat,
   website,
   contact_code,
   active,
-  1             AS contact_type
+  COALESCE(contact_type, 1) AS contact_type
 `;
 
 /**
@@ -108,8 +117,25 @@ contactsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, 
 contactsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const data = createContactSchema.parse(req.body);
+    
+    const companyName = data.company_name || data.contact_name;
+    if (!companyName) {
+      throw badRequest('Company name is required');
+    }
+    
     const insertId = await db.insertOne('contacts', {
-      ...data,
+      company_name: companyName,
+      contact_person: data.contact_person || null,
+      email: data.email || data.contact_email || null,
+      phone: data.phone || data.contact_phone || null,
+      fax: data.fax || data.contact_alt_phone || null,
+      location: data.location || data.contact_address || null,
+      website: data.website || null,
+      contact_code: data.contact_code || null,
+      vat_number: data.contact_vat || null,
+      contact_type: data.contact_type || 1,
+      remarks: data.remarks || data.contact_notes || null,
+      active: data.active ?? 1,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -137,9 +163,25 @@ contactsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
       throw notFound('Contact not found');
     }
 
-    // Update with timestamp
-    const updateData = { ...data, updated_at: new Date().toISOString() };
-    await db.execute('UPDATE contacts SET ? WHERE id = ?', [updateData, id]);
+    // Map frontend fields to DB fields
+    const updateData: any = { updated_at: new Date().toISOString() };
+    if (data.company_name || data.contact_name) updateData.company_name = data.company_name || data.contact_name;
+    if (data.contact_person !== undefined) updateData.contact_person = data.contact_person;
+    if (data.email || data.contact_email) updateData.email = data.email || data.contact_email;
+    if (data.phone || data.contact_phone) updateData.phone = data.phone || data.contact_phone;
+    if (data.fax || data.contact_alt_phone) updateData.fax = data.fax || data.contact_alt_phone;
+    if (data.location || data.contact_address) updateData.location = data.location || data.contact_address;
+    if (data.website !== undefined) updateData.website = data.website;
+    if (data.contact_code !== undefined) updateData.contact_code = data.contact_code;
+    if (data.contact_vat !== undefined) updateData.vat_number = data.contact_vat;
+    if (data.contact_type !== undefined) updateData.contact_type = data.contact_type;
+    if (data.remarks !== undefined || data.contact_notes !== undefined) updateData.remarks = data.remarks || data.contact_notes;
+    if (data.active !== undefined) updateData.active = data.active;
+
+    await db.execute(
+      `UPDATE contacts SET ${Object.keys(updateData).map(k => `${k} = ?`).join(', ')} WHERE id = ?`,
+      [...Object.values(updateData), id]
+    );
 
     const updated = await db.queryOne<any>(
       `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
@@ -233,6 +275,115 @@ contactsRouter.get('/:id/invoices', requireAuth, async (req: AuthRequest, res: R
       [id]
     );
     res.json({ success: true, data: invoices });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /contacts/:id/statement-data - Get statement data with aging analysis
+ */
+contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, res: Response, next) => {
+  try {
+    const { id } = req.params;
+
+    const contact = await db.queryOne<any>(
+      `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
+      [id]
+    );
+    if (!contact) {
+      throw notFound('Contact not found');
+    }
+
+    // Get all invoices for this contact
+    const invoices = await db.query<any>(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.due_date,
+              i.invoice_amount, i.paid,
+              COALESCE(
+                (SELECT SUM(p.payment_amount) FROM payments p WHERE p.invoice_id = i.id), 0
+              ) as total_paid
+       FROM invoices i
+       WHERE i.contact_id = ? AND i.active = 1
+       ORDER BY i.invoice_date ASC`,
+      [id]
+    );
+
+    // Build transaction list and calculate aging
+    const now = new Date();
+    let closingBalance = 0;
+    let aging = { current: 0, '30_days': 0, '60_days': 0, '90_days': 0, total: 0 };
+    const transactions: any[] = [];
+
+    for (const inv of invoices) {
+      const amount = Number(inv.invoice_amount) || 0;
+      const paid = Number(inv.total_paid) || 0;
+      const balance = amount - paid;
+
+      // Add invoice as a transaction
+      transactions.push({
+        date: inv.invoice_date,
+        type: 'invoice',
+        reference: inv.invoice_number,
+        description: `Invoice ${inv.invoice_number}`,
+        debit: amount,
+        credit: 0,
+        balance: 0, // Will be running balance
+      });
+
+      // Add payments for this invoice
+      const payments = await db.query<any>(
+        'SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date ASC',
+        [inv.id]
+      );
+      for (const pmt of payments) {
+        transactions.push({
+          date: pmt.payment_date,
+          type: 'payment',
+          reference: pmt.reference_number || `PMT-${pmt.id}`,
+          description: `Payment for ${inv.invoice_number}`,
+          debit: 0,
+          credit: Number(pmt.payment_amount),
+          balance: 0,
+        });
+      }
+
+      // Aging calculation based on outstanding balance
+      if (balance > 0) {
+        const dueDate = new Date(inv.due_date || inv.invoice_date);
+        const daysOverdue = Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
+
+        if (daysOverdue <= 0) {
+          aging.current += balance;
+        } else if (daysOverdue <= 30) {
+          aging['30_days'] += balance;
+        } else if (daysOverdue <= 60) {
+          aging['60_days'] += balance;
+        } else {
+          aging['90_days'] += balance;
+        }
+        aging.total += balance;
+      }
+
+      closingBalance += balance;
+    }
+
+    // Calculate running balance
+    let runBal = 0;
+    transactions.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    for (const t of transactions) {
+      runBal += t.debit - t.credit;
+      t.balance = runBal;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        contact,
+        transactions,
+        closing_balance: closingBalance,
+        aging,
+      },
+    });
   } catch (err) {
     next(err);
   }

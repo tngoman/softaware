@@ -6,7 +6,10 @@ import axios from 'axios';
 import { getAssistantKnowledgeHealth, updateAssistantCategories } from '../services/knowledgeCategorizer.js';
 import { getDefaultChecklist, getAllTemplates } from '../config/personaTemplates.js';
 import { getToolsForTier, getToolsSystemPrompt, parseToolCall, executeToolCall } from '../services/actionRouter.js';
+import { search as vectorSearch, deleteByAssistant as deleteVecByAssistant } from '../services/vectorStore.js';
 import { checkAssistantStatus } from '../middleware/statusCheck.js';
+import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { chatCompletionStream } from '../services/assistantAIRouter.js';
 
 const router = express.Router();
 
@@ -27,6 +30,8 @@ interface AssistantRow {
   created_at: string;
   updated_at: string;
   tier: 'free' | 'paid';
+  pages_indexed: number;
+  status: string;
   lead_capture_email: string | null;
   webhook_url: string | null;
   enabled_tools: string | null;
@@ -92,6 +97,15 @@ const createAssistantSchema = z.object({
   website: z.string().optional()
 });
 
+const updateAssistantSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  businessType: z.string().optional(),
+  personality: z.enum(['professional', 'friendly', 'expert', 'casual']).optional(),
+  primaryGoal: z.string().optional(),
+  website: z.string().optional()
+});
+
 /**
  * POST /api/assistants/admin/unload-model
  * 
@@ -131,16 +145,20 @@ router.get('/admin/model-status', async (_req, res) => {
  * 
  * List all assistants from MySQL
  */
-router.get('/', async (_req, res) => {
+router.get('/', requireAuth, async (req: AuthRequest, res) => {
   try {
+    const userId = req.userId;
     const rows = await db.query<AssistantRow>(
-      'SELECT * FROM assistants ORDER BY created_at DESC'
+      'SELECT * FROM assistants WHERE userId = ? OR userId IS NULL ORDER BY created_at DESC',
+      [userId]
     );
 
     const assistants = rows.map(row => ({
       ...parseAssistantRow(row),
       createdAt: row.created_at,
-      status: 'active' as const,
+      status: row.status || 'active',
+      tier: row.tier || 'free',
+      pagesIndexed: row.pages_indexed || 0,
       embedCode: `<script src="https://softaware.net.za/api/assistants/widget.js" data-assistant-id="${row.id}"></script>`,
       chatUrl: `https://softaware.net.za/chat/${row.id}`
     }));
@@ -157,7 +175,7 @@ router.get('/', async (_req, res) => {
  * 
  * Create a new AI assistant and store it in MySQL
  */
-router.post('/create', async (req, res) => {
+router.post('/create', requireAuth, async (req: AuthRequest, res) => {
   try {
     const validatedData = createAssistantSchema.parse(req.body);
     const assistantId = 'assistant-' + Date.now();
@@ -177,10 +195,11 @@ router.post('/create', async (req, res) => {
     const knowledgeCategories = JSON.stringify({ checklist: defaultChecklist });
 
     await db.execute(
-      `INSERT INTO assistants (id, name, description, business_type, personality, primary_goal, website, data, knowledge_categories, created_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      `INSERT INTO assistants (id, userId, name, description, business_type, personality, primary_goal, website, data, knowledge_categories, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         assistantId,
+        req.userId,
         validatedData.name,
         validatedData.description,
         validatedData.businessType,
@@ -225,26 +244,29 @@ router.post('/create', async (req, res) => {
 router.put('/:assistantId/update', async (req, res) => {
   try {
     const { assistantId } = req.params;
-    const validatedData = createAssistantSchema.parse(req.body);
+    const validatedData = updateAssistantSchema.parse(req.body);
 
     // Check assistant exists
     const existing = await db.queryOne<AssistantRow>(
-      'SELECT id FROM assistants WHERE id = ?',
+      'SELECT * FROM assistants WHERE id = ?',
       [assistantId]
     );
     if (!existing) {
       return res.status(404).json({ success: false, error: 'Assistant not found' });
     }
 
-    const updatedRecord: AssistantData = {
-      id: assistantId,
-      name: validatedData.name,
-      description: validatedData.description,
-      businessType: validatedData.businessType,
-      personality: validatedData.personality,
-      primaryGoal: validatedData.primaryGoal,
-      website: validatedData.website || undefined
+    // Merge: keep existing values for fields not provided
+    const existingData = parseAssistantRow(existing);
+    const merged = {
+      name: validatedData.name ?? existingData.name,
+      description: validatedData.description ?? existingData.description,
+      businessType: validatedData.businessType ?? existingData.businessType,
+      personality: validatedData.personality ?? existingData.personality,
+      primaryGoal: validatedData.primaryGoal ?? existingData.primaryGoal,
+      website: validatedData.website ?? existingData.website,
     };
+
+    const updatedRecord: AssistantData = { id: assistantId, ...merged };
 
     await db.execute(
       `UPDATE assistants 
@@ -252,12 +274,12 @@ router.put('/:assistantId/update', async (req, res) => {
            primary_goal = ?, website = ?, data = ?, updated_at = NOW()
        WHERE id = ?`,
       [
-        validatedData.name,
-        validatedData.description,
-        validatedData.businessType,
-        validatedData.personality,
-        validatedData.primaryGoal,
-        validatedData.website || null,
+        merged.name,
+        merged.description,
+        merged.businessType,
+        merged.personality,
+        merged.primaryGoal,
+        merged.website || null,
         JSON.stringify(updatedRecord),
         assistantId
       ]
@@ -373,26 +395,38 @@ router.get('/widget.js', (req, res) => {
   res.removeHeader('X-Content-Type-Options');
   
   const widgetScript = `(function() {
-  // Extract assistant ID from script tag
-  const scripts = document.getElementsByTagName('script');
-  const currentScript = scripts[scripts.length - 1];
-  const assistantId = currentScript.getAttribute('data-assistant-id');
+  // Extract assistant ID and base URL from script tag
+  var scripts = document.getElementsByTagName('script');
+  var currentScript = scripts[scripts.length - 1];
+  var assistantId = currentScript.getAttribute('data-assistant-id');
   
   if (!assistantId) {
     console.error('Soft Aware Chat Widget: Missing data-assistant-id attribute');
     return;
   }
 
+  // Derive the Soft Aware origin from the script src or fall back to known domain
+  var brandOrigin = 'https://softaware.net.za';
+  try {
+    var scriptSrc = currentScript.src || '';
+    if (scriptSrc) {
+      var u = new URL(scriptSrc);
+      brandOrigin = u.origin;
+    }
+  } catch(e) {}
+
+  var faviconUrl = brandOrigin + '/images/favicon.png';
+  var apiBase = brandOrigin + '/api/assistants/';
+
   // Detect protocol to avoid mixed content errors
-  const protocol = window.location.protocol;
-  const chatUrl = protocol === 'https:' 
+  var protocol = window.location.protocol;
+  var chatUrl = protocol === 'https:' 
     ? 'https://softaware.net.za/chat/' + assistantId
     : 'http://75.119.141.98:3001/chat/' + assistantId;
 
-  // Create widget button
-  const button = document.createElement('div');
+  // Create widget button with brand icon
+  var button = document.createElement('div');
   button.id = 'softaware-chat-button';
-  button.innerHTML = '💬';
   button.style.cssText = \`
     position: fixed;
     bottom: 20px;
@@ -409,40 +443,130 @@ router.get('/widget.js', (req, res) => {
     cursor: pointer;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     z-index: 999999;
-    transition: transform 0.2s;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
   \`;
+
+  // Brand icon image for the button
+  var btnIcon = document.createElement('img');
+  btnIcon.src = faviconUrl;
+  btnIcon.alt = 'Soft Aware Chat';
+  btnIcon.style.cssText = 'width: 32px; height: 32px; border-radius: 50%; object-fit: contain; pointer-events: none;';
+  button.appendChild(btnIcon);
+
+  // Close icon (hidden by default)
+  var btnClose = document.createElement('span');
+  btnClose.textContent = '\\u2715';
+  btnClose.style.cssText = 'display: none; font-size: 24px; color: white; line-height: 1; pointer-events: none;';
+  button.appendChild(btnClose);
   
-  button.onmouseover = () => button.style.transform = 'scale(1.1)';
-  button.onmouseout = () => button.style.transform = 'scale(1)';
-  
-  // Create chat iframe
-  const iframe = document.createElement('iframe');
-  iframe.id = 'softaware-chat-iframe';
-  iframe.src = chatUrl;
-  iframe.style.cssText = \`
+  button.onmouseover = function() { button.style.transform = 'scale(1.1)'; button.style.boxShadow = '0 6px 20px rgba(0,0,0,0.25)'; };
+  button.onmouseout = function() { button.style.transform = 'scale(1)'; button.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)'; };
+
+  // Create chat container with branded header
+  var chatContainer = document.createElement('div');
+  chatContainer.id = 'softaware-chat-container';
+  chatContainer.style.cssText = \`
     position: fixed;
     bottom: 90px;
     right: 20px;
     width: 400px;
     height: 600px;
-    border: none;
     border-radius: 12px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.2);
     z-index: 999998;
     display: none;
+    flex-direction: column;
+    overflow: hidden;
+    background: #fff;
   \`;
+
+  // Branded header bar
+  var header = document.createElement('div');
+  header.style.cssText = \`
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  \`;
+
+  var headerIcon = document.createElement('img');
+  headerIcon.src = faviconUrl;
+  headerIcon.alt = 'Soft Aware';
+  headerIcon.style.cssText = 'width: 28px; height: 28px; border-radius: 50%; object-fit: contain; background: rgba(255,255,255,0.2); padding: 2px;';
+  header.appendChild(headerIcon);
+
+  var headerTitle = document.createElement('span');
+  headerTitle.textContent = 'AI Assistant';
+  headerTitle.style.cssText = 'font-size: 14px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
+  header.appendChild(headerTitle);
+
+  var headerClose = document.createElement('span');
+  headerClose.textContent = '\\u2715';
+  headerClose.style.cssText = 'cursor: pointer; font-size: 16px; opacity: 0.8; padding: 4px;';
+  headerClose.onclick = function() { toggleChat(); };
+  header.appendChild(headerClose);
+
+  chatContainer.appendChild(header);
+
+  // Chat iframe
+  var iframe = document.createElement('iframe');
+  iframe.id = 'softaware-chat-iframe';
+  iframe.src = chatUrl;
+  iframe.style.cssText = 'border: none; width: 100%; flex: 1;';
+  chatContainer.appendChild(iframe);
+
+  // Powered-by footer
+  var footer = document.createElement('div');
+  footer.style.cssText = \`
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 0;
+    background: #f9fafb;
+    border-top: 1px solid #e5e7eb;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 11px;
+    color: #9ca3af;
+  \`;
+  var footerImg = document.createElement('img');
+  footerImg.src = faviconUrl;
+  footerImg.style.cssText = 'width: 14px; height: 14px; opacity: 0.6;';
+  footer.appendChild(footerImg);
+  var footerText = document.createElement('span');
+  footerText.textContent = 'Powered by Soft Aware';
+  footer.appendChild(footerText);
+  chatContainer.appendChild(footer);
   
-  // Toggle chat
-  let isOpen = false;
-  button.onclick = () => {
+  // Toggle chat open/close
+  var isOpen = false;
+  function toggleChat() {
     isOpen = !isOpen;
-    iframe.style.display = isOpen ? 'block' : 'none';
-    button.innerHTML = isOpen ? '✕' : '💬';
-  };
+    chatContainer.style.display = isOpen ? 'flex' : 'none';
+    btnIcon.style.display = isOpen ? 'none' : 'block';
+    btnClose.style.display = isOpen ? 'inline' : 'none';
+  }
+
+  button.onclick = toggleChat;
   
   // Add to page
   document.body.appendChild(button);
-  document.body.appendChild(iframe);
+  document.body.appendChild(chatContainer);
+
+  // Fetch assistant name asynchronously and update the header title
+  try {
+    fetch(apiBase + assistantId)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && data.assistant && data.assistant.name) {
+          headerTitle.textContent = data.assistant.name;
+        }
+      })
+      .catch(function() {});
+  } catch(e) {}
 })();`;
   
   res.send(widgetScript);
@@ -494,13 +618,32 @@ router.get('/:assistantId', async (req, res) => {
 router.delete('/:assistantId', async (req, res) => {
   try {
     const { assistantId } = req.params;
+    // clearKnowledge defaults to true for backward compat
+    const clearKnowledge = req.query.clearKnowledge !== 'false';
+
     const affected = await db.execute('DELETE FROM assistants WHERE id = ?', [assistantId]);
     
     if (affected === 0) {
       return res.status(404).json({ success: false, error: 'Assistant not found' });
     }
+
+    // Clean up ingestion_jobs
+    try {
+      await db.execute('DELETE FROM ingestion_jobs WHERE assistant_id = ?', [assistantId]);
+    } catch (e) {
+      console.warn('[Assistant] ingestion_jobs cleanup failed:', (e as Error).message);
+    }
+
+    // Clean up sqlite-vec vectors (unless user opted to keep KB)
+    if (clearKnowledge) {
+      try {
+        deleteVecByAssistant(assistantId);
+      } catch (e) {
+        console.warn('[Assistant] sqlite-vec cleanup failed:', (e as Error).message);
+      }
+    }
     
-    return res.json({ success: true });
+    return res.json({ success: true, knowledgeCleared: clearKnowledge });
   } catch (error) {
     console.error('Delete assistant error:', error);
     return res.status(500).json({ success: false, error: 'Failed to delete assistant' });
@@ -601,7 +744,33 @@ router.post('/chat', checkAssistantStatus, async (req, res) => {
     const tools = getToolsForTier(tier, enabledTools);
     const toolsPrompt = getToolsSystemPrompt(tools);
 
-    // Build system prompt from assistant configuration
+    // ── RAG: Retrieve relevant knowledge from sqlite-vec ──────────────
+    let knowledgeContext = '';
+    try {
+      // Embed the user's question with nomic-embed-text
+      const embRes = await axios.post<{ embedding: number[] }>(
+        `${OLLAMA_API}/api/embeddings`,
+        { model: 'nomic-embed-text', prompt: message },
+        { timeout: 15_000 }
+      );
+      const queryEmbedding = embRes.data.embedding;
+
+      if (queryEmbedding && queryEmbedding.length > 0) {
+        const results = vectorSearch(assistantId, queryEmbedding, 5);
+        if (results.length > 0) {
+          knowledgeContext = '\n\nKNOWLEDGE BASE (use this information to answer accurately):\n'
+            + results.map((r, i) =>
+              `[Source ${i + 1}: ${r.source}]\n${r.content}`
+            ).join('\n\n');
+          console.log(`[Assistant ${assistantId}] RAG: ${results.length} chunks retrieved (closest distance: ${results[0].distance.toFixed(4)})`);
+        }
+      }
+    } catch (ragErr) {
+      // Non-fatal — if RAG fails, we still answer without context
+      console.warn(`[Assistant ${assistantId}] RAG retrieval failed:`, (ragErr as Error).message);
+    }
+
+    // Build system prompt from assistant configuration + retrieved knowledge
     const systemPrompt = `You are ${assistant.name}, an AI assistant for a ${assistant.businessType} business.
 
 BUSINESS CONTEXT:
@@ -620,112 +789,140 @@ INSTRUCTIONS:
 - Be helpful, accurate, and stay in character
 - If you don't have specific information, acknowledge it honestly
 ${assistant.website ? `- Direct users to ${assistant.website} for more detailed information when appropriate` : ''}
+${knowledgeContext}
 ${toolsPrompt}
 Remember: You represent ${assistant.name} and should respond as if you work for this ${assistant.businessType} business.`;
 
-    // Build conversation messages for Ollama
-    const messages = [
+    // Build conversation messages
+    const messages: { role: string; content: string }[] = [
       { role: 'system', content: systemPrompt },
-      ...conversationHistory.slice(-10),
+      ...(conversationHistory.slice(-10) as { role: string; content: string }[]),
       { role: 'user', content: message }
     ];
 
-    // Stream Ollama response back to client as Server-Sent Events
-    // First token arrives in ~1-2s; client renders tokens as they stream in
+    // Stream response back to client as Server-Sent Events
+    // Fallback chain — Free: GLM → Ollama | Paid: GLM → OpenRouter → Ollama
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // disable nginx/apache proxy buffering
     res.flushHeaders();
 
-    const ollamaResponse = await axios.post(
-      `${OLLAMA_API}/api/chat`,
+    const { stream, model: resolvedModel, provider } = await chatCompletionStream(
+      tier,
+      messages as any,
       {
-        model: CHAT_MODEL,
-        messages,
-        stream: true,
-        keep_alive: KEEP_ALIVE === '-1' ? -1 : KEEP_ALIVE === '0' ? 0 : KEEP_ALIVE,
-        options: {
-          temperature: getTemperatureForPersonality(assistant.personality),
-          top_p: 0.9,
-          top_k: 40
-        }
+        temperature: getTemperatureForPersonality(assistant.personality),
+        top_p: 0.9,
+        top_k: 40,
+        max_tokens: 2048,
       },
-      { responseType: 'stream', timeout: 90000 }
     );
+
+    console.log(`[Assistant ${assistantId}] Provider: ${provider}, Model: ${resolvedModel}`);
 
     let fullResponse = '';
     let lineBuffer = '';
-    let streamDone = false;
 
-    ollamaResponse.data.on('data', (chunk: Buffer) => {
-      lineBuffer += chunk.toString();
-      const lines = lineBuffer.split('\n');
-      lineBuffer = lines.pop() ?? '';
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          const token = parsed.message?.content ?? '';
-          if (token) {
-            fullResponse += token;
-            res.write(`data: ${JSON.stringify({ token })}\n\n`);
+    const processStream = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          lineBuffer += decoder.decode(value, { stream: true });
+          const lines = lineBuffer.split('\n');
+          lineBuffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+
+            if (provider === 'glm') {
+              // Anthropic SSE format: event: content_block_delta\ndata: {"delta":{"text":"..."}}
+              if (!trimmed.startsWith('data: ')) continue;
+              const payload = trimmed.slice(6);
+              try {
+                const parsed = JSON.parse(payload);
+                if (parsed.type === 'content_block_delta') {
+                  const token = parsed.delta?.text ?? '';
+                  if (token) {
+                    fullResponse += token;
+                    res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                  }
+                }
+              } catch (_e) { /* skip malformed */ }
+            } else if (provider === 'openrouter') {
+              // OpenAI-compatible SSE format: data: {...}
+              if (!trimmed.startsWith('data: ')) continue;
+              const payload = trimmed.slice(6);
+              if (payload === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(payload);
+                const token = parsed.choices?.[0]?.delta?.content ?? '';
+                if (token) {
+                  fullResponse += token;
+                  res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                }
+              } catch (_e) { /* skip malformed */ }
+            } else {
+              // Ollama NDJSON format: {"message":{"content":"..."},"done":false}
+              try {
+                const parsed = JSON.parse(trimmed);
+                const token = parsed.message?.content ?? '';
+                if (token) {
+                  fullResponse += token;
+                  res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                }
+                if (parsed.done) {
+                  console.log(`[Assistant ${assistantId}] User: ${message}`);
+                  console.log(`[Assistant ${assistantId}] Response: ${fullResponse.substring(0, 100)}...`);
+                }
+              } catch (_e) { /* skip malformed */ }
+            }
           }
-          if (parsed.done) {
-            streamDone = true;
-            console.log(`[Assistant ${assistantId}] User: ${message}`);
-            console.log(`[Assistant ${assistantId}] Response: ${fullResponse.substring(0, 100)}...`);
-          }
-        } catch (_e) {
-          // skip malformed JSON lines
+        }
+      } catch (streamErr) {
+        console.error(`[Assistant ${assistantId}] Stream read error:`, (streamErr as Error).message);
+        if (!res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ error: (streamErr as Error).message })}\n\n`);
         }
       }
-    });
 
-    ollamaResponse.data.on('end', async () => {
+      // Stream finished — check for tool calls and finalize
       if (!res.writableEnded) {
-        // Check for tool call in the complete response
         const toolCall = parseToolCall(fullResponse);
         if (toolCall) {
           console.log(`[Assistant ${assistantId}] Tool call detected: ${toolCall.name}`);
-          
           try {
             const toolResult = await executeToolCall(toolCall, assistantId, {
               name: assistant.name,
               tier,
               leadCaptureEmail: row.lead_capture_email || undefined,
-              webhookUrl: row.webhook_url || undefined
+              webhookUrl: row.webhook_url || undefined,
             });
-            
-            res.write(`data: ${JSON.stringify({ 
+            res.write(`data: ${JSON.stringify({
               toolCall: {
                 name: toolCall.name,
                 success: toolResult.success,
-                message: toolResult.message
-              }
+                message: toolResult.message,
+              },
             })}\n\n`);
-            
             console.log(`[Assistant ${assistantId}] Tool ${toolCall.name} result: ${toolResult.success ? 'success' : 'failed'}`);
           } catch (toolError) {
             console.error(`[Assistant ${assistantId}] Tool execution failed:`, toolError);
           }
         }
-        
-        res.write(`data: ${JSON.stringify({ done: true, model: CHAT_MODEL })}\n\n`);
+
+        res.write(`data: ${JSON.stringify({ done: true, model: resolvedModel, provider })}\n\n`);
         res.end();
       }
-    });
+    };
 
-    ollamaResponse.data.on('error', (err: Error) => {
-      console.error(`[Assistant ${assistantId}] Stream error:`, err.message);
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-        res.end();
-      }
-    });
-
+    processStream();
     return; // response handled by stream events above
 
   } catch (error) {

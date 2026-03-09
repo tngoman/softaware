@@ -10,6 +10,7 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import multer from 'multer';
+import { deleteByJob as deleteVecByJob } from '../services/vectorStore.js';
 import { createRequire } from 'module';
 import { db, toMySQLDate } from '../db/mysql.js';
 
@@ -152,11 +153,14 @@ router.post('/file', upload.single('file'), async (req, res) => {
     const id = randomUUID();
     const now = toMySQLDate(new Date());
 
+    // Store original content for text files (so they can be edited later)
+    const isTextFile = file.mimetype === 'text/plain' || !file.originalname.match(/\.(pdf|docx?)$/i);
+    
     await db.execute(
       `INSERT INTO ingestion_jobs
-         (id, assistant_id, job_type, source, file_content, tier, status, queue_position, created_at, updated_at)
-       VALUES (?, ?, 'file', ?, ?, ?, 'pending', ?, ?, ?)`,
-      [id, assistantId, file.originalname, content, resolvedTier, queuePosition, now, now]
+         (id, assistant_id, job_type, source, file_content, original_content, tier, status, queue_position, created_at, updated_at)
+       VALUES (?, ?, 'file', ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      [id, assistantId, file.originalname, content, isTextFile ? content : null, resolvedTier, queuePosition, now, now]
     );
 
     return res.json({
@@ -199,9 +203,10 @@ router.get('/status', async (req, res) => {
         queue_position: number | null;
         chunks_created: number;
         error_message: string | null;
+        original_content: string | null;
         created_at: string;
       }>(
-        `SELECT id, job_type, source, tier, status, queue_position, chunks_created, error_message, created_at
+        `SELECT id, job_type, source, tier, status, queue_position, chunks_created, error_message, original_content, created_at
          FROM ingestion_jobs
          WHERE assistant_id = ?
          ORDER BY created_at DESC`,
@@ -244,8 +249,16 @@ router.delete('/job/:jobId', async (req, res) => {
 
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
-    // Delete knowledge chunks
+    // Delete knowledge chunks from MySQL
     await db.execute('DELETE FROM assistant_knowledge WHERE job_id = ?', [jobId]);
+
+    // Delete from sqlite-vec vector store
+    try {
+      const vecDeleted = deleteVecByJob(jobId);
+      if (vecDeleted > 0) console.log(`[Ingest] Deleted ${vecDeleted} vectors from sqlite-vec for job ${jobId}`);
+    } catch (vecErr) {
+      console.warn('[Ingest] sqlite-vec delete failed (non-fatal):', (vecErr as Error).message);
+    }
 
     // Decrement pages_indexed (only if job was completed)
     if (job.status === 'completed') {

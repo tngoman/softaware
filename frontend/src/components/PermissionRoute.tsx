@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAppStore } from '../store';
 import { usePermissions } from '../hooks/usePermissions';
+import ProtectedRoute from './ProtectedRoute';
 
 interface PermissionRouteProps {
   children: React.ReactNode;
@@ -18,11 +19,11 @@ interface PermissionRouteProps {
  *   <PermissionRoute permission="users.create">
  *     <CreateUserPage />
  *   </PermissionRoute>
- * 
+ *
  *   <PermissionRoute anyPermission={["users.view", "users.edit"]}>
  *     <UsersPage />
  *   </PermissionRoute>
- * 
+ *
  *   <PermissionRoute requireAdmin={true}>
  *     <AdminDashboard />
  *   </PermissionRoute>
@@ -34,40 +35,27 @@ const PermissionRoute: React.FC<PermissionRouteProps> = ({
   allPermissions,
   requireAdmin = false 
 }) => {
-  const { isAuthenticated, user } = useAppStore();
+  const { user } = useAppStore();
   const { hasPermission, hasAnyPermission, hasAllPermissions, isAdmin } = usePermissions();
 
-  // Not authenticated - redirect to login
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
-
-  // Not active user
-  if (!user?.is_active) {
-    return <Navigate to="/login" replace />;
-  }
-
-  // Check admin requirement
-  if (requireAdmin && !isAdmin()) {
-    return <Navigate to="/" replace />;
-  }
-
-  // Check single permission
-  if (permission && !hasPermission(permission)) {
-    return <Navigate to="/" replace />;
-  }
-
-  // Check any permission (OR logic)
-  if (anyPermission && !hasAnyPermission(anyPermission)) {
-    return <Navigate to="/" replace />;
-  }
-
-  // Check all permissions (AND logic)
-  if (allPermissions && !hasAllPermissions(allPermissions)) {
-    return <Navigate to="/" replace />;
-  }
-
-  return <>{children}</>;
+  return (
+    <ProtectedRoute>
+      {/* Not active user */}
+      {user && !user.is_active ? (
+        <Navigate to="/login" replace />
+      ) : requireAdmin && !isAdmin() ? (
+        <Navigate to="/" replace />
+      ) : permission && !hasPermission(permission) ? (
+        <Navigate to="/" replace />
+      ) : anyPermission && !hasAnyPermission(anyPermission) ? (
+        <Navigate to="/" replace />
+      ) : allPermissions && !hasAllPermissions(allPermissions) ? (
+        <Navigate to="/" replace />
+      ) : (
+        <>{children}</>
+      )}
+    </ProtectedRoute>
+  );
 };
 
 export default PermissionRoute;

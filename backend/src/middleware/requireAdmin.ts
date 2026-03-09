@@ -1,11 +1,12 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth.js';
-import { db, type team_members } from '../db/mysql.js';
+import { db } from '../db/mysql.js';
 
 /**
  * Middleware to require admin role
  * 
- * Checks if the authenticated user is an admin at system or team level.
+ * Checks if the authenticated user has an admin or super_admin role
+ * via the user_roles + roles tables.
  * Must be used after requireAuth middleware.
  */
 export async function requireAdmin(
@@ -24,13 +25,17 @@ export async function requireAdmin(
       return;
     }
 
-    // Check if user has admin role in any team
-    const adminMembership = await db.queryOne<team_members>(
-      'SELECT * FROM team_members WHERE userId = ? AND role = ? LIMIT 1',
-      [userId, 'ADMIN']
+    // Check if user has admin or super_admin role via user_roles
+    const adminRole = await db.queryOne<{ slug: string }>(
+      `SELECT r.slug FROM user_roles ur
+       JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
+         AND r.slug IN ('admin', 'super_admin')
+       LIMIT 1`,
+      [userId]
     );
 
-    if (!adminMembership) {
+    if (!adminRole) {
       res.status(403).json({
         success: false,
         error: 'Admin access required',

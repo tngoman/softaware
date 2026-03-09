@@ -30,13 +30,17 @@ permissionsRouter.get('/user', requireAuth, async (req: AuthRequest, res: Respon
   try {
     const { userId } = getAuth(req);
 
-    // Check if user is team admin → all permissions
-    const membership = await db.queryOne<any>(
-      'SELECT role FROM team_members WHERE userId = ? LIMIT 1',
+    // Check if user is admin via user_roles
+    const adminRole = await db.queryOne<any>(
+      `SELECT r.slug FROM user_roles ur
+       JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
+         AND r.slug IN ('admin', 'super_admin')
+       LIMIT 1`,
       [userId]
     );
 
-    if (membership?.role === 'ADMIN') {
+    if (adminRole) {
       // Admin gets wildcard
       res.json({ success: true, data: [{ id: 1, name: 'All Access', slug: '*' }] });
       return;

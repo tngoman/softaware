@@ -1,4 +1,5 @@
 import { db, type credit_packages, type Team, type User, type credit_transactions, generateId } from '../db/mysql.js';
+import { getPayFastConfig, getYocoConfig } from './credentialVault.js';
 
 /**
  * Payment Provider types
@@ -133,12 +134,12 @@ interface PayFastPaymentRequest {
   cancelUrl?: string;
 }
 
-function createPayFastPayment(
+async function createPayFastPayment(
   request: PayFastPaymentRequest
-): PaymentResponse {
-  const merchantId = process.env.PAYFAST_MERCHANT_ID;
-  const merchantKey = process.env.PAYFAST_MERCHANT_KEY;
-  const passphrase = process.env.PAYFAST_PASSPHRASE;
+): Promise<PaymentResponse> {
+  const pfConfig = await getPayFastConfig();
+  const merchantId = pfConfig?.merchantId;
+  const merchantKey = pfConfig?.merchantKey;
 
   if (!merchantId || !merchantKey) {
     return {
@@ -257,7 +258,8 @@ interface YocoCheckoutResponse {
 }
 
 async function createYocoPayment(request: YocoPaymentRequest): Promise<PaymentResponse> {
-  const secretKey = process.env.YOCO_SECRET_KEY;
+  const yocoConfig = await getYocoConfig();
+  const secretKey = yocoConfig?.secretKey;
 
   if (!secretKey) {
     return {
@@ -345,9 +347,10 @@ async function processYocoCallback(
   signature?: string
 ): Promise<{ success: boolean; creditsAdded?: number; error?: string }> {
   // Verify signature if provided
-  if (signature && process.env.YOCO_WEBHOOK_SECRET) {
+  const yocoConfig = await getYocoConfig();
+  if (signature && yocoConfig?.webhookSecret) {
     const hmac = require('crypto')
-      .createHmac('sha256', process.env.YOCO_WEBHOOK_SECRET)
+      .createHmac('sha256', yocoConfig.webhookSecret)
       .update(JSON.stringify(payload))
       .digest('base64');
 
@@ -446,18 +449,19 @@ async function processYocoCallback(
 /**
  * Verify Yoco webhook signature
  */
-export function verifyYocoWebhookSignature(
+export async function verifyYocoWebhookSignature(
   payload: any,
   signature: string
-): boolean {
-  if (!process.env.YOCO_WEBHOOK_SECRET) {
+): Promise<boolean> {
+  const yocoConfig = await getYocoConfig();
+  if (!yocoConfig?.webhookSecret) {
     console.warn('[Yoco] Webhook secret not configured, skipping signature verification');
     return false;
   }
 
   try {
     const hmac = require('crypto')
-      .createHmac('sha256', process.env.YOCO_WEBHOOK_SECRET)
+      .createHmac('sha256', yocoConfig.webhookSecret)
       .update(JSON.stringify(payload))
       .digest('base64');
 
@@ -471,22 +475,54 @@ export function verifyYocoWebhookSignature(
 /**
  * Verify payment webhook signature (for security)
  */
-export function verifyWebhookSignature(
+export async function verifyWebhookSignature(
   provider: PaymentProvider,
   payload: any,
   signature: string
-): boolean {
+): Promise<boolean> {
   switch (provider) {
     case 'PAYFAST':
-      // Verify PayFast signature
-      // Reference: https://developers.payfast.co.za/docs/#callback-security
-      // TODO: Implement proper PayFast signature verification
-      return true;
+      return verifyPayFastSignature(payload);
 
     case 'YOCO':
       return verifyYocoWebhookSignature(payload, signature);
 
     default:
       return false;
+  }
+}
+
+/**
+ * Verify PayFast ITN signature
+ * Reference: https://developers.payfast.co.za/docs/#callback-security
+ *
+ * 1. Collect all POST params except "signature"
+ * 2. URL-encode values, join with "&", append passphrase if configured
+ * 3. MD5 hash the string → compare with the "signature" param
+ */
+async function verifyPayFastSignature(payload: Record<string, any>): Promise<boolean> {
+  try {
+    const pfConfig = await getPayFastConfig();
+    const passphrase = pfConfig?.passphrase || '';
+
+    // Build param string in the order received, excluding "signature"
+    const paramString = Object.keys(payload)
+      .filter((k) => k !== 'signature')
+      .map((k) => `${k}=${encodeURIComponent(String(payload[k]).trim()).replace(/%20/g, '+')}`)
+      .join('&');
+
+    const withPassphrase = passphrase
+      ? `${paramString}&passphrase=${encodeURIComponent(passphrase.trim()).replace(/%20/g, '+')}`
+      : paramString;
+
+    const expectedSig = require('crypto')
+      .createHash('md5')
+      .update(withPassphrase)
+      .digest('hex');
+
+    return expectedSig === payload.signature;
+  } catch (err) {
+    console.error('[PayFast] Signature verification error:', err);
+    return false;
   }
 }

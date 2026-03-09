@@ -1120,194 +1120,541 @@ These dialogs use the same `apiUrl` (external software URL) and `onRefresh` call
 
 ## 9. Page: Tasks
 
-**Route:** `/softaware/tasks`  
-**File:** `src/app/softaware/tasks/page.tsx`
+**Route:** `/softaware/tasks`
+**File:** `src/pages/TasksPage.tsx`
+**Desktop reference:** `src/app/softaware/tasks/page.tsx`
+
+### 9.0 External API Response Shape
+
+All task data lives on each software product's own API. The backend proxies via `/api/softaware/tasks`.
+
+**External endpoint:** `GET /api/development/tasks/paginated?page=N&limit=N`
+
+**Task object from API:**
+
+| Field | Type | Example | Notes |
+|-------|------|---------|-------|
+| `id` | number | `241` | Primary key |
+| `title` | string | `"MMS- Pause and Resume"` | |
+| `description` | string (HTML) | `"<p>After pausing…</p>"` | Rich HTML, may contain `<img>`, `<p>`, Word-pasted HTML |
+| `notes` | string | `""` | Plain-text notes |
+| `status` | string | `"new"` / `"in-progress"` / `"completed"` / `"progress"` | `"progress"` normalised to `"in-progress"` |
+| `type` | string | `"development"` / `"bug-fix"` / `"feature"` / `"maintenance"` / `"support"` | |
+| `start` | datetime | `"2025-12-19 10:25:00"` | Planned start |
+| `end` | datetime | `"2025-12-19 17:25:00"` | Planned end / due date |
+| `time` | datetime | `"2026-01-30 21:53:09"` | Last-modified / created timestamp |
+| `hours` | string | `"2.50"` or `"50:00"` | Actual hours (may be `HH:MM` or decimal) |
+| `estimated_hours` | number | `50` | |
+| `actual_start` | datetime \| null | | |
+| `actual_end` | datetime \| null | | |
+| `user` | number | `1` | Creator user ID on external system |
+| `created_by_name` | string | `"Billy"` | |
+| `backgroundColor` | hex | `"#f56565"` | Task card colour |
+| `borderColor` | hex | `"#f56565"` | |
+| `software_id` | number | `2` | |
+| `module_id` | number \| null | | |
+| `workflow_phase` | string \| null | `"intake"` / `"quality_review"` / `"triage"` / `"development"` / `"verification"` / `"resolution"` |
+| `assigned_to` | number \| null | | User ID assigned to |
+| `assigned_to_name` | string \| null | | Resolved display name |
+| `module_name` | string \| null | | Resolved module name |
+| `order` | number | `0` | Sort order |
+| `order_number` | number \| null | | |
+| `parent_task_id` | number \| null | | Association parent |
+| `association_type` | string \| null | `"duplicate"` / `"subtask"` / `"related"` / `"blocks"` / `"blocked_by"` |
+| `association_notes` | string \| null | | |
+| `task_billed` | 0 \| 1 | | |
+| `task_bill_date` | date \| null | `"2026-01-28"` | |
+| `approval_required` | 0 \| 1 | | Auto-set when estimated_hours > 8 |
+| `approved_by` | string \| null | `"Billy Metiso"` | |
+| `approved_at` | datetime \| null | | |
+| `task_direction` | number | `0` | |
+
+**Pagination wrapper:** `{ status: 1, message: "Success", data: { data: Task[], pagination: { current_page, per_page, total, total_pages, has_next } } }`
+
+**Comments endpoint:** `GET /api/development/tasks/{id}/comments`
+
+Each comment object:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `comment_id` | number | Primary key |
+| `task_id` | number | |
+| `user_id` | number | |
+| `user_name` | string | Display name |
+| `user_email` | string | |
+| `content` | string (HTML) | Comment body, may contain HTML |
+| `comment_type` | string | `"comment"` |
+| `is_internal` | 0 \| 1 | Internal-only comment |
+| `is_system` | 0 \| 1 | System-generated |
+| `field_changed` | string \| null | For audit trail comments |
+| `old_value` | string \| null | |
+| `new_value` | string \| null | |
+| `time_spent` | number | Minutes spent (0 = none) |
+| `source` | string | `"web"` / `"desktop"` |
+| `created_at` | datetime | |
+| `parent_comment_id` | number \| null | For threaded replies |
+| `comment_deleted` | 0 \| 1 | |
+| `attachments` | Attachment[] | Array of attached files |
+| `attachments_count` | number | |
+| `replies` | Comment[] | Nested reply objects |
+| `reply_count` | number | |
+
+Each attachment in a comment:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `attachment_id` | number | |
+| `task_id` | number | |
+| `comment_id` | number | |
+| `uploaded_by` | number | |
+| `uploaded_by_name` | string | |
+| `file_name` | string | Original filename |
+| `file_path` | string | Relative server path |
+| `file_size` | number | Bytes |
+| `file_type` | string | Extension (`"pdf"`, `"png"`, etc.) |
+| `mime_type` | string | |
+| `is_public` | 0 \| 1 | |
+| `uploaded_at` | datetime | |
+
+**Task-level attachments endpoint:** `GET /api/attachments/development/{task_id}`
+
+Returns same attachment shape but without `comment_id` (task-level, not comment-level).
 
 ### 9.1 Header Bar
 
 `border-b bg-card p-6`:
 
-**Row 1:** Title "Tasks" + subtitle "Manage your development tasks" | Right: Software Selector (same as Dashboard) + Refresh button
+**Row 1:** Title "Tasks" (`text-2xl font-bold`) + subtitle "Manage your development tasks" (`text-muted-foreground`) | Right-aligned controls:
+
+| Element | Icon | Details |
+|---------|------|---------|
+| **Software Selector** | `Package` | `<Select>` width `200px`. Lists only software with `external_live_url` or `external_test_url`. Persisted to `localStorage.selectedTasksSoftware`. |
+| **View Toggle** | `List` / `LayoutGrid` | Two-button group. Persisted to `localStorage.tasksViewMode`. Active button has primary bg. |
+| **New Task** | `Plus` | Disabled when no software selected. Opens `TaskDialog` in create mode. |
+| **Refresh** | `RefreshCw` | Animates (spin) while loading. Calls `loadTasks()`. |
+| **Hours Summary** | `Calculator` | Opens `TaskHoursModal`. Shows only when tasks loaded. |
 
 **Row 2 (filter bar):**
-- Search input: `<Input>` with `Search` icon, placeholder "Search tasks...", `w-full max-w-xs`
-- **Status filter:** `<Select>` — options: All, New, In Progress, Completed
-  - Default: "new"
-- **Type filter:** `<Select>` — options: All, Development, Bug-Fix, Feature, Maintenance, Support
-- **Phase filter:** `<Select>` — options: All, Intake, QA Review, Development, Verification, Resolution
-  - Default phase based on user role: `client_manager` → intake, `qa_specialist` → quality_review, `developer` → development, others → all
-- **Module filter:** Combobox (`<Popover>` + `<Command>`) — shows all unique modules for the selected software. Label "Module: All" / "Module: {name}".
-- **View mode toggle:** Two icon buttons for List and Grid views. State saved to `localStorage` key `tasksViewMode`.
+
+| Filter | Component | Options | Default |
+|--------|-----------|---------|---------|
+| **Search** | `<Input>` with `Search` icon | Free text. Filters `title`, `description`, `created_by_name` | Empty |
+| **Status** | `<Select>` | All Status, New, In Progress, Completed | `"new"` |
+| **Type** | `<Select>` | All Types, Development, Bug Fix, Feature, Maintenance, Support | All |
+| **Phase** | `<Select>` with `GitBranch` icon | All Phases, Intake, QA Review, Development, Verification, Resolution | **Role-based**: `client_manager`→intake, `qa_specialist`→quality_review, `developer`→development, admin→all |
+| **Module** | Searchable `<Combobox>` (`Popover`+`Command`) | All Modules + unique modules from loaded tasks | All |
 
 **Row 3 (summary bar):**
-- `Clock` icon + total hours (excl. invoiced) e.g. "23.50h"
-- `<Badge>` with task count e.g. "42 tasks"
-- `<Button onClick={handleCreateTask}>` — `Plus` icon + "New Task"
+- `Clock` icon + total actual hours (excluding invoiced) e.g. `"23.50h"`
+- `<Badge>` with filtered task count e.g. `"42 tasks"`
+- "New Task" button (duplicate of header if desired)
 
-### 9.2 Task List (scrollable)
+### 9.2 Task List / Grid
 
-**List mode:** Vertical stack of `TaskCard` components.
+**List mode:** `space-y-3` — vertical stack of task cards.
 
-**Grid mode:** `grid gap-4 sm:grid-cols-2 lg:grid-cols-3` grid of `TaskCard` components.
+**Grid mode:** `grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4`.
 
-**Empty state:** Centered `ListTodo` icon + "No tasks found" + "Try adjusting your filters" text.
-
-**Loading state:** Spinner centered in the content area. However, **silent refresh** (background refresh without replacing list with spinner) when polling.
+**Empty states:**
+| State | Display |
+|-------|---------|
+| No software selected | `Package` icon + "Please select a software to view tasks" |
+| Loading (no tasks) | Spinner + "Loading tasks..." |
+| No tasks after filter | `ListTodo` icon + "No tasks found" + "Create First Task" button |
+| Refreshing (has tasks) | Thin bar: spinner + "Refreshing..." — tasks remain visible |
 
 ### 9.3 TaskCard Component
 
 **Component:** `src/components/softaware/tasks/TaskCard.tsx`
+**Card root:** `<Card className="transition-all hover:shadow-md flex flex-col h-full !py-3 !gap-1">`
 
-Renders as a `<Card className="transition-all hover:shadow-md flex flex-col h-full !py-3 !gap-1">`.
+#### Card Header (`pb-0`)
 
-**CardHeader (pb-0):**
-- **Left:** Task title (`font-bold line-clamp-2 leading-tight text-base`) + meta line below:
-  - Formatted date + creator name + hours (if > 0)
-  - Hours shown as `Clock` icon + `{parseFloat(hours).toFixed(2)}h` in primary color
-- **Right badges:**
-  - **Approval badge** (if `approval_required === 1`):
-    - Approved: `bg-green-500/10 text-green-500 border-green-500/20` + `ShieldCheck` icon + "Approved"
-    - Pending: `bg-orange-500/10 text-orange-500 border-orange-500/20` + `ShieldAlert` icon + "Pending"
-    - Tooltip shows approver/date or "Awaiting approval" message
-  - **Status badge** `variant="outline"` with status color + icon:
-    - completed: `bg-green-500/10 text-green-500` + `CheckCircle`
-    - in-progress/progress: `bg-yellow-500/10 text-yellow-500` + `Clock`
-    - new/other: `bg-gray-500/10 text-gray-500` + `AlertCircle`
+**Left column:**
 
-**CardContent (pt-0 pb-2 space-y-2):**
-1. **Description** (if present): `line-clamp-2 text-sm text-foreground/75`, rendered as HTML (`dangerouslySetInnerHTML`)
-2. **Inline Attachments** (`TaskAttachmentsInline`) — shows thumbnail previews of attachments
-3. **Workflow Section** (if `task.workflow_phase` set): Rounded border with gradient `from-muted/50 to-muted/30`, padding `p-2.5`:
-   - "WORKFLOW" label (10px, uppercase, tracking-wide, muted)
-   - Phase badge + Workflow action button (see below)
-   - If assigned: `User` icon + assigned-to name, or module badge
-4. **Latest Comment** (if present, fetched separately): `MessageSquare` icon + truncated comment + user name (muted xs)
-5. **Reorder buttons** (if not first/last): `ChevronUp`/`ChevronDown` ghost icon buttons
+| Element | Data Field | Styling |
+|---------|-----------|---------|
+| **Title** | `task.title` | `font-bold line-clamp-2 leading-tight text-base` — clickable |
+| **Meta line** | Date + Creator + Hours | `text-xs text-muted-foreground` row |
+| — Date | `task.start \|\| task.time \|\| task.created_at` | Formatted via `relativeDate()` |
+| — Creator | `task.created_by_name` | Shown with "·" separator if present |
+| — Hours | `task.hours` | `Clock` icon + `"{value}h"` in `font-medium text-primary`. Only shown if `> 0`. Parse `HH:MM` to decimal. |
 
-**Workflow Action Button Logic:**
-- Task `completed` or phase `resolution`: Show green "Completed" badge (no button)
-- User cannot assign: Show phase badge only (purple `bg-purple-500/10`)
-- User can assign: Show blue "Assign" button with `ArrowRight` icon — opens `WorkflowDialog`
+**Right column (badges):**
 
-**Start/Complete Quick Actions:**
-- If status is `new` and user is a developer: Show "Start" button (`Play` icon) — sets status to `in-progress`
-- If status is `in-progress` and user is a developer: Show "Complete" button (`CheckCircle` icon) — sets status to `completed`
-- These set `actual_start` / `actual_end` timestamps on the task
+| Badge | Condition | Approved Style | Pending Style |
+|-------|-----------|---------------|---------------|
+| **Approval** | `approval_required === 1` | `bg-green-500/10 text-green-500 border-green-500/20` + `ShieldCheck` + "Approved" | `bg-orange-500/10 text-orange-500 border-orange-500/20` + `ShieldAlert` + "Pending" |
+| — Tooltip | | "Approved by {name} on {date}" | "Awaiting approval — estimated hours exceed threshold" |
 
-**Bottom action row:**
-- `Eye` icon button — opens `TaskDetailsDialog`
-- `Edit` icon button — opens `TaskDialog` (edit mode)
-- `Trash2` icon button — opens delete `AlertDialog`
-- List mode: also shows up/down reorder arrows (`ChevronUp`/`ChevronDown`)
+| Status | Badge Class | Icon |
+|--------|------------|------|
+| `completed` | `bg-green-500/10 text-green-500 border-green-500/20` | `CheckCircle` |
+| `in-progress` / `progress` | `bg-yellow-500/10 text-yellow-500 border-yellow-500/20` | `Clock` |
+| `new` / other | `bg-gray-500/10 text-gray-500 border-gray-500/20` | `AlertCircle` |
 
-### 9.4 TaskDialog (Create/Edit)
+#### Card Content (`pt-0 pb-2 space-y-2`)
+
+| # | Element | Data | Styling / Notes |
+|---|---------|------|-----------------|
+| 1 | **Description** | `task.description` | `line-clamp-2 text-sm text-foreground/75`. Rendered as HTML (`dangerouslySetInnerHTML`). Only shown if non-empty. |
+| 2 | **Inline Attachments** | Task-level attachments (not comment) | `TaskAttachmentsInline` component — fetches `GET /api/attachments/development/{id}`. Shows max 3 items: images as 12×12 thumbnails (`object-cover rounded border`), non-images as `Paperclip` icon + truncated filename. Links open full image/file. |
+| 3 | **Workflow Section** | `task.workflow_phase` | Only shown if phase is set. Bordered box `p-2.5` with gradient `from-muted/50 to-muted/30`. |
+| 3a | — Phase badge | `workflow_phase` | Purple `bg-purple-500/10 text-purple-700 border-purple-500/20`. Label from `PHASE_LABELS` map. |
+| 3b | — Assigned to | `assigned_to_name` | `User` icon + name |
+| 3c | — Module | `module_name` | `Cube` icon + name |
+| 3d | — Parent task | `parent_task_id`, `association_type` | `Link` icon + "{type} of Task #{id}" |
+| 4 | **Latest Comment** | Fetched via comments API | `MessageSquare` icon + author name + date + content (HTML, `line-clamp-2`). Falls back to "No comments yet". |
+
+#### Workflow Action Button Logic
+
+| Condition | Display |
+|-----------|---------|
+| Task `completed` or phase `resolution` | Green "Completed" badge (no action button) |
+| User **cannot** assign (`canUserAssignTask` false) | Phase badge only (purple, no button) |
+| User **can** assign | Blue "Assign" button with `ArrowRight` → opens `WorkflowDialog` |
+
+#### Quick Status Actions
+
+| Condition | Button | Icon | Action |
+|-----------|--------|------|--------|
+| Status is `new` or `pending` | "Start" | `Play` | Sets status to `in-progress`, stamps `actual_start` = now |
+| Status is `in-progress` or `progress` | "Complete" | `CheckCircle` | Sets status to `completed`, stamps `actual_end` = now |
+
+#### Bottom Action Row
+
+| Button | Icon | Condition | Action |
+|--------|------|-----------|--------|
+| **Move Up** | `ChevronUp` | List view, not first | Reorder task up |
+| **Move Down** | `ChevronDown` | List view, not last | Reorder task down |
+| *(separator)* | Vertical `div h-5 w-px` | | |
+| **View** | `Eye` | Always | Opens `TaskDetailsDialog` |
+| **Edit** | `Pencil` | Always | Opens `TaskDialog` in edit mode |
+| **Start** | `Play` | Status `new`/`pending` | Status → `in-progress` |
+| **Complete** | `CheckCircle` | Status `in-progress`/`progress` | Status → `completed` |
+| **Delete** | `Trash2` | Always | Opens delete `AlertDialog` |
+
+#### Delete Confirmation
+
+```
+AlertDialog:
+  Title: "Delete Task"
+  Body:  "Are you sure you want to delete "{task.title}"? This action cannot be undone."
+  Actions: Cancel | Delete (destructive, shows "Deleting…" while loading)
+```
+
+### 9.4 TaskDialog (Create / Edit)
 
 **Component:** `src/components/softaware/tasks/TaskDialog.tsx`
+**Modal:** `max-w-[1400px]` (95vw), `max-h-[95vh]`, scrollable.
 
-Modal dialog `max-w-2xl`:
+**Title:** "Create Task" or "Edit Task" (`text-2xl`)
 
-**Title:** "Create Task" or "Edit Task"
+#### Tab: General
 
-**Fields:**
-- **Title** (required): `<Input>` full width
-- **Type** (required): `<Select>` — Development / Bug-Fix / Feature / Maintenance / Support
-- **Status** (required): `<Select>` — New / In Progress / Completed
-- **Description**: `<RichTextEditor>` (Tiptap-based rich text editor with bold, italic, lists, links)
-- **Estimated Hours**: `<Input type="number" step="0.5">` in hours
-- **Actual Hours**: `<Input type="number" step="0.01">` in hours (HH:MM:SS format stored, decimal displayed)
-- **Due Date**: `<DateTimePicker>` component
-- **Notes**: `<Textarea>` (optional)
+| Field | Component | Data Field | Required | Notes |
+|-------|-----------|-----------|----------|-------|
+| **Task Name** | `<Input>` (`text-lg`) | `title` / `task_name` | ✅ | |
+| **Description** | `<RichTextEditor>` (TipTap) | `description` / `task_description` | | Supports bold, italic, lists, links, paste-to-upload images (Ctrl+V inserts screenshot into attachments) |
+| **Status** | `<Select>` | `status` / `task_status` | ✅ | Options: New, In Progress, Completed |
+| **Type** | `<Select>` | `type` / `task_type` | ✅ | Options: Development, Bug Fix, Feature, Maintenance, Support. Auto-sets `backgroundColor`. |
+| **Created By** | `<Input>` | `created_by_name` | | Placeholder: current user's `full_name` |
+| **Notes** | `<Textarea rows={4}>` | `notes` / `task_notes` | | "Additional notes..." |
 
-**Footer:** Cancel + Save/Create button
+#### Tab: Timing & Hours
+
+| Field | Component | Data Field | Notes |
+|-------|-----------|-----------|-------|
+| **Planned Start** | `<DateTimePicker>` | `start` | "Select start date" |
+| **Planned End** | `<DateTimePicker>` | `end` | "Select end date" |
+| **Actual Start** | `<DateTimePicker>` | `actual_start` | "Select actual start" |
+| **Actual End** | `<DateTimePicker>` | `actual_end` | "Select actual end" |
+| **Estimated Hours** | `<Input type="number" step="0.25" min="0">` | `estimated_hours` | **Triggers approval flag** if > 8 hours (`approval_required = 1`) |
+| **Actual Hours** | `<Input type="number" step="0.25" min="0">` | `hours` | Stored as `HH:MM:SS` or decimal, displayed as decimal |
+
+#### Tab: Attachments
+
+| Element | Details |
+|---------|---------|
+| **File Dropzone** | `<FileDropzone>` with drag & drop. Tab label shows count: "Attachments (N)" |
+| **File list** | Each file: `File` icon + name + size (KB) + `X` remove button |
+
+#### Hidden / Auto-populated Fields
+
+| Field | Value |
+|-------|-------|
+| `backgroundColor` | Auto from type: `development`→`#667eea`, `bug-fix`→`#f56565`, `feature`→`#48bb78`, `maintenance`→`#ed8936`, `support`→`#4299e1` |
+| `task_billed` | Always `0` on create |
+| `software_id` | From page-level `selectedSoftware.id` |
+| `approval_required` | `1` if `estimated_hours > 8`, else `0` |
+| `created_by_name` | Current authenticated user name |
+| `workflow_phase`, `assigned_to`, `module_id` | Preserved from existing task on update |
+
+#### Footer
+
+| Button | Details |
+|--------|---------|
+| Cancel | Variant `outline` |
+| Submit | "Create Task" / "Update Task" / "Saving…" (`size="lg"`) |
 
 ### 9.5 WorkflowDialog (Assign Task)
 
 **Component:** `src/components/softaware/tasks/WorkflowDialog.tsx`
+**Modal:** `max-w-lg`
 
-Modal dialog `max-w-lg`:
+**Title:** "Assign Task"
+**Description:** "Assign this task to the next person in the workflow."
 
-**Title:** "Assign Task: {task.title}"
+**Permission check:** If `canUserAssignTask()` returns false → red `Alert` with `AlertCircle` icon + role-specific error message. Submit button disabled.
 
-**Permission check:** If user does not have permission (`!canUserAssignTask`), show an `Alert` with `AlertCircle` icon and the permission error message. Disable the submit button.
+**Static elements:**
+- **Current Phase badge** — shows current `workflow_phase` label
+- **Current Module info** — box with module name + list of assigned developers
 
-**Phase indicator:** Shows current phase → arrow → resulting phase (e.g. "Intake → QA Review"). Backward assignments shown in orange/amber.
+**Fields (vary by current phase):**
 
-**Fields (vary by phase):**
+| Current Phase | Fields Shown |
+|---------------|-------------|
+| **Intake** | Assign to: `<Select>` filtered to `qa_specialist` + admin users. Comment: `<Textarea>`. |
+| **QA Review / Triage** | "Send back to Intake" checkbox (overrides module selector). Module `<Select>` (required if forwarding) — shows modules with developer count + warning if none. Comment: `<Textarea>`. |
+| **Development** | Assign to: `<Select>` filtered to `developer` + `qa_specialist` + admin. Shows module's developers badge. Comment: `<Textarea>`. |
+| **Verification / Resolution** | Assign to: `<Select>` filtered to developers + QA + admin. Comment: `<Textarea>`. |
 
-*From `intake` phase:*
-- Assign to (QA Specialist): `<Select>` filtered to `qa_specialist` + admins
-- Comment: `<Textarea>` (optional)
+**Phase Preview badge:** "Workflow phase will be set to: [phase]"
 
-*From `quality_review`/`triage` phase:*
-- Toggle: "Send back to intake" / "Forward to development" (Switch or radio)
-- If forwarding: Module `<Select>` (required) — lists all modules for this software. Shows developer count badge.
-- If sending back: automatic assignment to available client_manager
-- Comment: `<Textarea>` (optional)
+**Backward Assignment Warning:** Amber `Alert` shown when assignment moves to an earlier phase.
 
-*From `development` phase:*
-- Assign to: `<Select>` filtered to `developer` + `qa_specialist` + admins
-- Shows module developers badge if module selected
-- Comment: `<Textarea>` (optional)
+**Submit:** Calls `PUT /api/softaware/tasks` with `{ apiUrl, task: { id, assigned_to, workflow_phase, module_id } }`. If comment entered, also calls `POST /api/softaware/tasks/{id}/comments` with `{ apiUrl, content, is_internal: 1 }`.
 
-**Backward assignment warning:** When `isBackward` is true, show amber `Alert` "This is a backward assignment. The task will be moved to an earlier phase."
+#### Workflow Phase Transitions
 
-**Submit:** Calls `PUT /api/softaware/tasks` with `{ apiUrl, task: { id, assigned_to, workflow_phase, module_id, ... } }` + optionally posts a comment.
+| Current Phase | Assignees | Target Phase |
+|---------------|-----------|-------------|
+| `intake` | QA Specialists, Admins | `quality_review` |
+| `quality_review` / `triage` | Send back → Client Managers | `intake` |
+| `quality_review` / `triage` | Forward → assign Module | `development` |
+| `development` | Developers, QA, Admins | `development` (reassign) or `verification` |
+| `verification` / `resolution` | Developers, QA, Admins | `development` or `quality_review` |
 
 ### 9.6 TaskDetailsDialog
 
 **Component:** `src/components/softaware/tasks/TaskDetailsDialog.tsx`
+**Modal:** `max-w-4xl`, `max-h-[90vh]`, scrollable.
 
-Full modal (`max-w-4xl`, `max-h-[90vh]`, scrollable) with tab navigation.
+#### Dialog Header
 
-**Tabs:** Details | Comments | Attachments | Associations | AI Chat (desktop only → keep for web too)
+| Element | Data | Details |
+|---------|------|---------|
+| **Title** | `task.title` | `text-2xl font-semibold`, truncated |
+| **Phase badge** | `workflow_phase` | Phase-specific colour (see §9.12) |
+| **Draw button** | | `Paperclip` icon + "Draw" — opens `ExcalidrawDrawer` |
+| **Edit button** | | `Pencil` icon + "Edit" — opens `TaskDialog` in edit mode |
+| **Close button** | | `X` icon |
 
-**Tab: Details**
-- Full task meta: Title, Status badge, Type badge, Phase badge, Dates (Created, Start, Due, Actual Start/End), Hours (actual vs estimated), Approval status
-- Assigned To: name + role, Module: name with developer list
-- Description (HTML rendered)
-- Notes (plain text)
-- "Edit Task" button → opens TaskDialog in edit mode
-- "Assign/Move" button → opens WorkflowDialog (if permitted)
+#### Tab Navigation
 
-**Tab: Comments**
-- List of comments (chronological). Each comment:
-  - Avatar initials circle (primary color bg)
-  - Username (bold) + relative time
-  - Content (HTML rendered if not plain text)
-  - Time spent badge (if `time_spent > 0`): e.g. "30m"
-  - Internal badge (if `is_internal === 1`): muted gray "Internal"
-  - Reply button → sets `replyingTo` state, highlights which comment being replied to
-  - If has attachments: file thumbnails shown below
-  - Delete button (own comments or admin only)
+| Tab | Label | Extra |
+|-----|-------|-------|
+| **Details** | "Details" | Default active tab |
+| **Comments** | "Comments (N)" | Live comment count |
+| **Attachments** | "Attachments (N)" | Live attachment count |
+| **Associations** | "Associations" | Task-to-task links |
+| **AI Chat** | `Bot` icon + "AI Chat" | Visible only when `task.type === 'bug-fix'` (desktop: also requires Electron) |
 
-- **Reply indicator:** When replying, show a banner "Replying to {user}" with X to cancel.
-- **Comment input area:**
-  - `<RichTextEditor>` or `<Textarea>` for comment text
-  - Time spent: number input in minutes `<Input type="number" min="0" step="1">` with "minutes" label
-  - Internal toggle: `<Switch>` labeled "Internal note"
-  - File attach: `<FileDropzone>` — drag and drop or click to select multiple files
-  - List of selected files with remove buttons
-  - Submit button: "Post Comment" (or "Post Comment + {n} file(s)")
+#### Tab: Details
 
-**Tab: Attachments**
-- Grid of uploaded files (images as thumbnails, other files as file cards)
-- Each file: filename, size, upload date, uploader
-- Delete button (admin/owner)
-- Upload section: `<FileDropzone>` + "Upload Files" button
+**Status / Type / Software Badges Row:**
 
-**Tab: Associations** (task links)
-- List of associated tasks with type labels: Duplicate / Subtask / Related / Blocks / Blocked By
-- "Link Task" button → opens `TaskAssociationDialog`
-- Each row: relationship type + task title + status badge + "View" link
+| Badge | Data | Style |
+|-------|------|-------|
+| Status | `task.status` | Colour + icon per §9.12 |
+| Type | `task.type` | Outline badge |
+| Software | `task.software_name` | `Package` icon, only if present |
 
-**Tab: AI Chat**
-- Embedded AI assistant pre-prompted with task context (title, description, module, software)
-- Same streaming chat interface as the main chat page
-- `<TaskAIChat>` component
+**Date & Hours Grid (2–4 columns):**
 
-**Image Lightbox:** Clicking any image thumbnail opens a full-screen lightbox with prev/next navigation.
+| Label | Icon | Data Field |
+|-------|------|-----------|
+| Planned Start | `Calendar` | `task.start` |
+| Planned End | `Calendar` | `task.end` |
+| Estimated Hours | `Clock` | `task.estimated_hours` (decimal) |
+| Actual Start | `Calendar` | `task.actual_start` |
+| Actual End | `Calendar` | `task.actual_end` |
+| Actual Hours | `Clock` | `task.hours` (decimal) |
+| Created By | `User` | `task.created_by_name` |
+| Created At | `Calendar` | `task.time` (last modified / creation timestamp) |
 
-### 9.7 Filtering Logic
+**Workflow Status Section** (shown if `workflow_phase` set):
+- Section header: `GitBranch` icon + "Workflow Status"
+- "Assign / Move" button → opens `WorkflowDialog` (if user has permission)
+- Current phase badge with phase-specific colour
+- Assigned to: `User` icon + resolved name from `assigned_to` / `assigned_to_name`
+- Module: `Cube` icon + resolved name. Shows developers list if available.
+- Latest comment: author + date + HTML content (`line-clamp-2`) or "No comments yet"
+
+**Approval Section** (shown if `approval_required === 1`):
+
+| State | Style | Content |
+|-------|-------|---------|
+| Approved | `bg-emerald-50 border-emerald-200 text-emerald-700` | `ShieldCheck` icon + "Approved by {name}" + date |
+| Pending | `bg-amber-50 border-amber-200 text-amber-700` | `ShieldAlert` icon + "Awaiting approval — estimated hours exceed threshold" |
+
+**Description Section:**
+- Header: `DocumentText` icon + "Description"
+- Body: HTML rendered in `prose prose-sm` container with proper link/list styling + `bg-gray-50 rounded-lg border p-4`
+
+**Notes Section** (shown if `task.notes` is non-empty):
+- Header: `DocumentText` icon + "Notes"
+- Body: `whitespace-pre-wrap` plain text
+
+**Task Associations Section:**
+- Header: `Link` icon + "Task Associations"
+- "Manage Associations" button → opens `TaskAssociationDialog`
+- Parent task: association type badge + parent task title or "Task #{id}"
+- Association notes
+- Child tasks list with type badge + title
+- Empty state: "No parent task association"
+
+#### Tab: Comments
+
+**Comment Display (per comment):**
+
+| Element | Data | Styling |
+|---------|------|---------|
+| **Avatar** | `User` icon | Circular muted background `h-6 w-6` |
+| **Username** | `comment.user_name` | `font-medium text-gray-900` |
+| **Internal badge** | `is_internal === 1` | `bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded` — "Internal" |
+| **Time spent** | `time_spent > 0` | `Clock` icon + minutes, blue badge |
+| **Timestamp** | `created_at` | `relativeDate()` — e.g. "2 hours ago", "Jan 15" |
+| **Content** | `content` (HTML) | `dangerouslySetInnerHTML`, prose styling, `[&_img]` rules for embedded images (max-width, rounded, clickable for lightbox) |
+| **Attachments** | `attachments[]` | Images: thumbnails `max-h-32 rounded-lg border`, clickable → lightbox. Non-images: `Paperclip` icon + filename link. |
+| **Reply button** | | `MessageSquare` icon + "Reply" — sets `replyingTo` state |
+| **Nested replies** | `replies[]` | Indented `ml-8 mt-2`, recursively rendered |
+| **Internal styling** | `is_internal` | Amber left-border + amber background tint |
+
+**Reply indicator:** When replying, banner: `CornerDownRight` icon + "Replying to comment" + `X` cancel button.
+
+**Comment Form (always visible below comments):**
+
+| Element | Details |
+|---------|---------|
+| **Internal toggle** | `<Switch>` + "Internal comment" label |
+| **Rich Text Editor** | `<RichTextEditor>` (TipTap) — placeholder "Type your comment..." |
+| **File Dropzone** | `<FileDropzone>` — "Attach Files (optional)" |
+| **Post button** | "Post Comment" / "Posting…" — disabled when editor empty |
+
+**Empty state:** `MessageSquare` icon (`h-12`) + "No comments yet"
+
+#### Tab: Attachments
+
+**Upload Section:**
+- `<FileDropzone>` for new file uploads
+- "Upload N file(s)" button — appears when files selected, shows "Uploading…"
+
+**Existing Attachments Grid (2–4 columns):**
+
+| Element | Data | Details |
+|---------|------|---------|
+| Image thumbnail | `file_path` | `object-cover`, clickable → lightbox |
+| Non-image file | `file_name` | `File` icon (`h-12`), links to external URL |
+| Filename | `file_name` | Truncated |
+| File size | `file_size` | In KB |
+| Delete button | | `Trash2` icon — confirms before delete |
+
+**Empty state:** `File` icon (`h-12`) + "No attachments yet" + "Upload files using the dropzone above"
+
+**Image Lightbox (shared across all tabs):**
+
+| Element | Details |
+|---------|---------|
+| Close button | `X` on dark circle, top-right |
+| Prev/Next arrows | `ChevronLeft`/`ChevronRight` on dark circles |
+| Counter | "N / M" centered bottom |
+| Image | `object-contain`, full dialog size |
+
+#### Tab: Associations
+
+| Element | Details |
+|---------|---------|
+| **Association list** | Each row: relationship type badge + task title + status badge |
+| **Manage button** | Opens `TaskAssociationDialog` |
+| **Empty state** | "No task associations" |
+
+#### Tab: AI Chat
+
+**Component:** `TaskAIChat` (lazy-loaded)
+**Availability:** Rendered when `task.type === 'bug-fix'`. On desktop, also requires Electron environment.
+
+| Element | Details |
+|---------|---------|
+| **Context banner** | `Bot` icon + "Code Reader Agent for Task #{id}" + module + project name |
+| **Empty state** | `Bot` icon + "Ask questions about this bug — the agent will search and read the project codebase automatically." |
+| **Messages** | User: circular "You" avatar + muted bg. Assistant: purple `Bot` avatar + bordered prose with `ReactMarkdown`. Status: monospace muted. |
+| **Save as Comment** | On hover over assistant message: `MessageSquare` + "Save as task comment" |
+| **Quick Insert** | `FileText` "Full Context" / `FileText` "Description" / `FileText` "Notes" — inject task body into prompt |
+| **Input** | `<Textarea rows={2}>` + `Send` icon button (`h-9 w-9`) |
+| **Stop button** | `Square` icon (destructive) — visible during streaming |
+| **Loading** | `Bot` avatar + spinner + "Analysing code..." |
+| **Connection states** | Loading: spinner + "Connecting to Code Reader…". Error: `AlertCircle` + "Unable to connect" + retry link. |
+
+### 9.7 TaskAssociationDialog
+
+**Component:** `src/components/TaskAssociationDialog.tsx`
+**Modal:** Standard dialog.
+
+| Element | Details |
+|---------|---------|
+| **Title** | "Associate Task" |
+| **Current association alert** | If task has parent: shows type + parent title (#ID) + notes |
+| **Association type** | Radio buttons with descriptions: |
+| — Duplicate | "This task is a duplicate of another task" |
+| — Subtask | "This task is a subtask of a larger task" |
+| — Related | "This task is related to another task" |
+| — Blocks | "This task blocks another task from completion" |
+| — Blocked By | "This task is blocked by another task" |
+| **Parent task selector** | Searchable `<Combobox>`. Shows `task.title`. Excludes current task. |
+| **Notes** | `<Textarea rows={3}>` — "Add any additional context…" |
+| **Remove Association** | Destructive button (only when existing). Calls `DELETE`. |
+| **Save** | "Create Association" / "Update Association" / "Saving…" |
+
+### 9.8 TaskHoursModal
+
+**Component:** `src/components/softaware/tasks/TaskHoursModal.tsx`
+
+| Element | Details |
+|---------|---------|
+| **Title** | "Task Hours Summary" |
+| **Subtitle** | "N tasks with hours" |
+| **Billing date** | `<DateTimePicker>` — defaults to today |
+| **Copy to clipboard** | `Copy` icon — copies TSV table (paste-ready for Excel) |
+| **Invoice button** | `Receipt` icon — marks displayed tasks as invoiced with selected date |
+
+**Table columns:**
+
+| Column | Data Field |
+|--------|-----------|
+| Task Name | `title` |
+| Requester | `created_by_name` |
+| Actual Start | `actual_start` |
+| Actual End | `actual_end` |
+| Hours | `hours` (formatted as `Xh Ym`) |
+| Notes | `notes` |
+| **Total Row** | Sum of all hours |
+
+**Filter:** Only shows tasks where `hours > 0` AND no existing `task_bill_date`. Sorted by `actual_start` ascending.
+
+### 9.9 TaskAttachmentsInline
+
+**Component:** `src/components/softaware/tasks/TaskAttachmentsInline.tsx`
+
+Renders on each task card. Fetches `GET /api/attachments/development/{task_id}` with software token. Filters to task-level attachments only (no `comment_id`). Max 3 items shown.
+
+| Element | Condition | Styling |
+|---------|-----------|---------|
+| Image thumbnail | `file_type` matches `png\|jpg\|jpeg\|gif\|webp\|svg` | `h-12 w-12 object-cover rounded border`. Links to full image URL. |
+| File icon + name | Non-image | `Paperclip` icon + truncated `file_name` (max 120px). `bg-blue-500/10 text-blue-600`. |
+
+### 9.10 Filtering Logic
 
 ```typescript
 filteredTasks = tasks.filter(task => {
@@ -1322,23 +1669,137 @@ filteredTasks = tasks.filter(task => {
     const query = searchQuery.toLowerCase();
     return task.title?.toLowerCase().includes(query) ||
            task.description?.toLowerCase().includes(query) ||
-           task.creator?.toLowerCase().includes(query);
+           task.created_by_name?.toLowerCase().includes(query);
   }
   return true;
 });
 ```
 
-### 9.8 Task Reordering
+### 9.11 Task Reordering
 
-Tasks can be reordered in list view. Each card shows up/down arrow buttons (hidden if first/last). Clicking swaps positions by calling `POST /api/softaware/tasks/reorder` with `{ apiUrl, orders: { taskId: newOrder } }`.
+Tasks can be reordered in list view. Each card shows `ChevronUp`/`ChevronDown` buttons (disabled if first/last). Clicking swaps positions by calling `POST /api/softaware/tasks/reorder` with `{ apiUrl, orders: { taskId: newOrder } }`.
 
-### 9.9 Polling
+### 9.12 Status, Phase & Type Visual Reference
 
-Tasks are polled every 30 seconds. When changes are detected:
-- New task: Toast "New Task: {title}" + browser Notification
-- Status change: Toast "Task Status Updated: {title} → {status}" + browser Notification
+#### Task Status Colours
 
-Request browser notification permission (`Notification.requestPermission()`) on first task load.
+| Status | Badge BG | Text | Dot | Icon |
+|--------|----------|------|-----|------|
+| `new` | `bg-gray-500/10` | `text-gray-500` | `bg-gray-500` | `AlertCircle` |
+| `pending` | `bg-gray-500/10` | `text-gray-500` | `bg-gray-500` | `AlertCircle` |
+| `in-progress` | `bg-yellow-500/10` | `text-yellow-500` | `bg-yellow-500` | `Clock` |
+| `progress` | *(normalised to `in-progress`)* | | | |
+| `completed` | `bg-green-500/10` | `text-green-500` | `bg-green-500` | `CheckCircle` |
+
+#### Workflow Phase Colours
+
+| Phase | Badge BG | Text | Label |
+|-------|----------|------|-------|
+| `intake` | `bg-blue-500/10` | `text-blue-700` | Intake |
+| `quality_review` | `bg-yellow-500/10` | `text-yellow-700` | QA Review |
+| `triage` | `bg-purple-500/10` | `text-purple-700` | Triage |
+| `development` | `bg-orange-500/10` | `text-orange-700` | Development |
+| `verification` | `bg-cyan-500/10` | `text-cyan-700` | Verification |
+| `resolution` | `bg-green-500/10` | `text-green-700` | Resolution |
+| *(unassigned)* | `bg-gray-500/10` | `text-gray-500` | Unassigned |
+
+#### Task Type → Card Colour (`backgroundColor`)
+
+| Type | Hex | Tailwind equiv |
+|------|-----|----------------|
+| `development` | `#667eea` | Indigo |
+| `bug-fix` | `#f56565` | Red |
+| `feature` | `#48bb78` | Green |
+| `maintenance` | `#ed8936` | Orange |
+| `support` | `#4299e1` | Blue |
+
+#### Approval Badge
+
+| State | BG | Text | Icon |
+|-------|----|------|------|
+| Approved | `bg-green-500/10` | `text-green-500` | `ShieldCheck` |
+| Pending | `bg-orange-500/10` | `text-orange-500` | `ShieldAlert` |
+
+### 9.13 Polling & Notifications
+
+**Polling interval:** 30 seconds (via `useTasks` hook). Silent refresh — no loading spinner when tasks already loaded.
+
+**Change detection:** Compares previous/current task arrays by ID. Emits change events:
+
+| Change Type | Toast | Notification |
+|-------------|-------|-------------|
+| New task (ID not seen before) | "New Task: {title}" | Browser `Notification` + Electron native (desktop) |
+| Status changed | "Task Status Updated: {title} → {status}" | Browser `Notification` |
+
+**Notification permission:** `Notification.requestPermission()` requested on first task load.
+
+**Notification poller** (desktop: `task-notification-poller.ts`): Polls every 60 seconds for tasks assigned to current user. State persisted to `localStorage.softaware_task_notification_state` (seen IDs, max 500, last check timestamp).
+
+### 9.14 ExcalidrawDrawer Integration
+
+**Component:** `src/components/ExcalidrawDrawer.tsx`
+**Trigger:** "Draw" button in `TaskDetailsDialog` header.
+
+Opens a full-screen overlay with the Excalidraw whiteboard editor. On save:
+1. Exports drawing as PNG (`imageBase64`) + scene JSON
+2. Creates an internal comment with the drawing embedded as `<img>` tag
+3. Uploads the PNG as a file attachment via `POST /api/softaware/tasks/{id}/comments/with-attachment`
+4. Comment marked `is_internal: 1`
+
+### 9.15 Backend Proxy Routes
+
+All routes require `requireAuth` middleware (valid backend JWT). The software-specific token is sent via `X-Software-Token` header.
+
+| Backend Route | Method | External Endpoint | Notes |
+|---------------|--------|-------------------|-------|
+| `/api/softaware/tasks` | GET | `GET /api/development/tasks/paginated?page=N&limit=N` | Paginated list |
+| `/api/softaware/tasks` | POST | `POST /api/development/tasks` | Create task |
+| `/api/softaware/tasks` | PUT | `PUT /api/development/tasks` | Update task |
+| `/api/softaware/tasks/:id` | DELETE | `DELETE /api/development/tasks/:id` | Delete task |
+| `/api/softaware/tasks/reorder` | POST | `POST /api/development/tasks/reorder` | Reorder |
+| `/api/softaware/tasks/:id/comments` | GET | `GET /api/development/tasks/:id/comments` | List comments |
+| `/api/softaware/tasks/:id/comments` | POST | `POST /api/development/tasks/:id/comments` | Add comment |
+| `/api/softaware/tasks/:id/comments/with-attachment` | POST | Two-step: POST comment + POST `/api/attachments/development/:id` | Comment + file upload |
+| `/api/softaware/tasks/authenticate` | POST | Step 1: `POST /api/auth_login` → Step 2: `POST /api/verify_otp` | Two-step OTP auth |
+
+### 9.16 `useTasks` Hook
+
+**File:** `src/hooks/useTasks.ts`
+
+```typescript
+useTasks({ apiUrl, softwareId, autoLoad }) → {
+  tasks: Task[],
+  loading: boolean,
+  error: string | null,
+  loadTasks: (silent?: boolean) => Promise<void>,
+  setTasks: Dispatch<SetStateAction<Task[]>>
+}
+```
+
+| Behaviour | Details |
+|-----------|---------|
+| **Pagination** | Auto-paginates with `limit=1000` per page until `has_next === false` |
+| **Normalisation** | Maps `"progress"` → `"in-progress"` |
+| **Auth gating** | Only fetches when `apiUrl` is set and software token exists in localStorage |
+| **Error handling** | On `401` → frontend 401 interceptor clears `jwt_token` → redirect to login |
+| **Safety limit** | Max 50 pages to prevent infinite loops |
+
+### 9.17 `softwareAuth` Utility
+
+**File:** `src/utils/softwareAuth.ts`
+
+```typescript
+getSoftwareToken(softwareId: number): string | null
+  // reads localStorage key `software_token_{softwareId}`
+
+setSoftwareToken(softwareId: number, token: string): void
+  // writes to localStorage
+
+clearSoftwareToken(softwareId: number): void
+
+softwareAuthHeaders(softwareId: number | null): Record<string, string>
+  // returns { 'X-Software-Token': token } or {}
+```
 
 ---
 

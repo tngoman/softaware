@@ -136,7 +136,7 @@ const createTransactionSchema = z.object({
 });
 
 /**
- * GET /accounting/transactions - List transactions
+ * GET /accounting/transactions - List transactions with filtering
  */
 accountingRouter.get('/transactions', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
@@ -144,22 +144,56 @@ accountingRouter.get('/transactions', requireAuth, async (req: AuthRequest, res:
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = (page - 1) * limit;
     const account_id = req.query.account_id ? parseInt(req.query.account_id as string) : undefined;
+    const type = req.query.type as string | undefined;
+    const startDate = req.query.start_date as string | undefined;
+    const endDate = req.query.end_date as string | undefined;
+    const search = (req.query.search as string) || '';
 
-    let query = 'SELECT * FROM transactions WHERE 1=1';
+    let query = 'SELECT t.*, a.account_name, a.account_code, a.account_type FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id WHERE 1=1';
+    let countQuery = 'SELECT COUNT(*) as count FROM transactions t LEFT JOIN accounts a ON t.account_id = a.id WHERE 1=1';
     const params: any[] = [];
+    const countParams: any[] = [];
 
     if (account_id) {
-      query += ' AND account_id = ?';
+      query += ' AND t.account_id = ?';
+      countQuery += ' AND t.account_id = ?';
       params.push(account_id);
+      countParams.push(account_id);
     }
 
-    query += ' ORDER BY transaction_date DESC LIMIT ? OFFSET ?';
+    if (type) {
+      query += ' AND a.account_type = ?';
+      countQuery += ' AND a.account_type = ?';
+      params.push(type);
+      countParams.push(type);
+    }
+
+    if (startDate) {
+      query += ' AND t.transaction_date >= ?';
+      countQuery += ' AND t.transaction_date >= ?';
+      params.push(startDate);
+      countParams.push(startDate);
+    }
+
+    if (endDate) {
+      query += ' AND t.transaction_date <= ?';
+      countQuery += ' AND t.transaction_date <= ?';
+      params.push(endDate);
+      countParams.push(endDate);
+    }
+
+    if (search) {
+      query += ' AND (t.description LIKE ? OR t.reference_number LIKE ?)';
+      countQuery += ' AND (t.description LIKE ? OR t.reference_number LIKE ?)';
+      const searchVal = `%${search}%`;
+      params.push(searchVal, searchVal);
+      countParams.push(searchVal, searchVal);
+    }
+
+    query += ' ORDER BY t.transaction_date DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const transactions = await db.query<Transaction>(query, params);
-
-    const countQuery = 'SELECT COUNT(*) as count FROM transactions' + (account_id ? ' WHERE account_id = ?' : '');
-    const countParams = account_id ? [account_id] : [];
     const countResult = await db.queryOne<any>(countQuery, countParams);
 
     res.json({

@@ -9,8 +9,8 @@
  *   2. Clean content with AI router (free → Ollama, paid → OpenRouter)
  *   3. Chunk into ~800-char segments with 150-char overlap
  *   4. Embed each chunk with nomic-embed-text (local, same for both tiers)
- *   5. Store chunks + embeddings in assistant_knowledge
- *   6. Increment assistants.pages_indexed
+ *   5. Store chunks + embeddings in assistant_knowledge (MySQL) AND sqlite-vec
+ *   6. Sync assistants.pages_indexed from completed job count
  *   7. Mark job completed
  */
 
@@ -21,12 +21,14 @@ import { db, toMySQLDate } from '../db/mysql.js';
 import { env } from '../config/env.js';
 import { cleanContentWithAI } from './ingestionAIRouter.js';
 import { categorizeContent, mergeChecklist, getStoredChecklist } from './knowledgeCategorizer.js';
+import { upsertChunks, type ChunkInput } from './vectorStore.js';
 
 const POLL_INTERVAL_MS = 6_000;
 const EMBED_MODEL = 'nomic-embed-text';
 const CHUNK_SIZE = 1_200;   // larger chunks → fewer embeddings needed
 const CHUNK_OVERLAP = 200;
-const MAX_CONTENT_CHARS = 30_000; // cap per-job to keep embedding time < 60s (~25 chunks max)
+const MAX_CONTENT_CHARS = 15_000; // cap per-job — lower limit prevents OOM on huge pages
+const MAX_RETRIES = 3;           // fail permanently after 3 attempts
 
 // ---------------------------------------------------------------------------
 // Text utilities
@@ -51,7 +53,8 @@ function chunkText(text: string): string[] {
 
     const trimmed = chunk.trim();
     if (trimmed.length > 40) chunks.push(trimmed);
-    start += chunk.length - CHUNK_OVERLAP;
+    const advance = chunk.length - CHUNK_OVERLAP;
+    start += advance > 0 ? advance : chunk.length; // never go backwards
   }
 
   return chunks;
@@ -59,8 +62,8 @@ function chunkText(text: string): string[] {
 
 function extractTextFromHTML(html: string): string {
   // Hard-limit the HTML string BEFORE cheerio parses it to prevent a huge DOM.
-  // 200 KB of HTML yields plenty of useful text for any page.
-  const safeHtml = html.length > 200_000 ? html.slice(0, 200_000) : html;
+  // 100 KB of HTML yields plenty of useful text for any business page.
+  const safeHtml = html.length > 100_000 ? html.slice(0, 100_000) : html;
 
   const $ = cheerio.load(safeHtml);
   $('script,style,nav,header,footer,iframe,noscript,[role="navigation"],.nav,.menu,.sidebar,.advertisement,.cookie-notice,svg,path').remove();
@@ -241,10 +244,41 @@ async function processJob(job: {
     );
     const stored = chunks.length;
 
-    // 6. Update assistant page count and job status
+    // 5b. Store in sqlite-vec for fast vector search (RAG retrieval)
+    const vecChunks: ChunkInput[] = [];
+    chunks.forEach((chunk, i) => {
+      if (embeddings[i]) {
+        vecChunks.push({
+          id: flatValues[i * 10] as string,   // the UUID we generated above
+          assistantId: job.assistant_id,
+          jobId: job.id,
+          content: chunk,
+          source: job.source,
+          sourceType: job.job_type,
+          chunkIndex: i,
+          charCount: chunk.length,
+          embedding: embeddings[i]!,
+          createdAt: now
+        });
+      }
+    });
+    if (vecChunks.length > 0) {
+      try {
+        upsertChunks(vecChunks);
+        console.log(`[Worker] sqlite-vec: stored ${vecChunks.length} vectors`);
+      } catch (vecErr) {
+        console.warn('[Worker] sqlite-vec upsert failed (non-fatal):', (vecErr as Error).message);
+      }
+    }
+
+    // 6. Sync pages_indexed from reality (count of completed jobs)
+    //    Computed, not incremented — always accurate even after deletes/failures.
     await db.execute(
-      `UPDATE assistants SET pages_indexed = pages_indexed + 1 WHERE id = ?`,
-      [job.assistant_id]
+      `UPDATE assistants SET pages_indexed = (
+         SELECT COUNT(*) FROM ingestion_jobs
+         WHERE assistant_id = ? AND status = 'completed'
+       ) + 1 WHERE id = ?`,
+      [job.assistant_id, job.assistant_id]
     );
 
     // 7. Categorize content for Knowledge Health Score (dynamic checklist)
@@ -285,7 +319,7 @@ async function poll(): Promise<void> {
   running = true;
 
   try {
-    // Paid-first priority sort within pending jobs
+    // Paid-first priority sort within pending jobs (skip jobs that exceeded retry limit)
     const job = await db.queryOne<{
       id: string;
       assistant_id: string;
@@ -293,10 +327,11 @@ async function poll(): Promise<void> {
       source: string;
       file_content: string | null;
       tier: 'free' | 'paid';
+      retry_count: number;
     }>(
-      `SELECT id, assistant_id, job_type, source, file_content, tier
+      `SELECT id, assistant_id, job_type, source, file_content, tier, retry_count
        FROM ingestion_jobs
-       WHERE status = 'pending'
+       WHERE status = 'pending' AND retry_count < ${MAX_RETRIES}
        ORDER BY
          CASE tier WHEN 'paid' THEN 0 ELSE 1 END ASC,
          created_at ASC
@@ -305,23 +340,31 @@ async function poll(): Promise<void> {
 
     if (!job) { running = false; return; }
 
-    // Mark processing immediately to prevent double-pickup
+    // Mark processing and bump retry counter
     await db.execute(
-      `UPDATE ingestion_jobs SET status = 'processing', updated_at = ? WHERE id = ?`,
+      `UPDATE ingestion_jobs SET status = 'processing', retry_count = retry_count + 1, updated_at = ? WHERE id = ?`,
       [toMySQLDate(new Date()), job.id]
     );
 
-    // Wrap processJob in a 180s timeout so a hung URL can never stall the worker
-    const JOB_TIMEOUT_MS = 180_000;
+    console.log(`[Worker] Attempt ${job.retry_count + 1}/${MAX_RETRIES} for job ${job.id}`);
+
+    // Wrap processJob in a 120s timeout so a hung URL can never stall the worker
+    const JOB_TIMEOUT_MS = 120_000;
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Job timed out after 90s')), JOB_TIMEOUT_MS)
+      setTimeout(() => reject(new Error(`Job timed out after ${JOB_TIMEOUT_MS / 1000}s`)), JOB_TIMEOUT_MS)
     );
     await Promise.race([processJob(job), timeoutPromise]).catch(async (e) => {
-      console.error(`[Worker] Job ${job.id} failed:`, (e as Error).message);
+      const msg = (e as Error).message;
+      console.error(`[Worker] Job ${job.id} failed (attempt ${job.retry_count + 1}):`, msg);
+      // If this was the last retry, mark as permanently failed; otherwise back to pending
+      const newStatus = job.retry_count + 1 >= MAX_RETRIES ? 'failed' : 'pending';
       await db.execute(
-        `UPDATE ingestion_jobs SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?`,
-        [(e as Error).message, toMySQLDate(new Date()), job.id]
+        `UPDATE ingestion_jobs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?`,
+        [newStatus, msg.slice(0, 1000), toMySQLDate(new Date()), job.id]
       ).catch(() => {});
+      if (newStatus === 'failed') {
+        console.error(`[Worker] Job ${job.id} permanently failed after ${MAX_RETRIES} attempts`);
+      }
     });
   } catch (e) {
     console.error('[Worker] Poll error:', (e as Error).message);
@@ -334,11 +377,26 @@ async function poll(): Promise<void> {
 // Exported start function — call once from index.ts
 // ---------------------------------------------------------------------------
 export async function startIngestionWorker(): Promise<void> {
-  // Recover any jobs left in 'processing' state from a previous crashed worker
+  // Recover jobs left in 'processing' state from a previous crash.
+  // Jobs that have already been retried MAX_RETRIES times get permanently failed.
+  const now = toMySQLDate(new Date());
   await db.execute(
-    `UPDATE ingestion_jobs SET status = 'pending', updated_at = ? WHERE status = 'processing'`,
-    [toMySQLDate(new Date())]
+    `UPDATE ingestion_jobs SET status = 'failed', error_message = 'Max retries exceeded (worker crash)', updated_at = ?
+     WHERE status = 'processing' AND retry_count >= ${MAX_RETRIES}`,
+    [now]
+  ).catch(() => {});
+  await db.execute(
+    `UPDATE ingestion_jobs SET status = 'pending', updated_at = ?
+     WHERE status = 'processing' AND retry_count < ${MAX_RETRIES}`,
+    [now]
   ).catch(e => console.error('[Worker] Recovery query failed:', (e as Error).message));
+
+  // Also fail any pending jobs that somehow exceeded retries
+  await db.execute(
+    `UPDATE ingestion_jobs SET status = 'failed', error_message = 'Max retries exceeded', updated_at = ?
+     WHERE status = 'pending' AND retry_count >= ${MAX_RETRIES}`,
+    [now]
+  ).catch(() => {});
 
   console.log(`[Worker] Ingestion worker started (poll every ${POLL_INTERVAL_MS / 1000}s)`);
   setInterval(poll, POLL_INTERVAL_MS);

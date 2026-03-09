@@ -4,12 +4,13 @@ import { embeddingService, generateEmbedding } from '../services/embeddingServic
 import { enforceMessageLimit } from '../middleware/usageTracking.js';
 import { checkWidgetStatus } from '../middleware/statusCheck.js';
 import { parseLeadCapture, storeCapturedLead, sendLeadNotification, buildLeadCapturePrompt } from '../services/leadCaptureService.js';
+import { chatCompletion } from '../services/assistantAIRouter.js';
 import axios from 'axios';
 
 const router = express.Router();
 
 const OLLAMA_API = process.env.OLLAMA_API || 'http://localhost:11434';
-const CHAT_MODEL = process.env.WIDGET_OLLAMA_MODEL || 'qwen2.5:3b-instruct';
+const CHAT_MODEL = process.env.WIDGET_OLLAMA_MODEL || 'qwen2.5:1.5b-instruct';
 
 // Tone preset templates
 const TONE_PRESETS: Record<string, string> = {
@@ -93,42 +94,34 @@ Answer the user's question based on this context. If the context doesn't contain
       { role: 'user', content: message }
     ];
 
-    // Determine which model to use based on tier
-    let modelToUse = 'qwen2.5:3b-instruct'; // Free/Starter default
-    let useExternalAPI = false;
-
-    if (client.subscription_tier === 'advanced' || client.subscription_tier === 'enterprise') {
-      // Use heavier local model or external API for Advanced tier
-      modelToUse = client.preferred_model || 'qwen2.5:7b-instruct';
-      
-      // Check if using external API
-      if (client.external_api_provider) {
-        useExternalAPI = true;
-      }
-    }
+    // Determine which model/provider to use based on tier
+    const isPaidTier = client.subscription_tier === 'advanced' || client.subscription_tier === 'enterprise';
+    let modelToUse = CHAT_MODEL; // Free/Starter default (local Ollama)
+    let providerUsed = 'ollama';
 
     let assistantMessage: string;
 
-    if (useExternalAPI) {
-      // Route to external API (Gemini, Claude, etc.)
+    if (isPaidTier && client.external_api_provider) {
+      // Client has configured their own external API (Gemini, Claude, etc.)
       assistantMessage = await callExternalLLM(
         client.external_api_provider,
         client.external_api_key_encrypted,
         messages
       );
+      modelToUse = client.external_api_provider;
+      providerUsed = client.external_api_provider;
     } else {
-      // Route to local Ollama model
-      const ollamaResponse = await axios.post(
-        `${OLLAMA_API}/api/chat`,
-        {
-          model: modelToUse,
-          messages,
-          stream: false
-        },
-        { timeout: 60000 }
-      );
-
-      assistantMessage = ollamaResponse.data.message.content;
+      // Route through assistantAIRouter with tier-based fallback:
+      //   Paid:  GLM → OpenRouter → Ollama
+      //   Free:  GLM → Ollama
+      const tier = isPaidTier ? 'paid' : 'free';
+      const result = await chatCompletion(tier, messages as any, {
+        temperature: 0.4,
+        max_tokens: 2048,
+      });
+      assistantMessage = result.content;
+      modelToUse = result.model;
+      providerUsed = result.provider;
     }
 
     // Check for lead capture

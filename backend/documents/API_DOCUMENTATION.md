@@ -1,6 +1,6 @@
 # SoftAware Platform — API Documentation
 
-> **Version 3.0** · Last updated: June 2025
+> **Version 3.1** · Last updated: March 2026
 > Base URL: `https://api.softaware.net.za` or `https://api.softaware.net.za/api`
 
 ---
@@ -155,7 +155,7 @@ X-API-Key: sk_live_abc123...
 
 ## Users, Roles & Permissions
 
-Understanding the user model is critical for mobile app development. The system uses **team-based role resolution** — there is no `is_admin` column in the database.
+Understanding the user model is critical for mobile app development. The system uses **role-based resolution via `user_roles`** — there is no `is_admin` column in the database. These flags are computed at login time from the user's assigned role.
 
 ### User Identity Model
 
@@ -164,10 +164,7 @@ When you log in or call `GET /auth/me`, you receive the **canonical user object*
 ```json
 {
   "id": "uuid-string",
-  "username": "user@example.com",
   "email": "user@example.com",
-  "first_name": "John",
-  "last_name": "Doe",
   "name": "John Doe",
   "phone": "+27123456789",
   "avatar": "https://...",
@@ -182,53 +179,203 @@ When you log in or call `GET /auth/me`, you receive the **canonical user object*
   "permissions": [
     { "id": 1, "name": "View Dashboard", "slug": "view_dashboard" },
     { "id": 2, "name": "Manage Users", "slug": "manage_users" }
-  ],
-  "team": {
-    "id": "team-uuid",
-    "name": "My Team",
-    "role": "ADMIN"
-  }
+  ]
 }
 ```
 
+> **Note:** The `team` field is **no longer returned** in the user object. Teams/team_members are legacy tables retained only for credit balance scoping.
+
 ### How `is_admin` and `is_staff` Are Determined
 
-These are **NOT** stored in the `users` table. They are derived from the `team_members` table:
+These are **NOT** stored in the `users` table. They are derived from the `user_roles` → `roles` table at login:
 
 | Field | Condition |
 |-------|-----------|
-| `is_admin` | `team_members.role = 'ADMIN'` for this user's team |
-| `is_staff` | `team_members.role = 'STAFF'` for this user's team |
+| `is_admin` | User's role slug is `admin` or `super_admin` |
+| `is_staff` | User's role slug is one of: `developer`, `client_manager`, `qa_specialist`, `deployer` |
 
-### Team Roles
+Users with **neither** flag are treated as **regular users** (clients).
 
-| Role | Level | Description |
-|------|-------|-------------|
-| `ADMIN` | Highest | Full access, can manage all resources |
-| `STAFF` | High | Near-full access, staff-level operations |
-| `ARCHITECT` | Medium | Technical access |
-| `OPERATOR` | Medium | Operational access |
-| `AUDITOR` | Low | Read-only / audit access |
+### The Three User Types
+
+The platform has **three distinct user types** that determine what the user sees and can do:
+
+| User Type | `is_admin` | `is_staff` | How Assigned | Description |
+|-----------|------------|------------|--------------|-------------|
+| **Admin** | `true` | `false` | Role slug: `admin` or `super_admin` | Full platform access. Can manage all resources, all users, all settings, database, credentials, and masquerade as any client. |
+| **Staff** | `false` | `true` | Role slug: `developer`, `client_manager`, `qa_specialist`, or `deployer` | Functionally equivalent to Admin for permission checks. All permission checks auto-pass. Can access all admin screens. |
+| **Regular User** | `false` | `false` | Role slug: `viewer`, `manager`, `accountant`, `sales`, `support`, or any other non-admin/staff slug | Access is controlled by granular permissions assigned to their role. Cannot access admin screens. Sees the **Portal** experience after login. |
+
+> **Key insight:** Admin and Staff are **functionally equivalent** — both bypass all permission checks and see the same admin screens. The distinction exists for organizational clarity (e.g., "Staff" may be developers on your team, while "Admin" is the account owner).
+
+### What Each User Type Sees After Login
+
+#### Admin / Staff Experience
+
+```
+Login → Admin Dashboard (full business metrics)
+├── Dashboard ............. Business KPIs, revenue, invoices, contacts overview
+├── Contacts .............. Full CRUD on all contacts
+├── Quotations ............ Create, edit, send, PDF quotations
+├── Invoices .............. Create, edit, send, PDF invoices
+├── Payments .............. Record and manage payments
+├── Financial Dashboard ... Revenue, expenses, cash flow charts
+├── Reports
+│   ├── Balance Sheet
+│   ├── Profit & Loss
+│   ├── Transaction Listing
+│   └── VAT Reports (VAT201, ITR14, IRP6)
+├── Transactions .......... Income & expense ledger
+├── Pricing ............... Product/service catalog
+├── Categories ............ Income/expense categories
+├── Software Management ... Software registry & modules
+├── Tasks ................. Kanban/list task management
+├── Updates ............... Software update distribution
+├── Groups ................ Group messaging / chat
+├── Notifications ......... In-app notification center
+├── Settings .............. Company info, SMTP, branding, tax
+├── Profile ............... Personal profile, password, 2FA, API keys
+│
+├── 🔒 ADMIN-ONLY SCREENS
+│   ├── Admin Dashboard ... AI stats, client overview, endpoint configs
+│   ├── Client Manager .... View all clients, status management, masquerade
+│   ├── AI Overview ....... Enterprise AI endpoint management
+│   ├── AI Credits ........ Credit packages, balance adjustments
+│   ├── Database Manager .. SQL console, table browser
+│   ├── Credentials ....... Secure credential vault (API keys, passwords)
+│   └── Enterprise Endpoints  LLM endpoint CRUD & logs
+│
+└── 🔒 SYSTEM SCREENS (admin/staff)
+    ├── Users ............. User CRUD, role assignment
+    ├── Roles ............. Role CRUD, permission assignment
+    ├── Permissions ....... View all system permissions
+    └── System Settings ... Advanced key-value configuration
+```
+
+#### Regular User (Client) Experience
+
+```
+Login → Portal Dashboard (AI-focused, personal metrics)
+├── Portal Dashboard ...... AI usage stats, assistant overview, quick actions
+├── Assistants ............ Create/manage AI assistants, embed widgets
+│   ├── Create Assistant
+│   ├── Edit Assistant
+│   └── Chat Interface .... Full chat UI with assistant
+├── Sites ................. AI-generated websites
+│   ├── Create Site
+│   └── Edit Site
+├── Portal Settings ....... Account, notifications, security, billing
+├── Notifications ......... In-app notification center
+├── Profile ............... Personal profile, password, 2FA
+│
+├── 📋 PERMISSION-GATED SCREENS (only visible if role grants permission)
+│   ├── Financial Dashboard  (requires: view_dashboard)
+│   ├── Contacts .......... (requires: view_contacts)
+│   ├── Quotations ........ (requires: view_quotations)
+│   ├── Invoices .......... (requires: view_invoices)
+│   ├── Transactions ...... (always visible)
+│   ├── Pricing ........... (requires: view_settings)
+│   ├── Categories ........ (requires: view_settings)
+│   ├── Reports ........... (requires: view_reports)
+│   ├── VAT Reports ....... (always visible)
+│   ├── Settings .......... (requires: view_settings)
+│   ├── Software .......... (always visible)
+│   ├── Tasks ............. (always visible)
+│   ├── Updates ........... (requires: view_updates)
+│   └── Groups ............ (always visible)
+│
+└── ❌ CANNOT ACCESS
+    ├── Admin Dashboard
+    ├── Client Manager
+    ├── Database Manager
+    ├── Credentials
+    ├── AI Overview / Credits
+    ├── Enterprise Endpoints
+    ├── System Users / Roles / Permissions
+    └── System Settings
+```
+
+### Screen Access Matrix
+
+Quick reference showing exactly which screens each user type can access:
+
+| Screen | Route | Admin | Staff | Regular User |
+|--------|-------|:-----:|:-----:|:------------:|
+| **PUBLIC (no login required)** | | | | |
+| Login | `/login` | ✅ | ✅ | ✅ |
+| Register | `/register` | ✅ | ✅ | ✅ |
+| Forgot Password | `/forgot-password` | ✅ | ✅ | ✅ |
+| Landing Page | `/landing` | ✅ | ✅ | ✅ |
+| Activate Account | `/activate` | ✅ | ✅ | ✅ |
+| **PORTAL (regular user default)** | | | | |
+| Portal Dashboard | `/portal` | ✅ | ✅ | ✅ |
+| Assistants | `/portal/assistants` | ✅ | ✅ | ✅ |
+| Create Assistant | `/portal/assistants/new` | ✅ | ✅ | ✅ |
+| Chat Interface | `/portal/assistants/:id/chat` | ✅ | ✅ | ✅ |
+| Sites | `/portal/sites` | ✅ | ✅ | ✅ |
+| Site Builder | `/portal/sites/new` | ✅ | ✅ | ✅ |
+| Portal Settings | `/portal/settings` | ✅ | ✅ | ✅ |
+| **BUSINESS SCREENS** | | | | |
+| Dashboard | `/dashboard` | ✅ (admin view) | ✅ (admin view) | ✅ (portal view) |
+| Financial Dashboard | `/financial-dashboard` | ✅ | ✅ | 🔑 `view_dashboard` |
+| Contacts | `/contacts` | ✅ | ✅ | 🔑 `view_contacts` |
+| Quotations | `/quotations` | ✅ | ✅ | 🔑 `view_quotations` |
+| Invoices | `/invoices` | ✅ | ✅ | 🔑 `view_invoices` |
+| Transactions | `/transactions` | ✅ | ✅ | ✅ |
+| Add Expense | `/add-expense` | ✅ | ✅ | ✅ |
+| Add Income | `/add-income` | ✅ | ✅ | ✅ |
+| Pricing | `/pricing` | ✅ | ✅ | 🔑 `view_settings` |
+| Categories | `/categories` | ✅ | ✅ | 🔑 `view_settings` |
+| Settings | `/settings` | ✅ | ✅ | 🔑 `view_settings` |
+| Balance Sheet | `/reports/balance-sheet` | ✅ | ✅ | 🔑 `view_reports` |
+| Profit & Loss | `/reports/profit-loss` | ✅ | ✅ | 🔑 `view_reports` |
+| Transaction Listing | `/reports/transaction-listing` | ✅ | ✅ | ✅ |
+| VAT Reports | `/vat-reports` | ✅ | ✅ | ✅ |
+| Software Management | `/software` | ✅ | ✅ | ✅ |
+| Tasks | `/tasks` | ✅ | ✅ | ✅ |
+| Updates | `/updates` | ✅ | ✅ | 🔑 `view_updates` |
+| Groups / Chat | `/groups` | ✅ | ✅ | ✅ |
+| Notifications | `/notifications` | ✅ | ✅ | ✅ |
+| Profile | `/profile` | ✅ | ✅ | ✅ |
+| Account Settings | `/account-settings` | ✅ | ✅ | ✅ |
+| **ADMIN-ONLY SCREENS** | | | | |
+| Admin Dashboard | `/admin/dashboard` | ✅ | ✅ | ❌ |
+| Client Manager | `/admin/clients` | ✅ | ✅ | ❌ |
+| AI Overview | `/admin/ai-overview` | ✅ | ✅ | ❌ |
+| AI Credits | `/admin/ai-credits` | ✅ | ✅ | ❌ |
+| Enterprise Endpoints | `/admin/enterprise-endpoints` | ✅ | ✅ | ❌ |
+| Database Manager | `/admin/database` | ✅ | ✅ | ❌ |
+| Credentials | `/credentials` | ✅ | ✅ | ❌ |
+| Create Credential | `/credentials/new` | ✅ | ✅ | ❌ |
+| **SYSTEM SCREENS** | | | | |
+| System Users | `/system/users` | ✅ | ✅ | 🔑 `view_users` |
+| System Roles | `/system/roles` | ✅ | ✅ | 🔑 `view_roles` |
+| System Permissions | `/system/permissions` | ✅ | ✅ | 🔑 `view_permissions` |
+| System Settings | `/system/settings` | ✅ | ✅ | 🔑 `manage_settings` |
+
+**Legend:** ✅ = Always accessible · 🔑 = Requires specific permission · ❌ = Blocked (redirected)
 
 ### Permission Resolution
 
 The backend resolves permissions as follows:
 
-1. If the user is a team **ADMIN** or **STAFF** → they receive a **wildcard (`*`)** — all permissions granted.
-2. If the user's role slug is `admin` or `super_admin` → wildcard.
+1. If the user's role slug is `admin` or `super_admin` → they receive a **wildcard (`*`)** — all permissions granted (`is_admin = true`).
+2. If the user's role slug is `developer`, `client_manager`, `qa_specialist`, or `deployer` → wildcard (`is_staff = true`).
 3. Otherwise → permissions are resolved from the `role_permissions` junction table for the user's assigned role.
 
 ### System Roles (Pre-seeded)
 
-| ID | Name | Slug |
-|----|------|------|
-| 1 | Administrator | `admin` |
-| 2 | Manager | `manager` |
-| 3 | Accountant | `accountant` |
-| 4 | Sales | `sales` |
-| 5 | Support | `support` |
-| 6 | Developer | `developer` |
-| 7 | Viewer | `viewer` |
+| ID | Name | Slug | User Type | `is_admin` | `is_staff` |
+|----|------|------|-----------|:----------:|:----------:|
+| 1 | Administrator | `admin` | **Admin** | ✅ | ❌ |
+| 2 | Manager | `manager` | Regular User | ❌ | ❌ |
+| 3 | Accountant | `accountant` | Regular User | ❌ | ❌ |
+| 4 | Sales | `sales` | Regular User | ❌ | ❌ |
+| 5 | Support | `support` | Regular User | ❌ | ❌ |
+| 6 | Developer | `developer` | **Staff** | ❌ | ✅ |
+| 7 | Viewer | `viewer` | Regular User | ❌ | ❌ |
+
+> **New users** created via `POST /auth/register` are automatically assigned the `viewer` role (Regular User). Admins can change a user's role via the System Users screen or `PUT /system/users/:id`.
 
 ### Available Permissions (38 total)
 
@@ -253,18 +400,116 @@ The backend resolves permissions as follows:
 
 ### Mobile App Permission Checks
 
-On the mobile app, after login, store the user object and check permissions:
+On the mobile app, after login, store the user object and use these helpers to control navigation and UI:
 
 ```javascript
+// Determine user type
+function getUserType(user) {
+  if (user.is_admin) return 'admin';
+  if (user.is_staff) return 'staff';
+  return 'user';
+}
+
+// Check if user is admin or staff (both have full access)
+function isAdminOrStaff(user) {
+  return user.is_admin || user.is_staff;
+}
+
 // Check if user has a specific permission
 function hasPermission(user, slug) {
-  if (user.is_admin || user.is_staff) return true; // bypass
+  if (user.is_admin || user.is_staff) return true; // bypass — full access
   return user.permissions.some(p => p.slug === slug);
 }
 
-// Usage
+// Check multiple permissions (any match)
+function hasAnyPermission(user, slugs) {
+  if (user.is_admin || user.is_staff) return true;
+  return slugs.some(slug => user.permissions.some(p => p.slug === slug));
+}
+
+// Usage — control screen visibility
 if (hasPermission(currentUser, 'view_invoices')) {
-  // Show invoices screen
+  // Show invoices screen in navigation
+}
+
+// Usage — admin-only screens
+if (isAdminOrStaff(currentUser)) {
+  // Show admin dashboard, client manager, database manager, etc.
+}
+
+// Usage — conditional rendering within a screen
+if (hasPermission(currentUser, 'create_invoices')) {
+  // Show "New Invoice" button
+}
+```
+
+### Mobile App — Role-Based Navigation Builder
+
+```javascript
+// Build the navigation menu dynamically based on user type
+function buildNavigation(user) {
+  const nav = [];
+  const type = getUserType(user);
+
+  // === ALWAYS VISIBLE (all authenticated users) ===
+  nav.push({ name: 'Notifications', icon: 'bell', route: '/notifications' });
+  nav.push({ name: 'Profile', icon: 'user', route: '/profile' });
+
+  if (type === 'admin' || type === 'staff') {
+    // === ADMIN / STAFF NAVIGATION ===
+    nav.push({ name: 'Dashboard', icon: 'chart-bar', route: '/dashboard' });
+    nav.push({ name: 'Contacts', icon: 'users', route: '/contacts' });
+    nav.push({ name: 'Quotations', icon: 'file-text', route: '/quotations' });
+    nav.push({ name: 'Invoices', icon: 'file-invoice', route: '/invoices' });
+    nav.push({ name: 'Transactions', icon: 'receipt', route: '/transactions' });
+    nav.push({ name: 'Financial Dashboard', icon: 'chart-pie', route: '/financial-dashboard' });
+    nav.push({ name: 'Reports', icon: 'chart-line', route: '/reports' });
+    nav.push({ name: 'Settings', icon: 'cog', route: '/settings' });
+    nav.push({ name: 'Software', icon: 'code', route: '/software' });
+    nav.push({ name: 'Tasks', icon: 'tasks', route: '/tasks' });
+    nav.push({ name: 'Groups', icon: 'comments', route: '/groups' });
+
+    // Admin-only section
+    nav.push({ section: 'Administration' });
+    nav.push({ name: 'Admin Dashboard', icon: 'shield', route: '/admin/dashboard' });
+    nav.push({ name: 'Client Manager', icon: 'user-shield', route: '/admin/clients' });
+    nav.push({ name: 'AI Overview', icon: 'brain', route: '/admin/ai-overview' });
+    nav.push({ name: 'AI Credits', icon: 'coins', route: '/admin/ai-credits' });
+    nav.push({ name: 'Database', icon: 'database', route: '/admin/database' });
+    nav.push({ name: 'Credentials', icon: 'key', route: '/credentials' });
+
+    // System section
+    nav.push({ section: 'System' });
+    nav.push({ name: 'Users', icon: 'users-cog', route: '/system/users' });
+    nav.push({ name: 'Roles', icon: 'user-tag', route: '/system/roles' });
+    nav.push({ name: 'Permissions', icon: 'lock', route: '/system/permissions' });
+  } else {
+    // === REGULAR USER (CLIENT) NAVIGATION ===
+    nav.push({ name: 'Portal', icon: 'home', route: '/portal' });
+    nav.push({ name: 'Assistants', icon: 'robot', route: '/portal/assistants' });
+    nav.push({ name: 'Sites', icon: 'globe', route: '/portal/sites' });
+    nav.push({ name: 'Portal Settings', icon: 'cog', route: '/portal/settings' });
+
+    // Permission-gated business screens
+    if (hasPermission(user, 'view_dashboard'))
+      nav.push({ name: 'Financial Dashboard', icon: 'chart-pie', route: '/financial-dashboard' });
+    if (hasPermission(user, 'view_contacts'))
+      nav.push({ name: 'Contacts', icon: 'users', route: '/contacts' });
+    if (hasPermission(user, 'view_quotations'))
+      nav.push({ name: 'Quotations', icon: 'file-text', route: '/quotations' });
+    if (hasPermission(user, 'view_invoices'))
+      nav.push({ name: 'Invoices', icon: 'file-invoice', route: '/invoices' });
+    if (hasPermission(user, 'view_reports'))
+      nav.push({ name: 'Reports', icon: 'chart-line', route: '/reports' });
+    if (hasPermission(user, 'view_settings'))
+      nav.push({ name: 'Settings', icon: 'cog', route: '/settings' });
+
+    // Always visible for regular users
+    nav.push({ name: 'Transactions', icon: 'receipt', route: '/transactions' });
+    nav.push({ name: 'Groups', icon: 'comments', route: '/groups' });
+  }
+
+  return nav;
 }
 ```
 
@@ -280,7 +525,7 @@ All auth endpoints are **public** (no token required) unless noted.
 
 #### `POST /auth/register`
 
-Create a new account. Automatically provisions a team, assigns the ADMIN role, and creates a personal subscription.
+Create a new account. Assigns the `viewer` role (Regular User) by default. A legacy team record is created for credit balance scoping.
 
 **Request:**
 ```json
@@ -294,14 +539,16 @@ Create a new account. Automatically provisions a team, assigns the ADMIN role, a
 **Response:** `201 Created`
 ```json
 {
-  "token": "eyJhbGciOi...",
-  "user": { /* canonical user object — see above */ }
+  "accessToken": "eyJhbGciOi...",
+  "user": { /* canonical user object — see above */ },
+  "activationKey": "USER-A3F1B2C8D4E5F6A7"
 }
 ```
 
+> **Mobile note:** New registrations always receive `is_admin: false`, `is_staff: false`, and role `viewer`. They will see the **Portal** experience (assistants, sites, chat). An admin must upgrade their role for them to access business or admin screens.
+
 **Errors:**
-- `400` — Missing fields or invalid email
-- `409` — Email already registered
+- `400` — Missing fields, invalid email, or email already registered
 
 ---
 
@@ -330,10 +577,7 @@ Authenticate and receive a JWT token.
   "token": "eyJhbGciOi...",
   "user": {
     "id": "uuid",
-    "username": "user@example.com",
     "email": "user@example.com",
-    "first_name": "John",
-    "last_name": "Doe",
     "name": "John Doe",
     "phone": null,
     "avatar": null,
@@ -343,11 +587,12 @@ Authenticate and receive a JWT token.
     "role": { "id": 1, "name": "Administrator", "slug": "admin" },
     "permissions": [
       { "id": 1, "name": "View Dashboard", "slug": "view_dashboard" }
-    ],
-    "team": { "id": "team-uuid", "name": "John's Team", "role": "ADMIN" }
+    ]
   }
 }
 ```
+
+> **Mobile note:** Check `is_admin` or `is_staff` to determine which navigation stack to show. See [The Three User Types](#the-three-user-types) for details.
 
 **Response when 2FA is enabled:** `200 OK`
 ```json
@@ -3296,8 +3541,7 @@ List all users.
       "name": "John Doe",
       "phone": "+27123456789",
       "createdAt": "2025-01-15T...",
-      "role": { "id": 1, "name": "Administrator", "slug": "admin" },
-      "team": { "id": "team-uuid", "name": "Team", "role": "ADMIN" }
+      "role": { "id": 1, "name": "Administrator", "slug": "admin" }
     }
   ]
 }
@@ -4163,32 +4407,94 @@ if (!data.fcm_enabled) {
 
 ### Permission-Based Navigation
 
+The mobile app should use **two completely different navigation stacks** based on user type:
+
 ```javascript
-// Dynamically build navigation based on user permissions
-const allScreens = [
-  { name: 'Dashboard', route: 'Dashboard', permission: 'view_dashboard', always: true },
+// Step 1: After login, determine which navigation stack to show
+function getNavigationStack(user) {
+  if (user.is_admin || user.is_staff) return 'AdminStack';
+  return 'PortalStack';
+}
+
+// Step 2: Define the Admin/Staff navigation stack
+const AdminStack = [
+  // Always visible
+  { name: 'Dashboard', route: 'Dashboard', icon: 'chart-bar' },
+  { name: 'Contacts', route: 'Contacts', icon: 'users' },
+  { name: 'Quotations', route: 'Quotations', icon: 'file-text' },
+  { name: 'Invoices', route: 'Invoices', icon: 'file-invoice' },
+  { name: 'Payments', route: 'Payments', icon: 'credit-card' },
+  { name: 'Transactions', route: 'Transactions', icon: 'receipt' },
+  { name: 'Financial Dashboard', route: 'FinancialDashboard', icon: 'chart-pie' },
+  { name: 'Reports', route: 'Reports', icon: 'chart-line' },
+  { name: 'VAT Reports', route: 'VatReports', icon: 'file-contract' },
+  { name: 'Pricing', route: 'Pricing', icon: 'tags' },
+  { name: 'Categories', route: 'Categories', icon: 'folder' },
+  { name: 'Software', route: 'Software', icon: 'code' },
+  { name: 'Tasks', route: 'Tasks', icon: 'tasks' },
+  { name: 'Updates', route: 'Updates', icon: 'download' },
+  { name: 'Groups', route: 'Groups', icon: 'comments' },
+  { name: 'Settings', route: 'Settings', icon: 'cog' },
+  { name: 'Notifications', route: 'Notifications', icon: 'bell' },
+  { name: 'Profile', route: 'Profile', icon: 'user' },
+  // Admin section
+  { name: 'Admin Dashboard', route: 'AdminDashboard', icon: 'shield', section: 'Admin' },
+  { name: 'Client Manager', route: 'ClientManager', icon: 'user-shield', section: 'Admin' },
+  { name: 'AI Overview', route: 'AIOverview', icon: 'brain', section: 'Admin' },
+  { name: 'AI Credits', route: 'AICredits', icon: 'coins', section: 'Admin' },
+  { name: 'Database', route: 'DatabaseManager', icon: 'database', section: 'Admin' },
+  { name: 'Credentials', route: 'Credentials', icon: 'key', section: 'Admin' },
+  // System section
+  { name: 'Users', route: 'SystemUsers', icon: 'users-cog', section: 'System' },
+  { name: 'Roles', route: 'SystemRoles', icon: 'user-tag', section: 'System' },
+  { name: 'Permissions', route: 'SystemPermissions', icon: 'lock', section: 'System' },
+  { name: 'System Settings', route: 'SystemSettings', icon: 'sliders', section: 'System' },
+];
+
+// Step 3: Define the Portal (regular user) navigation stack
+const PortalStack = [
+  // Always visible for portal users
+  { name: 'Portal Home', route: 'PortalDashboard', icon: 'home' },
+  { name: 'Assistants', route: 'Assistants', icon: 'robot' },
+  { name: 'Sites', route: 'Sites', icon: 'globe' },
+  { name: 'Notifications', route: 'Notifications', icon: 'bell' },
+  { name: 'Profile', route: 'Profile', icon: 'user' },
+  { name: 'Portal Settings', route: 'PortalSettings', icon: 'cog' },
+  // Permission-gated business screens (only show if user has permission)
+  { name: 'Financial Dashboard', route: 'FinancialDashboard', permission: 'view_dashboard' },
   { name: 'Contacts', route: 'Contacts', permission: 'view_contacts' },
   { name: 'Quotations', route: 'Quotations', permission: 'view_quotations' },
   { name: 'Invoices', route: 'Invoices', permission: 'view_invoices' },
-  { name: 'Payments', route: 'Payments', permission: 'view_payments' },
   { name: 'Reports', route: 'Reports', permission: 'view_reports' },
-  { name: 'Software', route: 'Software', permission: 'view_software' },
-  { name: 'Tasks', route: 'Tasks', permission: 'view_tasks' },
-  { name: 'Groups', route: 'Groups', permission: 'view_groups' },
-  { name: 'Notifications', route: 'Notifications', always: true },
-  // Admin-only screens
-  { name: 'Admin Dashboard', route: 'AdminDashboard', permission: 'view_admin_dashboard', adminOnly: true },
-  { name: 'Users', route: 'Users', permission: 'manage_users', adminOnly: true },
-  { name: 'Settings', route: 'Settings', permission: 'manage_settings', adminOnly: true },
+  { name: 'Settings', route: 'Settings', permission: 'view_settings' },
+  // Always visible (no permission required)
+  { name: 'Transactions', route: 'Transactions' },
+  { name: 'Groups', route: 'Groups' },
 ];
 
-function getVisibleScreens(user) {
-  return allScreens.filter(s => {
-    if (s.always) return true;
-    if (s.adminOnly && !user.is_admin) return false;
-    return hasPermission(user, s.permission);
+// Step 4: Filter portal screens by permission
+function getVisiblePortalScreens(user) {
+  return PortalStack.filter(screen => {
+    if (!screen.permission) return true; // no permission required
+    return user.permissions.some(p => p.slug === screen.permission);
   });
 }
+```
+
+### Smart Routing After Login
+
+```javascript
+// After successful login, route to the correct home screen
+function getHomeRoute(user) {
+  if (user.is_admin || user.is_staff) {
+    return '/dashboard';      // → Admin Dashboard (business KPIs)
+  }
+  return '/portal';            // → Portal Dashboard (AI assistants, usage)
+}
+
+// The /dashboard screen itself renders differently:
+// - Admin/Staff see: AdminDashboard (revenue, invoices, contacts metrics)
+// - Regular users see: PortalDashboard (AI credits, assistants, quick chat)
 ```
 
 ---

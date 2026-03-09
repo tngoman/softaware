@@ -1,5 +1,10 @@
+/**
+ * @deprecated Use `aiProviderManager.getProvider('glm')` from ai/AIProviderManager.ts instead.
+ * This file is kept temporarily for backward compatibility and will be removed.
+ */
 import OpenAI from 'openai';
 import { env } from '../config/env.js';
+import { getSecret } from './credentialVault.js';
 
 export interface GLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -15,26 +20,31 @@ export interface GLMChatRequest {
 }
 
 export class GLMService {
-  private client: OpenAI;
+  private client: OpenAI | null = null;
 
-  constructor() {
+  private async getClient(): Promise<OpenAI> {
+    if (this.client) return this.client;
+    const apiKey = await getSecret('GLM', env.GLM);
     this.client = new OpenAI({
-      apiKey: env.GLM,
+      apiKey,
       baseURL: 'https://api.z.ai/api/paas/v4/',
     });
-    
-    if (!env.GLM) {
+    setTimeout(() => { this.client = null; }, 5 * 60 * 1000);
+    if (!apiKey) {
       console.warn('GLM API key not configured');
     }
+    return this.client;
   }
 
   async chat(request: GLMChatRequest) {
-    if (!env.GLM) {
+    const client = await this.getClient();
+    const apiKey = await getSecret('GLM', env.GLM);
+    if (!apiKey) {
       throw new Error('GLM API key not configured');
     }
 
-    const response = await this.client.chat.completions.create({
-      model: request.model || 'GLM-4.7',
+    const response = await client.chat.completions.create({
+      model: request.model || env.GLM_MODEL || 'GLM-4.7',
       messages: request.messages as any,
       temperature: request.temperature ?? 1.0,
       max_tokens: request.max_tokens,

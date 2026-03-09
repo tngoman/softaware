@@ -30,7 +30,8 @@ const ItemPickerModal: React.FC<ItemPickerModalProps> = ({ isOpen, onClose, onSe
       const filtered = pricingItems.filter(
         (item) =>
           item.pricing_item.toLowerCase().includes(query) ||
-          item.pricing_category.toLowerCase().includes(query) ||
+          (item.category_name && item.category_name.toLowerCase().includes(query)) ||
+          (item.pricing_category && item.pricing_category.toLowerCase().includes(query)) ||
           item.pricing_note?.toLowerCase().includes(query)
       );
       setFilteredItems(filtered);
@@ -40,7 +41,8 @@ const ItemPickerModal: React.FC<ItemPickerModalProps> = ({ isOpen, onClose, onSe
   const loadPricingItems = async () => {
     try {
       setLoading(true);
-      const data = await PricingModel.getAll();
+      // Load all pricing items (override default pagination limit)
+      const data = await PricingModel.getAll(undefined, { page: 0, limit: 10000 });
       const items = Array.isArray(data) ? data : data.data || [];
       setPricingItems(items);
       setFilteredItems(items);
@@ -141,8 +143,8 @@ const ItemPickerModal: React.FC<ItemPickerModalProps> = ({ isOpen, onClose, onSe
                         <td className="px-4 py-3">
                           <div>
                             <p className="text-sm font-medium text-gray-900">{item.pricing_item}</p>
-                            {item.pricing_category && (
-                              <p className="text-xs text-gray-500">{item.pricing_category}</p>
+                            {(item.category_name || item.pricing_category) && (
+                              <p className="text-xs text-gray-500">{item.category_name || item.pricing_category}</p>
                             )}
                           </div>
                         </td>

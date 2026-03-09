@@ -188,6 +188,13 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
       </table>
     </div>` : '';
 
+  // Quotation terms section
+  const termsHtml = !isInvoice && (doc.notes || co.site_quote_terms) ? `
+    <div style="margin-top:20px;padding:14px 16px;background:#F9FAFB;border-left:4px solid #6B7280;border-radius:4px">
+      <div style="font-weight:700;font-size:12px;color:#374151;margin-bottom:8px">TERMS & CONDITIONS</div>
+      <div style="font-size:10px;color:#6B7280;line-height:1.6;white-space:pre-line">${doc.notes || co.site_quote_terms}</div>
+    </div>` : '';
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -295,6 +302,7 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
 </div>
 
 ${bankingHtml ? `<div class="footer">${bankingHtml}</div>` : ''}
+${termsHtml ? `<div class="footer">${termsHtml}</div>` : ''}
 
 </body></html>`;
 }

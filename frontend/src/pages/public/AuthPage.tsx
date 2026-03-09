@@ -3,7 +3,13 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { AuthModel } from '../../models';
 import { useAppStore } from '../../store';
 import { useAppSettings } from '../../hooks/useAppSettings';
-import Swal from 'sweetalert2';
+import { notify } from '../../utils/notify';
+import {
+  ShieldCheckIcon,
+  DevicePhoneMobileIcon,
+  EnvelopeIcon,
+  ChatBubbleLeftIcon,
+} from '@heroicons/react/24/outline';
 
 type AuthTab = 'login' | 'register';
 
@@ -40,6 +46,15 @@ const AuthPage: React.FC = () => {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
 
+  // --- 2FA State ---
+  const [twoFaRequired, setTwoFaRequired] = useState(false);
+  const [twoFaMethod, setTwoFaMethod] = useState<'totp' | 'email' | 'sms'>('totp');
+  const [twoFaTempToken, setTwoFaTempToken] = useState('');
+  const [twoFaCode, setTwoFaCode] = useState('');
+  const [twoFaVerifying, setTwoFaVerifying] = useState(false);
+  const [twoFaError, setTwoFaError] = useState('');
+  const [twoFaResending, setTwoFaResending] = useState(false);
+
   // --- Register State ---
   const [regForm, setRegForm] = useState({ name: '', email: '', password: '', confirmPassword: '' });
   const [regLoading, setRegLoading] = useState(false);
@@ -65,10 +80,26 @@ const AuthPage: React.FC = () => {
       return;
     }
 
+    // Auto-append @softaware.co.za if input is not an email address
+    let finalEmail = loginEmail.trim();
+    if (!finalEmail.includes('@')) {
+      finalEmail = `${finalEmail}@softaware.co.za`;
+    }
+
     setLoginLoading(true);
     try {
-      const response = await AuthModel.login(loginEmail, loginPassword);
+      const response = await AuthModel.login(finalEmail, loginPassword);
       if (response.success) {
+        // Check if 2FA is required
+        if (response.data.requires_2fa) {
+          setTwoFaRequired(true);
+          setTwoFaMethod((response.data.two_factor_method as 'totp' | 'email' | 'sms') || 'totp');
+          setTwoFaTempToken(response.data.temp_token || '');
+          setTwoFaError('');
+          setTwoFaCode('');
+          return;
+        }
+
         const { token, user: userData } = response.data;
         AuthModel.storeAuth(token, userData);
 
@@ -90,6 +121,55 @@ const AuthPage: React.FC = () => {
       setLoginError(msg);
     } finally {
       setLoginLoading(false);
+    }
+  };
+
+  // --- 2FA Verify Handler ---
+  const handle2FAVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!twoFaCode || twoFaCode.length < 6) {
+      setTwoFaError('Please enter the 6-digit verification code');
+      return;
+    }
+    setTwoFaError('');
+    setTwoFaVerifying(true);
+    try {
+      const result = await AuthModel.verify2FA(twoFaTempToken, twoFaCode);
+      if (result.success) {
+        const { token, user: userData } = result.data;
+        AuthModel.storeAuth(token, userData);
+
+        try {
+          const permissions = await AuthModel.getUserPermissions();
+          userData.permissions = permissions;
+        } catch {
+          userData.permissions = [];
+        }
+
+        AuthModel.storeAuth(token, userData);
+        setUser(userData);
+        setIsAuthenticated(true);
+        await new Promise((r) => setTimeout(r, 100));
+        navigate('/dashboard');
+      }
+    } catch (err: any) {
+      const msg = err.response?.data?.message || 'Invalid verification code';
+      setTwoFaError(msg);
+    } finally {
+      setTwoFaVerifying(false);
+    }
+  };
+
+  // --- Resend OTP Handler ---
+  const handleResendOtp = async () => {
+    setTwoFaResending(true);
+    try {
+      await AuthModel.resend2FAOtp(twoFaTempToken);
+      notify.success('A new verification code has been sent.');
+    } catch (err: any) {
+      notify.error(err.response?.data?.message || 'Failed to resend code.');
+    } finally {
+      setTwoFaResending(false);
     }
   };
 
@@ -174,12 +254,7 @@ const AuthPage: React.FC = () => {
                   type="button"
                   className="text-picton-blue hover:text-picton-blue/80 text-sm font-medium transition-colors"
                   onClick={() => {
-                    Swal.fire({
-                      icon: 'info',
-                      title: 'Email Resent',
-                      text: 'A new confirmation email has been sent.',
-                      confirmButtonColor: '#00A4EE',
-                    });
+                    notify.info('A new confirmation email has been sent.');
                   }}
                 >
                   Resend confirmation email
@@ -274,8 +349,95 @@ const AuthPage: React.FC = () => {
 
           {/* Form Area */}
           <div className="p-8">
+            {/* ===== 2FA VERIFICATION ===== */}
+            {activeTab === 'login' && twoFaRequired && (
+              <div className="space-y-5">
+                <div className="text-center">
+                  <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-picton-blue/10 flex items-center justify-center">
+                    {twoFaMethod === 'totp' && <DevicePhoneMobileIcon className="h-7 w-7 text-picton-blue" />}
+                    {twoFaMethod === 'email' && <EnvelopeIcon className="h-7 w-7 text-picton-blue" />}
+                    {twoFaMethod === 'sms' && <ChatBubbleLeftIcon className="h-7 w-7 text-picton-blue" />}
+                  </div>
+                  <h2 className="text-lg font-bold text-gray-900 mb-1">Two-Factor Authentication</h2>
+                  <p className="text-sm text-gray-500">
+                    {twoFaMethod === 'totp' && 'Enter the code from your authenticator app.'}
+                    {twoFaMethod === 'email' && 'A verification code has been sent to your email.'}
+                    {twoFaMethod === 'sms' && 'A verification code has been sent to your phone.'}
+                  </p>
+                </div>
+
+                {twoFaError && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                    <p className="text-red-600 text-sm">{twoFaError}</p>
+                  </div>
+                )}
+
+                <form onSubmit={handle2FAVerify} className="space-y-4">
+                  <div>
+                    <label htmlFor="twofa-code" className="block text-sm font-medium text-gray-700 mb-1.5">
+                      Verification Code
+                    </label>
+                    <input
+                      type="text"
+                      id="twofa-code"
+                      maxLength={8}
+                      value={twoFaCode}
+                      onChange={(e) => setTwoFaCode(e.target.value.replace(/\s/g, ''))}
+                      className="w-full px-4 py-3 bg-white border border-gray-300 rounded-lg text-gray-900 text-center text-lg font-mono tracking-widest placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:border-picton-blue transition-all"
+                      placeholder="000000"
+                      autoFocus
+                      autoComplete="one-time-code"
+                    />
+                    <p className="mt-1.5 text-xs text-gray-400">
+                      {twoFaMethod === 'totp' ? 'You can also enter a backup code.' : 'Enter the 6-digit code or a backup code.'}
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={twoFaVerifying || twoFaCode.length < 6}
+                    className="w-full py-2.5 px-4 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:ring-offset-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                  >
+                    {twoFaVerifying ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        Verifying...
+                      </span>
+                    ) : (
+                      'Verify'
+                    )}
+                  </button>
+                </form>
+
+                {/* Resend button for email/sms */}
+                {(twoFaMethod === 'email' || twoFaMethod === 'sms') && (
+                  <div className="text-center">
+                    <button
+                      onClick={handleResendOtp}
+                      disabled={twoFaResending}
+                      className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium transition-colors disabled:opacity-50"
+                    >
+                      {twoFaResending ? 'Sending...' : 'Resend verification code'}
+                    </button>
+                  </div>
+                )}
+
+                <div className="text-center pt-3 border-t border-slate-200">
+                  <button
+                    onClick={() => { setTwoFaRequired(false); setTwoFaCode(''); setTwoFaError(''); }}
+                    className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
+                  >
+                    ← Back to Sign In
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* ===== LOGIN FORM ===== */}
-            {activeTab === 'login' && (
+            {activeTab === 'login' && !twoFaRequired && (
               <form onSubmit={handleLogin} className="space-y-5">
                 {loginError && (
                   <div className="bg-red-50 border border-red-200 rounded-lg p-3">
@@ -288,12 +450,12 @@ const AuthPage: React.FC = () => {
                     Email Address
                   </label>
                   <input
-                    type="email"
+                    type="text"
                     id="login-email"
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
                     className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:border-picton-blue transition-all"
-                    placeholder="you@company.com"
+                    placeholder="you@youremail.com"
                     required
                     autoComplete="email"
                     autoFocus

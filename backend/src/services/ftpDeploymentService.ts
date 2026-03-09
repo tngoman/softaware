@@ -108,12 +108,13 @@ export const ftpDeploymentService = {
         // Deployment record might not exist yet
       }
 
-      // Update site status
+      // Keep status as 'generated' — the HTML is still valid, only the deploy failed
       await db.execute(
         `UPDATE generated_sites 
-         SET status = ?, deployment_error = ?
+         SET status = CASE WHEN status = 'deployed' THEN 'deployed' ELSE 'generated' END,
+             deployment_error = ?
          WHERE id = ?`,
-        ['failed', errorMessage, siteId]
+        [errorMessage, siteId]
       );
 
       return {
@@ -147,7 +148,10 @@ export const ftpDeploymentService = {
         port: credentials.port,
         username: credentials.username,
         password: credentials.password,
-        readyTimeout: 30000
+        readyTimeout: 60000,
+        retries: 2,
+        retry_factor: 2,
+        retry_minTimeout: 3000,
       });
 
       // Ensure remote directory exists

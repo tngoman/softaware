@@ -38,12 +38,33 @@ export const updFilesRouter = Router();
 // ─── POST /upload ─ multipart file upload ──────────────────────────
 updFilesRouter.post('/upload', upload.single('updatePackage'), async (req: Request, res, next) => {
   try {
-    // Validate API key
+    // Validate API key or JWT Bearer token
     const apiKey = req.header('X-API-Key');
-    if (!apiKey || apiKey !== UPLOAD_API_KEY) {
-      // Clean up temp file
+    const authHeader = req.header('Authorization');
+    let uploadedBy: string | null = null;
+    let isAuthorized = false;
+
+    // Method 1: API key
+    if (apiKey && apiKey === UPLOAD_API_KEY) {
+      isAuthorized = true;
+    }
+
+    // Method 2: JWT Bearer token (admin)
+    if (!isAuthorized && authHeader?.toLowerCase().startsWith('bearer ')) {
+      try {
+        const jwt = await import('jsonwebtoken');
+        const { env } = await import('../config/env.js');
+        const decoded = jwt.default.verify(authHeader.slice(7), env.JWT_SECRET) as any;
+        if (decoded?.userId) {
+          uploadedBy = decoded.userId;
+          isAuthorized = true;
+        }
+      } catch { /* invalid token */ }
+    }
+
+    if (!isAuthorized) {
       if (req.file) fs.unlinkSync(req.file.path);
-      throw unauthorized('Invalid or missing API key');
+      throw unauthorized('Invalid or missing API key or Bearer token');
     }
 
     if (!req.file) throw badRequest('No file uploaded (field: updatePackage)');
@@ -78,16 +99,18 @@ updFilesRouter.post('/upload', upload.single('updatePackage'), async (req: Reque
     const fileBuffer = fs.readFileSync(finalPath);
     const computedChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-    // Optional: get user from bearer token for attribution
-    let uploadedBy: string | null = null;
-    const auth = req.header('authorization');
-    if (auth?.toLowerCase().startsWith('bearer ')) {
-      try {
-        const jwt = await import('jsonwebtoken');
-        const { env } = await import('../config/env.js');
-        const decoded = jwt.default.verify(auth.slice(7), env.JWT_SECRET) as any;
-        if (decoded?.userId) uploadedBy = decoded.userId;
-      } catch { /* fall through */ }
+    // uploadedBy was already extracted during auth check above
+    // If we authed via API key, try to extract user from Bearer for attribution
+    if (!uploadedBy) {
+      const auth = req.header('authorization');
+      if (auth?.toLowerCase().startsWith('bearer ')) {
+        try {
+          const jwt = await import('jsonwebtoken');
+          const { env } = await import('../config/env.js');
+          const decoded = jwt.default.verify(auth.slice(7), env.JWT_SECRET) as any;
+          if (decoded?.userId) uploadedBy = decoded.userId;
+        } catch { /* fall through */ }
+      }
     }
 
     let updateId: number;

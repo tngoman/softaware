@@ -7,6 +7,8 @@ import {
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import api from '../../services/api';
+import TwoFactorSetup from '../../components/TwoFactorSetup';
+import MobileAuthQR from '../../components/MobileAuthQR';
 import Swal from 'sweetalert2';
 
 const PortalSettings: React.FC = () => {
@@ -148,7 +150,7 @@ const PortalSettings: React.FC = () => {
       )}
 
       {/* Security Tab */}
-      {activeTab === 'security' && (
+      {activeTab === 'security' && (<>
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-5">
           <h2 className="text-base font-semibold text-gray-900">Change Password</h2>
           <div className="max-w-md space-y-4">
@@ -191,7 +193,15 @@ const PortalSettings: React.FC = () => {
             </button>
           </div>
         </div>
-      )}
+
+        {/* Two-Factor Authentication */}
+        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+          <TwoFactorSetup isStaffOrAdmin={false} />
+        </div>
+
+        {/* Mobile App QR Authentication */}
+        <MobileAuthQR />
+      </>)}
 
       {/* Billing Tab */}
       {activeTab === 'billing' && (

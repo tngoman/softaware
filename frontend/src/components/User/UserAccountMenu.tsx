@@ -9,7 +9,7 @@ import {
 import { User } from '../../types';
 
 interface UserAccountMenuProps {
-  user: User;
+  user: User | null;
   onLogout: () => void;
 }
 
@@ -34,6 +34,15 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [isOpen]);
+
+  // If user hasn't loaded yet, render a placeholder
+  if (!user) {
+    return (
+      <div className="flex items-center space-x-2 px-3 py-2">
+        <div className="h-8 w-8 rounded-full bg-gray-200 animate-pulse" />
+      </div>
+    );
+  }
 
   // Get user initials
   const getUserInitials = () => {

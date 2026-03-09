@@ -1,7 +1,8 @@
 import express from 'express';
 import { db } from '../db/mysql.js';
 import { env } from '../config/env.js';
-import nodemailer from 'nodemailer';
+import { sendEmail } from '../services/emailService.js';
+import { randomUUID } from 'crypto';
 
 const router = express.Router();
 
@@ -70,7 +71,15 @@ router.post('/submit', async (req, res) => {
     // Honeypot check (bot detection)
     if (honeypot) {
       console.warn('[Contact Form] Honeypot triggered, likely spam');
-      // Silently drop the submission
+      // Store as spam for tracking, then silently drop
+      try {
+        await db.execute(
+          `INSERT INTO form_submissions
+            (id, site_id, sender_name, sender_email, sender_phone, message, ip_address, honeypot_triggered, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'spam', NOW(), NOW())`,
+          [randomUUID(), client_id || 'unknown', name || '', email || '', req.body.phone || null, message || '', clientIp]
+        );
+      } catch { /* best-effort */ }
       return res.json({
         success: true,
         message: 'Thank you for your message. We will get back to you soon.'
@@ -137,19 +146,45 @@ router.post('/submit', async (req, res) => {
       });
     }
 
-    // Send email using nodemailer
-    const transporter = nodemailer.createTransport({
-      host: env.SMTP_HOST || 'smtp.gmail.com',
-      port: Number(env.SMTP_PORT) || 587,
-      secure: false,
-      auth: {
-        user: env.SMTP_USER,
-        pass: env.SMTP_PASS
-      }
-    });
+    // Resolve site_id for DB storage
+    const siteId = site?.contact_email ? client_id : client_id;
+    const resolvedSiteId = await (async () => {
+      // Try to find a generated_sites row to get the proper UUID
+      const s = await db.queryOne<{ id: string }>(
+        'SELECT id FROM generated_sites WHERE id = ? OR widget_client_id = ? LIMIT 1',
+        [client_id, client_id]
+      );
+      return s?.id || client_id;
+    })();
 
-    const mailOptions = {
-      from: env.SMTP_FROM || 'noreply@softaware.net.za',
+    // ── Store submission in form_submissions table ──────────────
+    const submissionId = randomUUID();
+    const isHoneypot = false; // already filtered above, but track explicit attempts
+    try {
+      await db.execute(
+        `INSERT INTO form_submissions
+          (id, site_id, sender_name, sender_email, sender_phone, message, source_page, ip_address, honeypot_triggered, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', NOW(), NOW())`,
+        [
+          submissionId,
+          resolvedSiteId,
+          name,
+          email,
+          req.body.phone || null,
+          message,
+          req.body.source_page || null,
+          clientIp,
+          isHoneypot ? 1 : 0,
+        ]
+      );
+      console.log(`[Contact Form] Submission ${submissionId} stored for site ${resolvedSiteId}`);
+    } catch (dbErr) {
+      // Log but don't block the email — DB storage is additive
+      console.error('[Contact Form] Failed to store submission in DB:', dbErr);
+    }
+
+    // ── Send email using shared emailService ───────────────────
+    const emailResult = await sendEmail({
       to: ownerEmail,
       replyTo: email,
       subject: `New Contact Form Submission from ${name}`,
@@ -157,30 +192,23 @@ router.post('/submit', async (req, res) => {
         <h2>New Contact Form Submission</h2>
         <p><strong>From:</strong> ${name}</p>
         <p><strong>Email:</strong> ${email}</p>
+        ${req.body.phone ? `<p><strong>Phone:</strong> ${req.body.phone}</p>` : ''}
         <p><strong>Message:</strong></p>
         <p>${message.replace(/\n/g, '<br>')}</p>
         <hr>
         <p style="color: #666; font-size: 12px;">
-          This message was sent via your Soft Aware website contact form.
+          This message was sent via your Soft Aware website contact form.<br>
+          Submission ID: ${submissionId}
         </p>
       `,
-      text: `
-New Contact Form Submission
+      text: `New Contact Form Submission\n\nFrom: ${name}\nEmail: ${email}${req.body.phone ? `\nPhone: ${req.body.phone}` : ''}\n\nMessage:\n${message}\n\n---\nSubmission ID: ${submissionId}`,
+    });
 
-From: ${name}
-Email: ${email}
-
-Message:
-${message}
-
----
-This message was sent via your Soft Aware website contact form.
-      `
-    };
-
-    await transporter.sendMail(mailOptions);
-
-    console.log(`[Contact Form] Email sent to ${ownerEmail} from ${name} (${email})`);
+    if (!emailResult.success) {
+      console.warn(`[Contact Form] Email delivery failed for submission ${submissionId}: ${emailResult.error}`);
+    } else {
+      console.log(`[Contact Form] Email sent to ${ownerEmail} from ${name} (${email})`);
+    }
 
     return res.json({
       success: true,

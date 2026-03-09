@@ -11,8 +11,9 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../db/mysql.js';
-import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAuth, AuthRequest, signAccessToken } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import { buildFrontendUser } from './auth.js';
 
 export const adminClientManagerRouter = Router();
 
@@ -40,12 +41,17 @@ const updateWidgetStatusSchema = z.object({
 // ═════════════════════════════════════════════════════════════════════════
 adminClientManagerRouter.get('/overview', async (_req: AuthRequest, res: Response) => {
   try {
-    // Get all users (clients)
+    // Get all users that are clients (exclude admin/staff roles)
     const users = await db.query<any>(
       `SELECT u.id, u.email, u.name, u.account_status, u.createdAt,
               (SELECT COUNT(*) FROM assistants a WHERE a.userId = u.id) AS assistant_count,
               (SELECT COUNT(*) FROM widget_clients wc WHERE wc.user_id = u.id) AS widget_count
        FROM users u
+       WHERE u.id COLLATE utf8mb4_unicode_ci NOT IN (
+         SELECT ur.user_id COLLATE utf8mb4_unicode_ci FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id
+         WHERE r.slug IN ('admin', 'super_admin', 'developer', 'client_manager', 'qa_specialist', 'deployer')
+       )
        ORDER BY u.createdAt DESC`
     );
 
@@ -319,5 +325,65 @@ adminClientManagerRouter.post('/:userId/reactivate-all', async (req: AuthRequest
   } catch (err) {
     console.error('[AdminClientManager] Reactivate all error:', err);
     return res.status(500).json({ success: false, error: 'Failed to reactivate account' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// POST /admin/clients/:userId/masquerade
+// Admin logs in as any user (issues JWT for target user)
+// ═════════════════════════════════════════════════════════════════════════
+adminClientManagerRouter.post('/:userId/masquerade', async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = (req as any).userId;
+    const targetUserId = req.params.userId;
+
+    // Verify target user exists
+    const targetUser = await db.queryOne<any>(
+      'SELECT id, email, name, account_status FROM users WHERE id = ?',
+      [targetUserId]
+    );
+
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Prevent masquerading as yourself
+    if (adminId === targetUserId) {
+      return res.status(400).json({ success: false, error: 'Cannot masquerade as yourself' });
+    }
+
+    // Build the frontend user shape for the target user
+    const frontendUser = await buildFrontendUser(targetUserId);
+    if (!frontendUser) {
+      return res.status(404).json({ success: false, error: 'Failed to build user profile' });
+    }
+
+    // Issue a JWT for the target user (1h expiry, shorter for safety)
+    const masqueradeToken = signAccessToken({ userId: targetUserId }, '1h');
+
+    // Issue a separate admin restore token (so admin can return to their own session)
+    const adminRestoreToken = signAccessToken({ userId: adminId }, '2h');
+
+    console.log(`[AdminClientManager] MASQUERADE: Admin ${adminId} → User ${targetUserId} (${targetUser.email})`);
+
+    return res.json({
+      success: true,
+      message: `Now masquerading as ${targetUser.email}`,
+      data: {
+        token: masqueradeToken,
+        user: frontendUser,
+        adminRestoreToken,
+        masquerading: true,
+        adminId,
+        targetUser: {
+          id: targetUser.id,
+          email: targetUser.email,
+          name: targetUser.name,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[AdminClientManager] Masquerade error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to masquerade as user' });
   }
 });

@@ -1,4 +1,4 @@
-import { db, generateId, toMySQLDate, type credit_balances, type credit_transactions, type credit_packages, type team_members } from '../db/mysql.js';
+import { db, generateId, toMySQLDate, type credit_balances, type credit_transactions, type credit_packages } from '../db/mysql.js';
 import {
   calculateCreditCost,
   LOW_BALANCE_THRESHOLDS,

@@ -1,6 +1,7 @@
 import { db } from '../db/mysql.js';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
+import { getSmtpConfig } from './credentialVault.js';
 
 function uuidv4() {
   return crypto.randomUUID();
@@ -119,15 +120,16 @@ export async function sendLeadNotification(
       return false;
     }
     
-    // Create email transporter
+    // Create email transporter with vault credentials
+    const smtp = await getSmtpConfig();
     const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'mail.login.net.za',
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure,
+      auth: smtp.user ? {
+        user: smtp.user,
+        pass: smtp.pass,
+      } : undefined,
     });
     
     // Compose email
@@ -230,7 +232,7 @@ Manage settings: https://portal.softaware.net.za
     
     // Send email
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || 'noreply@softaware.net.za',
+      from: smtp.from,
       to: recipientEmail,
       subject,
       text: plainText,

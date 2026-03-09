@@ -118,6 +118,11 @@ updSoftwareRouter.post('/', requireAuth, requireAdmin, async (req, res, next) =>
 // ─── PUT ─ update ──────────────────────────────────────────────────
 updSoftwareRouter.put('/', requireAuth, requireAdmin, async (req, res, next) => {
   try {
+    // Accept id from query string or body for flexibility
+    const rawBody = { ...req.body };
+    if (req.query.id && !rawBody.id) {
+      rawBody.id = Number(req.query.id);
+    }
     const body = z.object({
       id: z.number(),
       name: z.string().optional(),
