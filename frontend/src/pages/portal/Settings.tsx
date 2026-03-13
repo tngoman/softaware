@@ -9,6 +9,7 @@ import { useAppStore } from '../../store';
 import api from '../../services/api';
 import TwoFactorSetup from '../../components/TwoFactorSetup';
 import MobileAuthQR from '../../components/MobileAuthQR';
+import PinSetup from '../../components/PinSetup';
 import Swal from 'sweetalert2';
 
 const PortalSettings: React.FC = () => {
@@ -192,6 +193,11 @@ const PortalSettings: React.FC = () => {
               {saving ? 'Updating…' : 'Update Password'}
             </button>
           </div>
+        </div>
+
+        {/* Quick PIN Login */}
+        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+          <PinSetup />
         </div>
 
         {/* Two-Factor Authentication */}

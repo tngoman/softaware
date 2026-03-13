@@ -39,17 +39,29 @@ export {
 export {
   AdminClientModel,
   AdminEnterpriseModel,
-  AdminCreditsModel,
+  AdminPackagesModel,
   AdminConfigModel,
+  AdminAIOverviewModel,
 } from './AdminAIModels';
 export type {
   EnterpriseEndpoint,
   EndpointCreateInput,
   RequestLog,
   ClientOverview,
-  CreditPackage,
-  CreditBalance,
   SystemStats,
+  PackageDefinition,
+  ContactPackageSubscription,
+  PackageTransaction,
+  AIOverviewData,
+  PackageCreditSummary,
+  SpendingSummary,
+  TelemetrySummary,
+  OpenRouterStatus,
+  OpenAIStatus,
+  GLMStatus,
+  OllamaStatus,
+  EnterpriseSummary,
+  ModelConfig,
 } from './AdminAIModels';
 
 // Case Management
@@ -64,8 +76,15 @@ export { WebmailAccountModel, WebmailModel, WebmailSettingsModel } from './Webma
 export type {
   MailboxAccount, CreateMailboxInput, WebmailDomainSettings, MailFolder, MailAddress,
   MailMessageHeader, MailMessage, MailAttachment, ConnectionTestResult,
-  MessageListResponse,
+  MessageListResponse, UnreadCountResponse,
 } from './WebmailModel';
 
 // Local Tasks (synced from external sources)
 export { LocalTasksModel } from './LocalTasksModel';
+
+// Bug Tracking
+export { BugsModel } from './BugsModel';
+
+// Admin Audit Log
+export { AdminAuditLogModel } from './AdminAuditLogModel';
+export type { AuditLogEntry, AuditLogStats, AuditLogFilters, AuditLogQueryParams } from './AdminAuditLogModel';

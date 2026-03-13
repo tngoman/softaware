@@ -4,15 +4,16 @@ import { Toaster } from 'react-hot-toast';
 import Layout from './components/Layout/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
+import DeveloperRoute from './components/DeveloperRoute';
 import PermissionRoute from './components/PermissionRoute';
 import Login from './pages/auth/Login';
 import ForgotPassword from './pages/auth/ForgotPassword';
 import Dashboard from './pages/general/Dashboard';
 import AdminDashboard from './pages/admin/Dashboard';
-import AIOverview from './pages/admin/AIOverview';
+import AIOverview from './pages/admin/AdminAIOverview';
 import ClientManager from './pages/admin/ClientManager';
 import EnterpriseEndpoints from './pages/admin/EnterpriseEndpoints';
-import AICredits from './pages/admin/AICredits';
+import AIPackages from './pages/admin/AIPackages';
 import FinancialDashboard from './pages/finance/FinancialDashboard';
 import Quotations from './pages/finance/Quotations';
 import CreateQuotation from './pages/finance/CreateQuotation';
@@ -38,6 +39,7 @@ import Updates from './pages/general/Updates';
 import UpdatesAdmin from './pages/general/UpdatesAdmin';
 import SoftwareManagement from './pages/general/SoftwareManagement';
 import TasksPage from './pages/general/TasksPage';
+import BugsPage from './pages/general/Bugs';
 import GroupsPage from './pages/general/GroupsPage';
 import ChatPage from './pages/general/ChatPage';
 import PlanningPage from './pages/general/PlanningPage';
@@ -52,6 +54,7 @@ import CasesList from './pages/general/CasesList';
 import CaseDetailView from './pages/general/CaseDetailView';
 import CasesDashboard from './pages/cases/CasesDashboard';
 import AdminCaseManagement from './pages/admin/AdminCaseManagement';
+import AuditLog from './pages/admin/AuditLog';
 import Webmail from './pages/admin/Webmail';
 import ClientMonitor from './pages/general/ClientMonitor';
 import ErrorReports from './pages/general/ErrorReports';
@@ -68,6 +71,7 @@ import {
   PortalSettings,
 } from './pages/portal';
 import { useAuth } from './hooks/useAuth';
+import { useTheme } from './hooks/useTheme';
 import { useAppStore } from './store';
 
 /**
@@ -92,6 +96,7 @@ const SmartDashboard: React.FC = () => {
 
 const App: React.FC = () => {
   useAuth(); // Initialize authentication
+  useTheme(); // Initialize theme (applies dark class to <html>)
 
   return (
     <Router>
@@ -158,21 +163,23 @@ const App: React.FC = () => {
           {/* Software, Tasks, Updates, Groups, Database */}
           <Route path="/software" element={<ProtectedRoute><Layout><SoftwareManagement /></Layout></ProtectedRoute>} />
           <Route path="/tasks" element={<ProtectedRoute><Layout><TasksPage /></Layout></ProtectedRoute>} />
+          <Route path="/bugs" element={<ProtectedRoute><Layout><BugsPage /></Layout></ProtectedRoute>} />
           <Route path="/updates" element={<ProtectedRoute><Layout><UpdatesAdmin /></Layout></ProtectedRoute>} />
           <Route path="/client-monitor" element={<AdminRoute><Layout><ClientMonitor /></Layout></AdminRoute>} />
           <Route path="/error-reports" element={<AdminRoute><Layout><ErrorReports /></Layout></AdminRoute>} />
           <Route path="/groups" element={<ProtectedRoute><Layout><GroupsPage /></Layout></ProtectedRoute>} />
           <Route path="/chat" element={<ProtectedRoute><Layout><ChatPage /></Layout></ProtectedRoute>} />
           <Route path="/planning" element={<ProtectedRoute><Layout><PlanningPage /></Layout></ProtectedRoute>} />
-          <Route path="/database" element={<AdminRoute><Layout><DatabaseManager /></Layout></AdminRoute>} />
+          <Route path="/database" element={<DeveloperRoute><Layout><DatabaseManager /></Layout></DeveloperRoute>} />
 
           {/* AI & Enterprise Admin Routes */}
           <Route path="/admin/ai" element={<AdminRoute><Layout><AIOverview /></Layout></AdminRoute>} />
-          <Route path="/admin/clients" element={<AdminRoute><Layout><ClientManager /></Layout></AdminRoute>} />
+          <Route path="/admin/clients" element={<AdminRoute><Layout><Contacts /></Layout></AdminRoute>} />
           <Route path="/admin/enterprise" element={<AdminRoute><Layout><EnterpriseEndpoints /></Layout></AdminRoute>} />
-          <Route path="/admin/credits" element={<AdminRoute><Layout><AICredits /></Layout></AdminRoute>} />
+          <Route path="/admin/packages" element={<AdminRoute><Layout><AIPackages /></Layout></AdminRoute>} />
           <Route path="/admin/cases" element={<AdminRoute><Layout><AdminCaseManagement /></Layout></AdminRoute>} />
-          <Route path="/admin/webmail" element={<AdminRoute><Layout><Webmail /></Layout></AdminRoute>} />
+          <Route path="/admin/audit-log" element={<AdminRoute><Layout><AuditLog /></Layout></AdminRoute>} />
+          <Route path="/webmail" element={<ProtectedRoute><Layout><Webmail /></Layout></ProtectedRoute>} />
 
           {/* Case Management */}
           <Route path="/cases/dashboard" element={<ProtectedRoute><Layout><CasesDashboard /></Layout></ProtectedRoute>} />

@@ -10,10 +10,16 @@
 
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import fs from 'fs';
+import path from 'path';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest, signAccessToken } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { buildFrontendUser } from './auth.js';
+import { getAllEndpoints } from '../services/enterpriseEndpoints.js';
+
+// Base path for enterprise client documentation
+const DOCS_BASE = '/var/opt/documentation/Enterprise/Clients';
 
 export const adminClientManagerRouter = Router();
 
@@ -41,25 +47,28 @@ const updateWidgetStatusSchema = z.object({
 // ═════════════════════════════════════════════════════════════════════════
 adminClientManagerRouter.get('/overview', async (_req: AuthRequest, res: Response) => {
   try {
-    // Get all users that are clients (exclude admin/staff roles)
+    // Get all users that are clients (exclude admin/staff)
     const users = await db.query<any>(
-      `SELECT u.id, u.email, u.name, u.account_status, u.createdAt,
+      `SELECT u.id, u.email, u.name, u.account_status, u.contact_id, u.createdAt,
+              c.company_name AS contact_name, c.contact_person, c.email AS contact_email,
+              c.phone AS contact_phone, c.location AS contact_address,
               (SELECT COUNT(*) FROM assistants a WHERE a.userId = u.id) AS assistant_count,
               (SELECT COUNT(*) FROM widget_clients wc WHERE wc.user_id = u.id) AS widget_count
        FROM users u
-       WHERE u.id COLLATE utf8mb4_unicode_ci NOT IN (
-         SELECT ur.user_id COLLATE utf8mb4_unicode_ci FROM user_roles ur
-         JOIN roles r ON r.id = ur.role_id
-         WHERE r.slug IN ('admin', 'super_admin', 'developer', 'client_manager', 'qa_specialist', 'deployer')
-       )
+       LEFT JOIN contacts c ON c.id = u.contact_id
+       WHERE u.is_admin = 0 AND u.is_staff = 0
        ORDER BY u.createdAt DESC`
     );
 
-    // Get all assistants with their owner info
+    // Get all assistants with their owner info + knowledge stats
     const assistants = await db.query<any>(
       `SELECT a.id, a.name, a.description, a.status, a.tier, a.userId, a.pages_indexed,
+              a.business_type, a.personality, a.primary_goal, a.website, a.lead_capture_email,
+              a.knowledge_categories,
               a.created_at, a.updated_at, u.email AS owner_email, u.name AS owner_name,
-              u.account_status AS owner_account_status
+              u.account_status AS owner_account_status,
+              (SELECT COUNT(DISTINCT ak.source) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci) AS knowledge_source_count,
+              (SELECT COUNT(*) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci) AS knowledge_chunk_count
        FROM assistants a
        LEFT JOIN users u ON u.id = a.userId
        ORDER BY a.created_at DESC`
@@ -77,16 +86,56 @@ adminClientManagerRouter.get('/overview', async (_req: AuthRequest, res: Respons
        ORDER BY wc.last_active DESC`
     );
 
+    // Get all landing pages / generated sites with their owner info
+    const landingPages = await db.query<any>(
+      `SELECT gs.id, gs.widget_client_id, gs.business_name, gs.tagline,
+              gs.contact_email, gs.contact_phone,
+              gs.status, gs.theme_color, gs.created_at, gs.updated_at,
+              gs.ftp_server, gs.ftp_directory, gs.ftp_protocol,
+              gs.logo_url, gs.hero_image_url,
+              gs.about_us, gs.services,
+              gs.last_deployed_at,
+              (gs.generated_html IS NOT NULL) AS has_html,
+              LENGTH(gs.generated_html) AS html_size,
+              u.email AS owner_email, u.name AS owner_name, u.id AS user_id,
+              u.account_status AS owner_account_status
+       FROM generated_sites gs
+       LEFT JOIN users u ON u.id = gs.user_id
+       ORDER BY gs.updated_at DESC`
+    );
+
+    // Get enterprise endpoints from SQLite
+    let enterpriseEndpoints: any[] = [];
+    try {
+      enterpriseEndpoints = getAllEndpoints();
+    } catch (_e) { /* SQLite may not be ready */ }
+
+    // Count contacts by type for client stats
+    const contactStats = await db.query<any>(
+      `SELECT 
+         COUNT(*) AS total,
+         SUM(active = 1) AS active
+       FROM contacts WHERE COALESCE(contact_type, 1) = 1`
+    );
+    const supplierStats = await db.query<any>(
+      `SELECT COUNT(*) AS total FROM contacts WHERE contact_type = 2 AND active = 1`
+    );
+
     // Summary stats
     const stats = {
-      totalClients: users.length,
-      activeClients: users.filter((u: any) => u.account_status === 'active').length,
+      totalClients: contactStats[0]?.total ?? 0,
+      activeClients: contactStats[0]?.active ?? 0,
+      totalSuppliers: supplierStats[0]?.total ?? 0,
       suspendedClients: users.filter((u: any) => u.account_status === 'suspended').length,
       demoExpiredClients: users.filter((u: any) => u.account_status === 'demo_expired').length,
       totalAssistants: assistants.length,
       activeAssistants: assistants.filter((a: any) => a.status === 'active').length,
       totalWidgets: widgets.length,
       activeWidgets: widgets.filter((w: any) => w.status === 'active').length,
+      totalLandingPages: landingPages.length,
+      deployedLandingPages: landingPages.filter((lp: any) => lp.status === 'deployed').length,
+      totalEndpoints: enterpriseEndpoints.length,
+      activeEndpoints: enterpriseEndpoints.filter((ep: any) => ep.status === 'active').length,
     };
 
     res.json({
@@ -95,6 +144,8 @@ adminClientManagerRouter.get('/overview', async (_req: AuthRequest, res: Respons
       clients: users,
       assistants,
       widgets,
+      landingPages,
+      enterpriseEndpoints,
     });
   } catch (err) {
     console.error('[AdminClientManager] Overview error:', err);
@@ -111,7 +162,9 @@ adminClientManagerRouter.get('/:userId', async (req: AuthRequest, res: Response)
     const userId = req.params.userId;
 
     const user = await db.queryOne<any>(
-      'SELECT id, email, name, account_status, createdAt, updatedAt FROM users WHERE id = ?',
+      `SELECT id, email, name, account_status, createdAt, updatedAt,
+              telemetry_consent_accepted, telemetry_opted_out, telemetry_consent_date
+       FROM users WHERE id = ?`,
       [userId]
     );
 
@@ -120,15 +173,27 @@ adminClientManagerRouter.get('/:userId', async (req: AuthRequest, res: Response)
     }
 
     const assistants = await db.query<any>(
-      `SELECT id, name, description, status, tier, pages_indexed, created_at, updated_at
-       FROM assistants WHERE userId = ? ORDER BY created_at DESC`,
+      `SELECT a.id, a.name, a.description, a.status, a.tier, a.pages_indexed,
+              a.business_type, a.personality, a.primary_goal, a.website, a.lead_capture_email,
+              a.knowledge_categories,
+              a.created_at, a.updated_at,
+              (SELECT COUNT(DISTINCT ak.source) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci) AS knowledge_source_count,
+              (SELECT COUNT(*) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci) AS knowledge_chunk_count
+       FROM assistants a WHERE a.userId = ? ORDER BY a.created_at DESC`,
       [userId]
     );
 
-    const widgets = await db.query<any>(
-      `SELECT id, website_url, status, subscription_tier, message_count, max_messages,
-              pages_ingested, max_pages, monthly_price, created_at, last_active
-       FROM widget_clients WHERE user_id = ? ORDER BY last_active DESC`,
+    const landingPages = await db.query<any>(
+      `SELECT gs.id, gs.widget_client_id, gs.business_name, gs.tagline,
+              gs.contact_email, gs.contact_phone,
+              gs.status, gs.theme_color, gs.created_at, gs.updated_at,
+              gs.ftp_server, gs.ftp_directory, gs.ftp_protocol,
+              gs.logo_url, gs.hero_image_url,
+              gs.about_us, gs.services,
+              gs.last_deployed_at,
+              (gs.generated_html IS NOT NULL) AS has_html,
+              LENGTH(gs.generated_html) AS html_size
+       FROM generated_sites gs WHERE gs.user_id = ? ORDER BY gs.updated_at DESC`,
       [userId]
     );
 
@@ -136,11 +201,75 @@ adminClientManagerRouter.get('/:userId', async (req: AuthRequest, res: Response)
       success: true,
       client: user,
       assistants,
-      widgets,
+      landingPages,
     });
   } catch (err) {
     console.error('[AdminClientManager] Client detail error:', err);
     return res.status(500).json({ success: false, error: 'Failed to load client details' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// GET /admin/clients/:userId/chat-logs
+// Sanitized AI chat history from SQLite analytics logs (developer only)
+// ═════════════════════════════════════════════════════════════════════════
+adminClientManagerRouter.get('/:userId/chat-logs', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.params.userId;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+    const source = req.query.source as string; // optional filter: 'assistant' | 'widget' | 'enterprise'
+
+    // Verify user exists
+    const user = await db.queryOne<any>('SELECT id FROM users WHERE id = ?', [userId]);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Query sanitized logs from SQLite (vectors.db)
+    const Database = (await import('better-sqlite3')).default;
+    const dbPath = '/var/opt/backend/data/vectors.db';
+    const sqlite = new Database(dbPath, { readonly: true });
+
+    let query = `SELECT id, client_id, source, sanitized_prompt, sanitized_response, model, provider, duration_ms, created_at
+                 FROM ai_analytics_logs WHERE client_id = ?`;
+    const params: any[] = [userId];
+
+    if (source && ['assistant', 'widget', 'enterprise'].includes(source)) {
+      query += ' AND source = ?';
+      params.push(source);
+    }
+
+    // Get total count
+    let countQuery = `SELECT COUNT(*) AS total FROM ai_analytics_logs WHERE client_id = ?`;
+    const countParams: any[] = [userId];
+    if (source && ['assistant', 'widget', 'enterprise'].includes(source)) {
+      countQuery += ' AND source = ?';
+      countParams.push(source);
+    }
+    const countResult = sqlite.prepare(countQuery).get(...countParams) as any;
+    const total = countResult?.total || 0;
+
+    // Get paginated results
+    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    const logs = sqlite.prepare(query).all(...params);
+
+    sqlite.close();
+
+    return res.json({
+      success: true,
+      data: logs,
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+      },
+    });
+  } catch (err) {
+    console.error('[AdminClientManager] Chat logs error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load chat logs' });
   }
 });
 
@@ -385,5 +514,120 @@ adminClientManagerRouter.post('/:userId/masquerade', async (req: AuthRequest, re
   } catch (err) {
     console.error('[AdminClientManager] Masquerade error:', err);
     return res.status(500).json({ success: false, error: 'Failed to masquerade as user' });
+  }
+});
+
+// ─── Client Documentation ───────────────────────────────────────────────
+/**
+ * GET /admin/clients/:contactId/documentation
+ *
+ * Reads the Api.md file from the enterprise documentation folder for a contact.
+ * Path: /var/opt/documentation/Enterprise/Clients/:contactId/Api.md
+ *
+ * This is a standard pattern — every enterprise client can have an Api.md
+ * in their numbered folder. The frontend Documentation tab renders it.
+ *
+ * Query params:
+ *   ?file=<filename>  — optional, defaults to "Api.md"
+ *
+ * Returns:
+ *   { success: true, content: "# Markdown...", filename: "Api.md", contactId: "68" }
+ */
+adminClientManagerRouter.get('/:contactId/documentation', async (req: AuthRequest, res: Response) => {
+  try {
+    const { contactId } = req.params;
+    const filename = (req.query.file as string) || 'Api.md';
+
+    // Sanitize: only allow simple filenames ending in .md, no path traversal
+    if (!/^[a-zA-Z0-9_-]+\.md$/.test(filename)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid filename. Only .md files with alphanumeric names are allowed.',
+      });
+    }
+
+    // Sanitize contactId — must be numeric
+    if (!/^\d+$/.test(contactId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid contact ID.',
+      });
+    }
+
+    const filePath = path.join(DOCS_BASE, contactId, filename);
+
+    // Verify the resolved path stays within the docs directory (prevent traversal)
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(DOCS_BASE))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied.',
+      });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        error: 'DOCUMENTATION_NOT_FOUND',
+        message: `No documentation file '${filename}' found for contact ${contactId}.`,
+      });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    return res.json({
+      success: true,
+      content,
+      filename,
+      contactId,
+    });
+  } catch (err) {
+    console.error('[AdminClientManager] Documentation read error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to read documentation' });
+  }
+});
+
+/**
+ * GET /admin/clients/:contactId/documentation/list
+ *
+ * Lists all .md documentation files available for a contact.
+ * Returns filenames and sizes for the frontend to offer a file picker.
+ */
+adminClientManagerRouter.get('/:contactId/documentation/list', async (req: AuthRequest, res: Response) => {
+  try {
+    const { contactId } = req.params;
+
+    if (!/^\d+$/.test(contactId)) {
+      return res.status(400).json({ success: false, error: 'Invalid contact ID.' });
+    }
+
+    const dirPath = path.join(DOCS_BASE, contactId);
+
+    if (!fs.existsSync(dirPath)) {
+      return res.json({ success: true, files: [], contactId });
+    }
+
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const files = entries
+      .filter(e => e.isFile() && e.name.endsWith('.md'))
+      .map(e => {
+        const stat = fs.statSync(path.join(dirPath, e.name));
+        return {
+          filename: e.name,
+          size: stat.size,
+          modified: stat.mtime.toISOString(),
+        };
+      })
+      .sort((a, b) => {
+        // Api.md always first
+        if (a.filename === 'Api.md') return -1;
+        if (b.filename === 'Api.md') return 1;
+        return a.filename.localeCompare(b.filename);
+      });
+
+    return res.json({ success: true, files, contactId });
+  } catch (err) {
+    console.error('[AdminClientManager] Documentation list error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to list documentation' });
   }
 });

@@ -22,6 +22,7 @@ export interface MailboxAccount {
   smtp_port: number;
   smtp_secure: boolean;
   smtp_username: string;
+  signature: string;
   is_default: boolean;
   is_active: boolean;
   last_connected_at: string | null;
@@ -34,6 +35,7 @@ export interface CreateMailboxInput {
   display_name: string;
   email_address: string;
   password: string;
+  signature?: string;
   is_default?: boolean;
 }
 
@@ -92,6 +94,11 @@ export interface MailAttachment {
 export interface ConnectionTestResult {
   imap: { connected: boolean; message: string };
   smtp: { connected: boolean; message: string };
+}
+
+export interface UnreadCountResponse {
+  total: number;
+  accounts: { id: number; email_address: string; unseen: number }[];
 }
 
 export interface MessageListResponse {
@@ -238,6 +245,11 @@ export class WebmailModel {
 
   static getAttachmentUrl(accountId: number, folder: string, uid: number, partId: string): string {
     return `/webmail/attachment?account_id=${accountId}&folder=${encodeURIComponent(folder)}&uid=${uid}&partId=${partId}`;
+  }
+
+  static async getUnreadCount(): Promise<UnreadCountResponse> {
+    const res = await api.get<{ success: boolean; data: UnreadCountResponse }>('/webmail/unread-count');
+    return res.data.data;
   }
 }
 

@@ -1,0 +1,708 @@
+/**
+ * Webmail Service — IMAP/SMTP operations
+ *
+ * Provides real-time email access via IMAP and sending via SMTP.
+ * No emails are stored locally — all operations go directly to the mail server.
+ *
+ * Uses:
+ *   - imapflow for IMAP operations
+ *   - nodemailer for SMTP sending
+ *   - AES-256-GCM encryption for stored credentials
+ */
+import { ImapFlow } from 'imapflow';
+import nodemailer from 'nodemailer';
+import { simpleParser } from 'mailparser';
+import { db } from '../db/mysql.js';
+import { encryptPassword, decryptPassword } from '../utils/cryptoUtils.js';
+import { HttpError } from '../utils/httpErrors.js';
+// ─── Ensure table exists ─────────────────────────────────────────────────
+export async function ensureWebmailTable() {
+    await db.execute(`
+    CREATE TABLE IF NOT EXISTS user_mailboxes (
+      id INT NOT NULL AUTO_INCREMENT,
+      user_id VARCHAR(100) NOT NULL,
+      display_name VARCHAR(255) NOT NULL,
+      email_address VARCHAR(255) NOT NULL,
+      imap_host VARCHAR(255) NOT NULL,
+      imap_port INT NOT NULL DEFAULT 993,
+      imap_secure TINYINT(1) NOT NULL DEFAULT 1,
+      imap_username VARCHAR(255) NOT NULL,
+      imap_password TEXT NOT NULL,
+      smtp_host VARCHAR(255) NOT NULL,
+      smtp_port INT NOT NULL DEFAULT 587,
+      smtp_secure TINYINT(1) NOT NULL DEFAULT 1,
+      smtp_username VARCHAR(255) NOT NULL,
+      smtp_password TEXT NOT NULL,
+      signature TEXT DEFAULT '',
+      is_default TINYINT(1) NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      last_connected_at DATETIME DEFAULT NULL,
+      connection_error TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_user_mailboxes_user (user_id),
+      INDEX idx_user_mailboxes_email (email_address),
+      UNIQUE KEY idx_user_mailbox_unique (user_id, email_address)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+    // Migration: add signature column if table already existed without it
+    try {
+        await db.execute(`ALTER TABLE user_mailboxes ADD COLUMN signature TEXT DEFAULT '' AFTER smtp_password`);
+    }
+    catch {
+        // Column already exists — ignore
+    }
+}
+const WEBMAIL_SETTING_KEYS = [
+    'webmail_imap_host', 'webmail_imap_port', 'webmail_imap_secure',
+    'webmail_smtp_host', 'webmail_smtp_port', 'webmail_smtp_secure',
+];
+export async function getWebmailSettings() {
+    const placeholders = WEBMAIL_SETTING_KEYS.map(() => '?').join(',');
+    const rows = await db.query(`SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN (${placeholders})`, WEBMAIL_SETTING_KEYS);
+    const map = {};
+    for (const row of rows) {
+        map[row.setting_key] = row.setting_value ?? '';
+    }
+    return {
+        imap_host: map['webmail_imap_host'] || '',
+        imap_port: parseInt(map['webmail_imap_port'] || '993', 10),
+        imap_secure: map['webmail_imap_secure'] !== '0' && map['webmail_imap_secure'] !== 'false',
+        smtp_host: map['webmail_smtp_host'] || '',
+        smtp_port: parseInt(map['webmail_smtp_port'] || '587', 10),
+        smtp_secure: map['webmail_smtp_secure'] !== '0' && map['webmail_smtp_secure'] !== 'false',
+    };
+}
+export async function saveWebmailSettings(settings) {
+    const pairs = [
+        ['webmail_imap_host', settings.imap_host],
+        ['webmail_imap_port', String(settings.imap_port)],
+        ['webmail_imap_secure', settings.imap_secure ? '1' : '0'],
+        ['webmail_smtp_host', settings.smtp_host],
+        ['webmail_smtp_port', String(settings.smtp_port)],
+        ['webmail_smtp_secure', settings.smtp_secure ? '1' : '0'],
+    ];
+    for (const [key, value] of pairs) {
+        await db.execute(`INSERT INTO app_settings (setting_key, setting_value, data_type, description)
+       VALUES (?, ?, 'string', ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`, [key, value, `Webmail ${key.replace('webmail_', '').replace(/_/g, ' ')}`]);
+    }
+}
+// ─── Account CRUD ────────────────────────────────────────────────────────
+export async function listMailboxes(userId) {
+    const rows = await db.query(`SELECT id, user_id, display_name, email_address,
+            imap_host, imap_port, imap_secure, imap_username,
+            smtp_host, smtp_port, smtp_secure, smtp_username,
+            signature, is_default, is_active, last_connected_at, connection_error,
+            created_at, updated_at
+     FROM user_mailboxes WHERE user_id = ? ORDER BY is_default DESC, display_name`, [userId]);
+    return rows;
+}
+export async function getMailbox(id, userId) {
+    const rows = await db.query('SELECT * FROM user_mailboxes WHERE id = ? AND user_id = ?', [id, userId]);
+    const row = rows[0];
+    if (!row)
+        return null;
+    // Decrypt passwords
+    return {
+        ...row,
+        imap_password: decryptPassword(row.imap_password) || '',
+        smtp_password: decryptPassword(row.smtp_password) || '',
+    };
+}
+export async function createMailbox(userId, data) {
+    // Pull server settings from domain config
+    const serverCfg = await getWebmailSettings();
+    if (!serverCfg.imap_host || !serverCfg.smtp_host) {
+        throw new Error('Mail server settings have not been configured. Please contact your administrator.');
+    }
+    // If setting as default, clear other defaults first
+    if (data.is_default) {
+        await db.execute('UPDATE user_mailboxes SET is_default = 0 WHERE user_id = ?', [userId]);
+    }
+    // Username is the email address, password is shared for IMAP & SMTP
+    const encPwd = encryptPassword(data.password);
+    const result = await db.execute(`INSERT INTO user_mailboxes
+       (user_id, display_name, email_address,
+        imap_host, imap_port, imap_secure, imap_username, imap_password,
+        smtp_host, smtp_port, smtp_secure, smtp_username, smtp_password,
+        signature, is_default)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+        userId, data.display_name, data.email_address,
+        serverCfg.imap_host, serverCfg.imap_port, serverCfg.imap_secure ? 1 : 0,
+        data.email_address, encPwd,
+        serverCfg.smtp_host, serverCfg.smtp_port, serverCfg.smtp_secure ? 1 : 0,
+        data.email_address, encPwd,
+        data.signature || '',
+        data.is_default ? 1 : 0,
+    ]);
+    return { id: result.insertId, email_address: data.email_address };
+}
+export async function updateMailbox(id, userId, data) {
+    const sets = [];
+    const vals = [];
+    // If setting as default, clear others first
+    if (data.is_default) {
+        await db.execute('UPDATE user_mailboxes SET is_default = 0 WHERE user_id = ?', [userId]);
+    }
+    for (const [key, value] of Object.entries(data)) {
+        if (value === undefined)
+            continue;
+        if (key === 'password') {
+            // Password is shared for both IMAP and SMTP, username is email
+            const encPwd = encryptPassword(value);
+            sets.push('imap_password = ?', 'smtp_password = ?');
+            vals.push(encPwd, encPwd);
+        }
+        else if (key === 'email_address') {
+            // Email also updates the usernames
+            sets.push('email_address = ?', 'imap_username = ?', 'smtp_username = ?');
+            vals.push(value, value, value);
+        }
+        else if (key === 'is_default' || key === 'is_active') {
+            sets.push(`${key} = ?`);
+            vals.push(value ? 1 : 0);
+        }
+        else if (key === 'display_name' || key === 'signature') {
+            sets.push(`${key} = ?`);
+            vals.push(value);
+        }
+    }
+    if (sets.length === 0)
+        return;
+    vals.push(id, userId);
+    await db.execute(`UPDATE user_mailboxes SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`, vals);
+}
+export async function deleteMailbox(id, userId) {
+    const affectedRows = await db.execute('DELETE FROM user_mailboxes WHERE id = ? AND user_id = ?', [id, userId]);
+    return affectedRows > 0;
+}
+export async function setDefaultMailbox(id, userId) {
+    await db.execute('UPDATE user_mailboxes SET is_default = 0 WHERE user_id = ?', [userId]);
+    await db.execute('UPDATE user_mailboxes SET is_default = 1 WHERE id = ? AND user_id = ?', [id, userId]);
+}
+// ─── IMAP Helpers ────────────────────────────────────────────────────────
+function createImapClient(account) {
+    return new ImapFlow({
+        host: account.imap_host,
+        port: account.imap_port,
+        secure: account.imap_secure,
+        auth: {
+            user: account.imap_username,
+            pass: account.imap_password,
+        },
+        logger: false,
+        emitLogs: false,
+    });
+}
+/**
+ * Connect an IMAP client, converting auth failures into a user-friendly error
+ * and recording the failure in the database.
+ */
+async function connectImap(client, account) {
+    try {
+        await client.connect();
+    }
+    catch (err) {
+        const msg = err?.response || err?.message || 'IMAP connection failed';
+        const isAuthFail = err?.responseStatus === 'NO' ||
+            /AUTHENTICATIONFAILED|authentication failed|login failed|invalid credentials/i.test(msg);
+        // Record error in DB so it shows on the Profile page
+        await db.execute('UPDATE user_mailboxes SET connection_error = ? WHERE id = ?', [isAuthFail ? `IMAP authentication failed for ${account.imap_username}` : msg, account.id]).catch(() => { });
+        if (isAuthFail) {
+            throw new HttpError(401, 'MAIL_AUTH_FAILED', `Mail authentication failed for ${account.email_address}. Please update your password in Profile → Mailboxes.`);
+        }
+        throw err;
+    }
+}
+// ─── Test Connection ─────────────────────────────────────────────────────
+export async function testConnection(account) {
+    const result = {
+        imap: { connected: false, message: '' },
+        smtp: { connected: false, message: '' },
+    };
+    // Test IMAP
+    try {
+        const client = createImapClient(account);
+        await client.connect();
+        result.imap = { connected: true, message: 'IMAP connection successful' };
+        await client.logout();
+    }
+    catch (err) {
+        result.imap = { connected: false, message: err.message || 'IMAP connection failed' };
+    }
+    // Test SMTP
+    try {
+        const transport = nodemailer.createTransport({
+            host: account.smtp_host,
+            port: account.smtp_port,
+            secure: account.smtp_secure,
+            auth: {
+                user: account.smtp_username,
+                pass: account.smtp_password,
+            },
+        });
+        await transport.verify();
+        result.smtp = { connected: true, message: 'SMTP connection successful' };
+        transport.close();
+    }
+    catch (err) {
+        result.smtp = { connected: false, message: err.message || 'SMTP connection failed' };
+    }
+    // Update connection status in DB
+    const allGood = result.imap.connected && result.smtp.connected;
+    const errorMsg = [
+        !result.imap.connected ? `IMAP: ${result.imap.message}` : '',
+        !result.smtp.connected ? `SMTP: ${result.smtp.message}` : '',
+    ].filter(Boolean).join('; ');
+    await db.execute(`UPDATE user_mailboxes 
+     SET last_connected_at = IF(?, NOW(), last_connected_at),
+         connection_error = ?
+     WHERE id = ?`, [allGood ? 1 : 0, errorMsg || null, account.id]);
+    return result;
+}
+// ─── List Folders ────────────────────────────────────────────────────────
+export async function listFolders(account) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const tree = await client.listTree();
+        const folders = [];
+        const walk = async (items) => {
+            for (const item of items) {
+                // Get status (message count) for each folder
+                let totalMessages = 0;
+                let unseenMessages = 0;
+                try {
+                    const status = await client.status(item.path, { messages: true, unseen: true });
+                    totalMessages = status.messages || 0;
+                    unseenMessages = status.unseen || 0;
+                }
+                catch {
+                    // Some folders may not support STATUS
+                }
+                folders.push({
+                    path: item.path,
+                    name: item.name,
+                    delimiter: item.delimiter || '/',
+                    flags: item.flags || [],
+                    specialUse: item.specialUse || '',
+                    totalMessages,
+                    unseenMessages,
+                });
+                if (item.folders && item.folders.length > 0) {
+                    await walk(item.folders);
+                }
+            }
+        };
+        if (tree.folders) {
+            await walk(tree.folders);
+        }
+        // Update last connected timestamp
+        await db.execute('UPDATE user_mailboxes SET last_connected_at = NOW(), connection_error = NULL WHERE id = ?', [account.id]);
+        return folders;
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── List Messages ───────────────────────────────────────────────────────
+export async function listMessages(account, folder, page = 1, limit = 50, search) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            const status = await client.status(folder, { messages: true });
+            const total = status.messages || 0;
+            const pages = Math.ceil(total / limit);
+            if (total === 0) {
+                return { messages: [], total: 0, page: 1, pages: 0 };
+            }
+            // Calculate range (IMAP sequences are 1-based, newest last)
+            const end = Math.max(1, total - (page - 1) * limit);
+            const start = Math.max(1, end - limit + 1);
+            let searchQuery = { seq: `${start}:${end}` };
+            if (search) {
+                searchQuery = {
+                    seq: `${start}:${end}`,
+                    or: [
+                        { subject: search },
+                        { from: search },
+                    ],
+                };
+            }
+            const messages = [];
+            for await (const msg of client.fetch(searchQuery, {
+                uid: true,
+                envelope: true,
+                flags: true,
+                size: true,
+                bodyStructure: true,
+                headers: ['message-id'],
+            })) {
+                const envelope = msg.envelope;
+                messages.push({
+                    uid: msg.uid,
+                    messageId: envelope?.messageId || '',
+                    subject: envelope?.subject || '(No Subject)',
+                    from: envelope?.from?.[0]
+                        ? { name: envelope.from[0].name || '', address: envelope.from[0].address || '' }
+                        : { name: '', address: '' },
+                    to: (envelope?.to || []).map((a) => ({
+                        name: a.name || '',
+                        address: a.address || '',
+                    })),
+                    date: envelope?.date?.toISOString() || new Date().toISOString(),
+                    flags: Array.from(msg.flags || []),
+                    size: msg.size || 0,
+                    preview: '',
+                });
+            }
+            // Reverse so newest is first
+            messages.reverse();
+            return { messages, total, page, pages };
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Get Full Message ────────────────────────────────────────────────────
+export async function getMessage(account, folder, uid) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            // Mark as seen
+            await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true });
+            // Download full message
+            const download = await client.download(String(uid), undefined, { uid: true });
+            if (!download)
+                return null;
+            const parsed = await simpleParser(download.content);
+            const attachments = (parsed.attachments || []).map((att, idx) => ({
+                filename: att.filename || `attachment-${idx}`,
+                contentType: att.contentType || 'application/octet-stream',
+                size: att.size || 0,
+                partId: String(idx + 1),
+                contentId: att.contentId || undefined,
+            }));
+            return {
+                uid,
+                messageId: parsed.messageId || '',
+                subject: parsed.subject || '(No Subject)',
+                from: parsed.from?.value?.[0]
+                    ? { name: parsed.from.value[0].name || '', address: parsed.from.value[0].address || '' }
+                    : { name: '', address: '' },
+                to: (parsed.to ? (Array.isArray(parsed.to) ? parsed.to : [parsed.to]) : [])
+                    .flatMap((t) => t.value || [])
+                    .map((a) => ({ name: a.name || '', address: a.address || '' })),
+                cc: (parsed.cc ? (Array.isArray(parsed.cc) ? parsed.cc : [parsed.cc]) : [])
+                    .flatMap((t) => t.value || [])
+                    .map((a) => ({ name: a.name || '', address: a.address || '' })),
+                bcc: [],
+                date: parsed.date?.toISOString() || new Date().toISOString(),
+                flags: ['\\Seen'],
+                size: 0,
+                preview: (parsed.text || '').substring(0, 200),
+                html: parsed.html || parsed.textAsHtml || '',
+                text: parsed.text || '',
+                attachments,
+            };
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Download Attachment ─────────────────────────────────────────────────
+export async function getAttachment(account, folder, uid, partId) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            const download = await client.download(String(uid), undefined, { uid: true });
+            if (!download)
+                return null;
+            const parsed = await simpleParser(download.content);
+            const partIndex = parseInt(partId, 10) - 1;
+            const att = parsed.attachments?.[partIndex];
+            if (!att)
+                return null;
+            return {
+                filename: att.filename || `attachment-${partId}`,
+                contentType: att.contentType || 'application/octet-stream',
+                content: att.content,
+            };
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Delete / Trash Message ──────────────────────────────────────────────
+export async function deleteMessage(account, folder, uid) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            // Try to move to Trash first
+            try {
+                await client.messageMove({ uid }, 'Trash', { uid: true });
+            }
+            catch {
+                // If Trash doesn't exist, just mark as deleted
+                await client.messageFlagsAdd({ uid }, ['\\Deleted'], { uid: true });
+                await client.messageDelete({ uid }, { uid: true });
+            }
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Move Message ────────────────────────────────────────────────────────
+export async function moveMessage(account, folder, uid, destination) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            await client.messageMove({ uid }, destination, { uid: true });
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Flag Message ────────────────────────────────────────────────────────
+export async function flagMessage(account, folder, uid, flags) {
+    const client = createImapClient(account);
+    await connectImap(client, account);
+    try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+            if (flags.seen !== undefined) {
+                if (flags.seen) {
+                    await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true });
+                }
+                else {
+                    await client.messageFlagsRemove({ uid }, ['\\Seen'], { uid: true });
+                }
+            }
+            if (flags.flagged !== undefined) {
+                if (flags.flagged) {
+                    await client.messageFlagsAdd({ uid }, ['\\Flagged'], { uid: true });
+                }
+                else {
+                    await client.messageFlagsRemove({ uid }, ['\\Flagged'], { uid: true });
+                }
+            }
+            if (flags.answered !== undefined) {
+                if (flags.answered) {
+                    await client.messageFlagsAdd({ uid }, ['\\Answered'], { uid: true });
+                }
+                else {
+                    await client.messageFlagsRemove({ uid }, ['\\Answered'], { uid: true });
+                }
+            }
+        }
+        finally {
+            lock.release();
+        }
+    }
+    finally {
+        await client.logout();
+    }
+}
+// ─── Send Email ──────────────────────────────────────────────────────────
+export async function sendMail(account, input) {
+    const transport = nodemailer.createTransport({
+        host: account.smtp_host,
+        port: account.smtp_port,
+        secure: account.smtp_secure,
+        auth: {
+            user: account.smtp_username,
+            pass: account.smtp_password,
+        },
+    });
+    // Build the mail options once — used for both sending and Sent folder append
+    const mailOptions = {
+        from: `"${account.display_name}" <${account.email_address}>`,
+        to: input.to,
+        cc: input.cc || undefined,
+        bcc: input.bcc || undefined,
+        subject: input.subject,
+        html: input.html,
+        text: input.text || undefined,
+        inReplyTo: input.inReplyTo || undefined,
+        references: input.references || undefined,
+        attachments: input.attachments?.map(a => ({
+            filename: a.filename,
+            content: Buffer.from(a.content), // defensive copy
+            contentType: a.contentType,
+        })),
+    };
+    // Pre-build the complete RFC822 message BEFORE sending, so attachment buffers
+    // are captured into the raw MIME before the SMTP transport touches anything.
+    let rawSentMessage = null;
+    try {
+        const MailComposer = (await import('nodemailer/lib/mail-composer/index.js')).default;
+        const composer = new MailComposer({
+            ...mailOptions,
+            // Clone attachments again for MailComposer to avoid any shared-buffer issues
+            attachments: mailOptions.attachments?.map((a) => ({
+                filename: a.filename,
+                content: Buffer.from(a.content),
+                contentType: a.contentType,
+            })),
+            date: new Date(),
+        });
+        rawSentMessage = await new Promise((resolve, reject) => {
+            const result = composer.compile().build((err, message) => {
+                if (err)
+                    reject(err);
+                else
+                    resolve(message);
+            });
+            // Handle newer nodemailer where build() returns a Promise
+            if (result && typeof result.then === 'function') {
+                result.then((msg) => resolve(msg)).catch(reject);
+            }
+        });
+    }
+    catch (buildErr) {
+        console.warn('[Webmail] Failed to pre-build RFC822 for Sent folder:', buildErr);
+    }
+    // Send via SMTP
+    const info = await transport.sendMail(mailOptions);
+    transport.close();
+    // If pre-build succeeded but didn't have the final messageId, rebuild with it
+    if (rawSentMessage && info.messageId) {
+        try {
+            const MailComposer = (await import('nodemailer/lib/mail-composer/index.js')).default;
+            const composer = new MailComposer({
+                ...mailOptions,
+                attachments: mailOptions.attachments?.map((a) => ({
+                    filename: a.filename,
+                    content: Buffer.from(a.content),
+                    contentType: a.contentType,
+                })),
+                messageId: info.messageId,
+                date: new Date(),
+            });
+            rawSentMessage = await new Promise((resolve, reject) => {
+                const result = composer.compile().build((err, message) => {
+                    if (err)
+                        reject(err);
+                    else
+                        resolve(message);
+                });
+                if (result && typeof result.then === 'function') {
+                    result.then((msg) => resolve(msg)).catch(reject);
+                }
+            });
+        }
+        catch {
+            // Keep the pre-built version without the messageId — still better than nothing
+        }
+    }
+    // Append the full message (with attachments) to Sent folder via IMAP
+    if (rawSentMessage) {
+        try {
+            const client = createImapClient(account);
+            await connectImap(client, account);
+            try {
+                // Detect the actual Sent folder path (could be 'Sent', 'INBOX.Sent', etc.)
+                let sentPath = 'Sent';
+                try {
+                    const tree = await client.listTree();
+                    const findSent = (items) => {
+                        for (const item of items) {
+                            if (item.specialUse === '\\Sent')
+                                return item.path;
+                            if (item.folders) {
+                                const found = findSent(item.folders);
+                                if (found)
+                                    return found;
+                            }
+                        }
+                        return null;
+                    };
+                    const detected = tree.folders ? findSent(tree.folders) : null;
+                    if (detected)
+                        sentPath = detected;
+                }
+                catch {
+                    // Fall back to 'Sent'
+                }
+                await client.append(sentPath, rawSentMessage, ['\\Seen']);
+                console.log(`[Webmail] Appended sent message to ${sentPath} (${rawSentMessage.length} bytes, ${mailOptions.attachments?.length || 0} attachments)`);
+            }
+            finally {
+                await client.logout();
+            }
+        }
+        catch (e) {
+            console.warn('[Webmail] Failed to append sent message to IMAP Sent folder:', e);
+        }
+    }
+    else {
+        console.warn('[Webmail] Skipped Sent folder append — RFC822 message build failed');
+    }
+    return { messageId: info.messageId || '' };
+}
+// ─── Unread Count (INBOX only) ───────────────────────────────────────────
+export async function getUnreadCount(userId) {
+    const accounts = await listMailboxes(userId);
+    const activeAccounts = accounts.filter(a => a.is_active);
+    if (activeAccounts.length === 0) {
+        return { total: 0, accounts: [] };
+    }
+    const results = [];
+    let total = 0;
+    // Check INBOX unseen count for each active mailbox
+    await Promise.all(activeAccounts.map(async (acct) => {
+        try {
+            const full = await getMailbox(acct.id, userId);
+            if (!full)
+                return;
+            const client = createImapClient(full);
+            await connectImap(client, full);
+            try {
+                const status = await client.status('INBOX', { unseen: true });
+                const unseen = status.unseen || 0;
+                results.push({ id: acct.id, email_address: acct.email_address, unseen });
+                total += unseen;
+            }
+            finally {
+                await client.logout();
+            }
+        }
+        catch {
+            // If connection fails for one account, skip it
+            results.push({ id: acct.id, email_address: acct.email_address, unseen: 0 });
+        }
+    }));
+    return { total, accounts: results };
+}

@@ -1,7 +1,7 @@
 # Authentication Module - Overview
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-06
+**Version:** 1.9.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,12 +9,17 @@
 
 ### Purpose
 
-The Authentication module handles user registration, login, JWT token management, multi-method two-factor authentication (TOTP / Email / SMS), centralized email service, password reset via OTP, permission resolution, and admin masquerade (login-as-user). It is the entry point for every user session.
+The Authentication module handles user registration, login, JWT token management, multi-method two-factor authentication (TOTP / Email / SMS / Push-to-Approve), alternative auth method fallback, PIN-based quick login (v1.9.0), centralized email service, password reset via OTP, permission resolution, and admin masquerade (login-as-user). It is the entry point for every user session.
 
 ### Business Value
 
 - Secure user identity verification (bcrypt + JWT)
 - **Multi-method 2FA** — staff/admin: TOTP + email + SMS (mandatory); clients: TOTP + email (optional, encouraged)
+- **Push-to-approve** — TOTP users with a registered mobile app receive a push notification to approve/deny login with a single tap (v1.7.0); full polling UI in AuthPage.tsx (v1.8.0)
+- **Alternative auth fallback** — When preferred 2FA method is unavailable, users can request OTP via email or SMS as an alternative (v1.8.0)
+- **Universal TOTP validation** — Verify endpoint always tries TOTP codes regardless of preferred method (v1.8.0)
+- **6-digit numeric short codes** — Mobile QR challenges include a 6-digit code (e.g., `482916`) for manual entry when scanning fails (v1.8.0)
+- **PIN Quick Login** — Returning users can set a 4-digit PIN for faster re-authentication instead of typing a full password. Bcrypt-hashed, rate-limited (5 attempts → 15-minute lockout), does NOT bypass 2FA (v1.9.0)
 - Centralized email service reading SMTP credentials from the `credentials` table (AES-256-GCM encrypted)
 - Self-service password reset via email OTP
 - Role-based permissions resolved at login and available throughout the session
@@ -26,12 +31,12 @@ The Authentication module handles user registration, login, JWT token management
 | Metric | Value |
 |--------|-------|
 | Backend source files | 6 (auth.ts, twoFactor.ts, email.ts, emailService.ts, requireAdmin.ts, adminClientManager.ts) |
-| Backend LOC | ~1,380 (283 + 665 + 178 + 256) |
-| Frontend source files | 12 (Login.tsx, AuthPage.tsx, ForgotPassword.tsx, useAuth.ts, AuthModel.ts, TwoFactorSetup.tsx, AccountSettings.tsx, PortalSettings.tsx, SystemSettings.tsx SMTP tab, ClientManager.tsx, Layout.tsx, PortalLayout.tsx) |
-| Frontend LOC | ~2,500 |
-| Total LOC | ~3,900 |
-| API endpoints | 21 (11 core auth + 8 2FA + 5 email + 2 masquerade — some share base counts) |
-| Database tables | 5 (users, user_two_factor, user_roles, sys_password_resets, email_log) |
+| Backend LOC | ~2,300 (1253 + 1304 + 178 + 256) |
+| Frontend source files | 16 (Login.tsx, LoginPage.tsx, AuthPage.tsx, ForgotPassword.tsx, useAuth.ts, AuthModel.ts, TwoFactorSetup.tsx, PinSetup.tsx, MobileAuthQR.tsx, totp.ts, AccountSettings.tsx, PortalSettings.tsx, SystemSettings.tsx SMTP tab, ClientManager.tsx, Layout.tsx, PortalLayout.tsx) |
+| Frontend LOC | ~4,070 |
+| Total LOC | ~6,370 |
+| API endpoints | 31 (11 core auth + 5 PIN + 11 2FA + 5 email + 2 masquerade — some share base counts) |
+| Database tables | 7 (users, user_two_factor, user_pins, user_roles, sys_password_resets, email_log, mobile_auth_challenges) |
 
 ---
 
@@ -52,6 +57,13 @@ The Authentication module handles user registration, login, JWT token management
 │  │  TwoFactorSetup.tsx — Reusable 2FA management component     │       │
 │  │  Method selection (TOTP/email/SMS) | QR code | OTP verify   │       │
 │  │  Backup codes | Enable/Disable/Change | Role-aware           │       │
+│  │  Auto-verify TOTP via totp.ts (browser HMAC-SHA1)           │       │
+│  └──────┬────────────────────┬──────────────────────────────────┘       │
+│         │                    │                                           │
+│  ┌──────────────────────────────────────────────────────────────┐       │
+│  │  MobileAuthQR.tsx — Mobile QR auth component (always visible)│       │
+│  │  QR code display | Short code for manual entry | Polling    │       │
+│  │  Shows on AccountSettings + PortalSettings (v1.8.0)         │       │
 │  └──────┬────────────────────┬──────────────────────────────────┘       │
 │         │                    │                                           │
 │  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────────┐      │
@@ -69,7 +81,8 @@ The Authentication module handles user registration, login, JWT token management
 │  │  startMasquerade() | exitMasquerade() | isMasquerading()       │    │
 │  │  get2FAStatus() | setup2FA() | verifySetup2FA() | verify2FA()  │    │
 │  │  resend2FAOtp() | disable2FA() | change2FAMethod()             │    │
-│  │  regenerateBackupCodes()                                       │    │
+│  │  regenerateBackupCodes() | sendAltOtp() | pollPushStatus()     │    │
+│  │  getMobileAuthQR() | getMobileAuthStatus()                     │    │
 │  └──────────────────────────┬──────────────────────────────────────┘    │
 │                              │ Axios (api.ts)                            │
 └──────────────────────────────┼───────────────────────────────────────────┘
@@ -88,6 +101,12 @@ The Authentication module handles user registration, login, JWT token management
 │  │  POST /refresh   — verify old JWT → issue new JWT              │    │
 │  │  GET  /permissions — requireAuth → user permissions array      │    │
 │  │  POST /masquerade/exit — restore admin session from masquerade │    │
+│  │  ── PIN Quick Login (v1.9.0) ───────────────────────────────── │    │
+│  │  GET  /pin/status    — requireAuth → has_pin boolean           │    │
+│  │  POST /pin/set       — requireAuth → set/update PIN (password) │    │
+│  │  DELETE /pin         — requireAuth → remove PIN                │    │
+│  │  POST /pin/verify    — public → email+PIN login → JWT/2FA     │    │
+│  │  GET  /pin/check/:e  — public → check if email has PIN        │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
@@ -95,12 +114,19 @@ The Authentication module handles user registration, login, JWT token management
 │  │  GET  /status        — 2FA status + preferred_method + avail.  │    │
 │  │  POST /setup         — setup TOTP/email/SMS (method param)     │    │
 │  │  POST /verify-setup  — verify code, enable 2FA, backup codes   │    │
-│  │  POST /verify        — login 2FA (TOTP/email/SMS or backup)    │    │
+│  │  POST /verify        — login 2FA (any code type accepted;      │    │
+│  │                        always tries TOTP first, v1.8.0)        │    │
 │  │  POST /send-otp      — resend OTP during login (email/SMS)     │    │
+│  │  POST /send-alt-otp  — send OTP via alternative method (v1.8.0)│    │
 │  │  POST /disable       — disable 2FA (clients only; blocked for  │    │
 │  │                        staff/admin)                             │    │
 │  │  PUT  /method        — change preferred 2FA method             │    │
 │  │  POST /backup-codes  — password confirm → regenerate codes     │    │
+│  │  POST /push-approve  — mobile approves/denies push challenge   │    │
+│  │  POST /push-status   — web polls for push challenge completion │    │
+│  │  POST /mobile-challenge — create QR auth challenge             │    │
+│  │  GET  /mobile-qr     — get QR + short_code for mobile auth    │    │
+│  │  GET  /mobile-qr/status/:id — poll QR challenge status        │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
@@ -121,9 +147,17 @@ The Authentication module handles user registration, login, JWT token management
 │                                                                          │
 │  ┌─────────────────────┐  ┌─────────────────────┐  ┌──────────────────┐│
 │  │ buildFrontendUser() │  │ signAccessToken()    │  │ requireAdmin()   ││
-│  │ Resolves user +     │  │ JWT HS256 signing    │  │ user_roles check ││
-│  │ role + permissions  │  │ Configurable expiry  │  │ admin/super_admin││
+│  │ Resolves user +     │  │ JWT HS256 signing    │  │ users.is_admin   ││
+│  │ role + permissions  │  │ Configurable expiry  │  │ direct column    ││
+│  │ is_admin/is_staff   │  │                      │  │ check (v1.6.0)   ││
+│  │ from users columns  │  │                      │  │                  ││
 │  └─────────────────────┘  └─────────────────────┘  └──────────────────┘│
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  firebaseService.ts — FCM Push Notifications (v1.7.0)           │    │
+│  │  sendPushToUser() — sends multicast FCM to all user devices    │    │
+│  │  Used by createPushChallenge() for push-to-approve 2FA         │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │  /admin/clients/*  →  adminClientManager.ts (masquerade)        │    │
@@ -133,9 +167,9 @@ The Authentication module handles user registration, login, JWT token management
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  MySQL — users, user_two_factor, user_roles, roles,                      │
+│  MySQL — users, user_two_factor, user_pins, user_roles, roles,           │
 │          role_permissions, permissions, sys_password_resets,              │
-│          credentials (SMTP), email_log                                   │
+│          credentials (SMTP), email_log, mobile_auth_challenges           │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -163,22 +197,41 @@ The Authentication module handles user registration, login, JWT token management
 
 > **Note:** The email field uses `type="text"` (not `type="email"`) to allow plain usernames. Placeholder: `you@youremail.com`.
 
+### Login with PIN (v1.9.0)
+
+1. On login screen load, frontend checks for a stored `last_login_email` in localStorage
+2. If found, calls `GET /auth/pin/check/:email` to check if PIN login is available
+3. If `has_pin: true`, shows PIN login mode (4-digit PIN pad with auto-submit)
+4. User enters 4-digit PIN → auto-submits on 4th digit → `POST /auth/pin/verify`
+5. Backend verifies bcrypt-hashed PIN, checks rate limiting (5 attempts → 15-minute lockout)
+6. If 2FA is enabled → returns `requires_2fa` (same flow as password login)
+7. If no 2FA → issues JWT (30-day, same as "Remember Me"), navigates to dashboard
+8. "Use password instead" link switches to standard email+password form
+9. "Not you?" link clears stored email and shows standard email+password form
+
+> **Note:** PIN login does NOT bypass 2FA. If 2FA is enabled, the full 2FA flow still runs after PIN verification. The PIN is bcrypt-hashed on the server (never stored in plaintext). Rate limiting is per-user (not per-IP).
+
 ### Login (With 2FA)
 
 1. Steps 1-3 same as above
 2. Backend detects 2FA enabled → determines `preferred_method` (totp, email, or sms)
 3. For **email/SMS methods**: backend auto-sends OTP code via `sendTwoFactorOtp()` / `sendSms()`
-4. Returns `{ requires_2fa: true, two_factor_method: 'totp'|'email'|'sms', temp_token: '...' }`
-5. Frontend shows method-specific verification UI:
-   - **TOTP:** "Enter the code from your authenticator app"
+4. For **TOTP method** (v1.7.0): backend also calls `createPushChallenge()` to send an FCM push notification to all registered mobile devices. This is non-fatal — if no devices are registered or FCM fails, the flow falls back to standard TOTP code entry.
+5. Returns `{ requires_2fa: true, two_factor_method: 'totp'|'email'|'sms', temp_token: '...', challenge_id?: '...' }`
+   - `challenge_id` is included only when a push challenge was successfully created (TOTP method with registered FCM devices)
+6. Frontend shows method-specific verification UI:
+   - **TOTP:** "Approve the login on your mobile app, or enter your authenticator code" (v1.7.0 — updated message when push challenge exists)
    - **Email:** "A verification code has been sent to your email"
    - **SMS:** "A verification code has been sent to your phone"
-6. User enters 6-digit code (or 8-char backup code)
-7. Frontend calls `POST /auth/2fa/verify` with temp_token + code
-8. Backend verifies code (TOTP validate / OTP match / backup code hash) → issues full JWT
+7. **Path A — Push-to-Approve (v1.7.0):** Mobile user receives push notification → taps to approve/deny → frontend polls `POST /auth/2fa/push-status` with temp_token + challenge_id → backend issues JWT when challenge completed
+8. **Path B — Code Entry (existing):** User enters 6-digit code (or 8-char backup code) → frontend calls `POST /auth/2fa/verify` with temp_token + code → backend verifies (always tries TOTP first, then email/SMS OTP, then backup codes — v1.8.0) → issues JWT
 9. Login continues as normal
 
 > **Resend:** For email/SMS methods, a "Resend verification code" button calls `POST /auth/2fa/send-otp` with the temp_token.
+
+> **Alternative Methods (v1.8.0):** If the user's preferred method is unavailable, they can click "Use Email Instead" or "Use SMS Instead" to receive an OTP via an alternative method. This calls `POST /auth/2fa/send-alt-otp` with the temp_token and desired method. The verify endpoint accepts the code regardless of which method sent it.
+
+> **Push-to-Approve (v1.7.0, v1.8.0):** The push and code-entry paths run in parallel. AuthPage.tsx (v1.8.0) polls `push-status` every 3 seconds while also allowing manual TOTP code entry or alternative method OTP. Whichever completes first wins. Push challenges expire after 5 minutes. If the push is denied or expires, the user can switch to manual code entry or alternative methods. See [MOBILE_PUSH_2FA_WIRING_GUIDE.md](../Mobile/MOBILE_PUSH_2FA_WIRING_GUIDE.md) for mobile implementation details.
 
 ### 2FA Setup & Management
 
@@ -200,6 +253,22 @@ The Authentication module handles user registration, login, JWT token management
 3. **Email/SMS:** OTP sent automatically → enter 6-digit code to verify
 4. On successful verification → 2FA enabled, 10 backup codes displayed (save once)
 5. Backup codes are SHA-256 hashed; each can be used once as a login fallback
+
+### PIN Setup & Management (v1.9.0)
+
+Managed in the Security tab of both **Account Settings** (staff/admin) and **Portal Settings** (clients) via the `PinSetup` component.
+
+**Setup flow:**
+1. User taps "Set Up PIN" → enters 4-digit PIN → confirms PIN
+2. Enters current password for verification
+3. Calls `POST /auth/pin/set` with PIN + password → PIN bcrypt-hashed on server
+4. On success → PIN is active for quick login
+
+**Change PIN:** Same flow as setup — new PIN replaces old one, resets failed attempt counter.
+
+**Remove PIN:** Calls `DELETE /auth/pin` → removes PIN, user must use password to login.
+
+> **Note:** One PIN per user account. Setting a new PIN replaces the old one and resets the rate-limit counter. The PIN is bcrypt-hashed with 10 rounds.
 
 ### Password Reset
 
@@ -231,10 +300,10 @@ The Authentication module handles user registration, login, JWT token management
    - For client users the banner is rendered by `PortalLayout.tsx`
    - Both layouts detect masquerade state via `AuthModel.isMasquerading()` and provide a **"Return to Admin"** button
 8. Admin clicks **"Return to Admin"** → `POST /auth/masquerade/exit` with the adminRestoreToken
-9. Backend verifies the restore token belongs to an admin, issues fresh admin JWT
+9. Backend verifies the restore token belongs to an admin (checks `users.is_admin` column directly), issues fresh admin JWT
 10. Frontend restores admin session, navigates back to `/admin/clients`
 
-> **Safety:** Masquerade tokens are short-lived (1h target, 2h restore). Admins cannot masquerade as themselves. The restore endpoint re-verifies admin role before issuing tokens.
+> **Safety:** Masquerade tokens are short-lived (1h target, 2h restore). Admins cannot masquerade as themselves. The restore endpoint re-verifies admin status via `users.is_admin` column before issuing tokens.
 
 > **Routing note:** When masquerading as a client (non-admin) user, the app routes to `PortalLayout` (not `Layout`) because `SmartDashboard` checks `user.is_admin || user.is_staff`. Both layouts include the masquerade banner and exit handler.
 
@@ -359,13 +428,18 @@ Admin            Frontend               Backend                Database
 | **Login** | bcrypt verification, optional/mandatory 2FA gate, "remember me" (30-day tokens) |
 | **JWT Tokens** | HS256, configurable expiry (default 1h), refresh endpoint |
 | **Multi-Method 2FA** | 3 methods: TOTP (RFC 6238, 30s, SHA1, ±1 window), Email OTP, SMS OTP (via SMSPortal REST API). Staff/admin: all 3, mandatory. Clients: TOTP + Email, optional |
+| **Push-to-Approve 2FA** | (v1.7.0) TOTP users with registered mobile devices receive an FCM push notification on login. Approve/deny with a single tap — no code entry required. Falls back to standard TOTP if no devices registered. Uses `mobile_auth_challenges` table with `source='push'`. (v1.8.0) Full push-to-approve polling UI in AuthPage.tsx. |
+| **Alternative Auth Methods** | (v1.8.0) When preferred 2FA method is unavailable, users can request OTP via email or SMS as an alternative. `POST /auth/2fa/send-alt-otp` endpoint. Frontend dynamically shows the two alternative methods. |
+| **Universal TOTP Validation** | (v1.8.0) Verify endpoint always attempts TOTP code validation regardless of `preferred_method`. Users can enter TOTP codes even when email/SMS is their preferred method. |
+| **Mobile QR Short Codes** | (v1.8.0) Mobile auth challenges include 6-digit numeric codes (`482916` format) for manual entry when QR scanning fails. Compatible with mobile app's numeric input field. Stored in `short_code` column of `mobile_auth_challenges`. |
+| **PIN Quick Login** | (v1.9.0) Returning users can set a 4-digit numeric PIN for faster re-authentication. Bcrypt-hashed (10 rounds). Rate-limited: 5 failed attempts → 15-minute lockout. Does NOT bypass 2FA. Issues 30-day JWT. Frontend detects returning user via `last_login_email` in localStorage, auto-shows PIN pad. 5 new endpoints + `user_pins` table. |
 | **2FA Role Enforcement** | Staff/admin cannot disable 2FA. Clients can enable/disable freely. Frontend TwoFactorSetup component adapts UI based on `isStaffOrAdmin` prop |
 | **2FA Backup Codes** | 10 random 8-char hex codes, SHA-256 hashed storage, single-use; password required to regenerate |
 | **Centralized Email Service** | `emailService.ts` — reads SMTP from `credentials` table (AES-256-GCM encrypted); fallback to env vars; caches nodemailer transporter; logs to `email_log` table |
 | **SMTP Admin UI** | System Settings → SMTP tab: configure host, port, username, password, from name/email, encryption; test email button |
 | **Password Reset** | 3-step flow: email → OTP → new password |
-| **Permission Resolution** | User → user_roles → roles → role_permissions → permissions; admin/staff get wildcard `*` |
-| **Frontend User Shape** | `buildFrontendUser()` compiles id, email, name, avatar, role, permissions into one object (no team field) |
+| **Permission Resolution** | User → `users.is_admin`/`users.is_staff` (direct columns) for admin/staff detection; `user_roles` → `roles` → `role_permissions` → `permissions` for granular permissions; admin/staff get wildcard `*` |
+| **Frontend User Shape** | `buildFrontendUser()` compiles id, email, name, avatar, role, permissions into one object; `is_admin`/`is_staff` read directly from `users` table columns (v1.6.0+, no team field) |
 | **Branding** | Login/forgot pages load site logo, name, description from cached app settings |
 | **Masquerade** | Admin can login as any client user; dual-JWT pattern (target + restore); purple banner in Layout; return-to-admin with role re-verification |
 
@@ -385,6 +459,10 @@ Admin            Frontend               Backend                Database
 | **jsonwebtoken** | JWT signing/verification |
 | **nodemailer** | SMTP email transport (used by emailService.ts) |
 | **smsService.ts** | SMS sending via SMSPortal REST API (used by 2FA and auth login) |
+| **firebaseService.ts** | FCM push notifications via `sendPushToUser()` (used by push-to-approve 2FA, v1.7.0) |
+| **fcm_tokens table** | FCM device tokens registered by mobile app — used to send push notifications |
+| **mobile_auth_challenges table** | Push/QR challenge state — `source` distinguishes push vs QR, `status` tracks pending/completed/expired/denied |
+| **user_pins table** | (v1.9.0) PIN hash storage + rate limiting state — `pin_hash` (bcrypt), `failed_attempts`, `locked_until` |
 | **credentials table** | AES-256-GCM encrypted SMTP credentials (service_name='SMTP') + SMS credentials (SMS KEY / SMS SECRET) |
 
 | Used By | How |
@@ -417,7 +495,16 @@ Admin            Frontend               Backend                Database
 | SMTP credentials encrypted | AES-256-GCM encryption via `credentials` table; ENCRYPTION_KEY from env |
 | Masquerade dual-JWT | Separate tokens for target session and admin restore — compromise of one doesn't affect the other |
 | Masquerade self-guard | Admin cannot masquerade as themselves — prevents accidental session corruption |
-| Masquerade exit re-verifies role | `/auth/masquerade/exit` checks admin role before issuing token — prevents privilege escalation if restore token is stolen |
+| Masquerade exit re-verifies role | `/auth/masquerade/exit` checks `users.is_admin` column directly before issuing token — prevents privilege escalation if admin status was revoked during masquerade |
+| Push challenge ownership (v1.7.0) | Push challenges can only be approved/denied by the owning user — JWT userId must match challenge user_id |
+| Push challenge source guard (v1.7.0) | Only `source='push'` challenges accepted by push-approve endpoint — QR challenges use a different flow |
+| Push non-fatal design (v1.7.0) | Push challenge creation wrapped in try/catch — FCM failure never blocks login; user can always fall back to TOTP code entry |
+| Push challenge expiry (v1.7.0) | Push challenges expire after 5 minutes; expired/completed/denied challenges cannot be replayed |
+| PIN bcrypt hashed (v1.9.0) | PINs hashed with bcrypt (10 rounds) — not stored in plaintext |
+| PIN rate limiting (v1.9.0) | 5 failed PIN attempts → 15-minute lockout per user; counter resets on success |
+| PIN does not bypass 2FA (v1.9.0) | PIN login with 2FA enabled still requires full 2FA verification (same flow as password login) |
+| PIN check does not reveal email existence (v1.9.0) | `GET /pin/check/:email` returns `has_pin: false` for non-existent emails |
+| PIN vague error messages (v1.9.0) | "Invalid email or PIN" — same generic message for wrong email or wrong PIN (no user enumeration) |
 
 ### 🔴 Security Considerations
 
@@ -457,6 +544,19 @@ Admin            Frontend               Backend                Database
 | "Return to Admin" fails | Admin restore token expired (2h TTL) | Re-authenticate as admin via normal login |
 | "Cannot masquerade as yourself" | Admin tried to masquerade as their own account | Select a different (client) user |
 | Masquerade exits to login page | Restore token invalid or user no longer has admin role | Re-authenticate normally |
+| No push notification received | No FCM devices registered for user, or Firebase not configured | Register mobile device via `POST /fcm-tokens/register`; verify Firebase Admin SDK is initialized |
+| Push challenge stuck on "pending" | Mobile app didn't respond within 5 minutes | Challenge expires; enter TOTP code manually as fallback |
+| Push-status returns "denied" | User denied the login request on the mobile app | Show appropriate message; user can still enter TOTP code manually |
+| `challenge_id` missing from login response | No FCM devices registered for user, or `createPushChallenge()` returned null | Push-to-approve not available; standard TOTP code entry is the only path |
+| No alternative method buttons shown | User's preferred method is not TOTP, or frontend not updated to v1.8.0 | Alternative methods only shown during 2FA verification step when preferred method is unavailable |
+| Short code not showing below QR | Backend not updated to v1.8.0 (no `short_code` column), or challenge has no `short_code` | Run `ensureMobileChallengeTable()` migration or manually add `short_code VARCHAR(10) NULL` to `mobile_auth_challenges` |
+| MobileAuthQR not visible on profile page | Component not imported or not rendered | MobileAuthQR is shown on AccountSettings and portal Settings pages, not on Profile page |
+| PIN login returns "Invalid email or PIN" | Wrong PIN or email not in database | Generic message by design — verify email is correct and re-enter PIN |
+| PIN login returns "PIN login is not set up" | User has no PIN configured | Set up a PIN in Account/Portal Settings → Security tab |
+| PIN login locked for 15 minutes | 5 consecutive failed PIN attempts | Wait for lockout to expire (15 minutes), then try again |
+| PIN setup returns "Incorrect password" | Wrong password entered during PIN setup | Password confirmation failed — re-enter current account password |
+| `user_pins` table not created | Collation mismatch between `users.id` and FK | Run `ensurePinTable()` — table uses `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` on `user_id` column to match `users.id` collation |
+| PIN pad not showing on login page | No `last_login_email` stored, or user has no PIN | PIN pad only appears for returning users with a stored email + active PIN |
 
 ---
 
@@ -466,4 +566,6 @@ Admin            Frontend               Backend                Database
 - [Users](../Users/README.md) — User management, profile editing
 - [Roles](../Roles/README.md) — Role and permission management
 - [Notifications](../Notifications/README.md) — FCM token registration after login
+- [MOBILE_PUSH_2FA_WIRING_GUIDE.md](../Mobile/MOBILE_PUSH_2FA_WIRING_GUIDE.md) — Mobile app implementation guide for push-to-approve 2FA (v1.7.0)
+- [MOBILE_QR_AUTH_GUIDE.md](../Mobile/MOBILE_QR_AUTH_GUIDE.md) — Mobile app QR-based 2FA + PIN login implementation guide (v2.0.0)
 - [CODEBASE_MAP.md](../CODEBASE_MAP.md) — Platform architecture overview

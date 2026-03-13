@@ -22,12 +22,15 @@
  *   GET    /local-tasks/sync/log              — Get sync history log
  */
 
-import { Router, Request, Response } from 'express';
-import { requireAuth, AuthRequest } from '../middleware/auth.js';
-import { db, toMySQLDate } from '../db/mysql.js';
+import { Router, Request, Response, NextFunction } from 'express';
+import { AuthRequest } from '../middleware/auth.js';
+import { db, toMySQLDate, generateId } from '../db/mysql.js';
 import { syncSource, syncAllSources, type TaskSource, type SyncResult } from '../services/taskSyncService.js';
 
 export const localTasksRouter = Router();
+
+// No-op auth — local-only tool, no login required
+const requireAuth = (_req: Request, _res: Response, next: NextFunction) => next();
 
 // ─── SOURCES ────────────────────────────────────────────────────
 
@@ -227,6 +230,84 @@ localTasksRouter.post('/sources/:id/test', requireAuth, async (req: Request, res
 
 // ─── SYNC ───────────────────────────────────────────────────────
 
+// GET /local-tasks/sync/enabled — Check if sync is globally enabled
+localTasksRouter.get('/sync/enabled', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    const sources = await db.query<any>('SELECT id, name, sync_enabled FROM task_sources');
+    const allEnabled = sources.length > 0 && sources.every((s: any) => s.sync_enabled === 1);
+    const anyEnabled = sources.some((s: any) => s.sync_enabled === 1);
+    res.json({ status: 1, data: { enabled: anyEnabled, all_enabled: allEnabled, sources } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// POST /local-tasks/sync/disable — Disable sync on all sources and open a case
+localTasksRouter.post('/sync/disable', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { reason, reason_detail, software_name, user_id, user_name } = req.body;
+    if (!reason) return res.status(400).json({ status: 0, message: 'reason is required' });
+
+    // Disable all sources
+    const affected = await db.execute('UPDATE task_sources SET sync_enabled = 0');
+
+    // Create a case
+    const caseId = generateId();
+    const caseNumber = `CASE-${Date.now().toString().slice(-8)}`;
+    const now = toMySQLDate(new Date());
+    const title = `Sync Disabled: ${reason}`;
+    const reporterLabel = user_name || 'Unknown User';
+    const description = [
+      `Task sync was manually disabled by **${reporterLabel}**.`,
+      ``,
+      `**Reason:** ${reason}`,
+      reason_detail ? `**Details:** ${reason_detail}` : '',
+      software_name ? `**Software:** ${software_name}` : '',
+      `**Sources affected:** ${affected}`,
+      `**Disabled at:** ${new Date().toISOString()}`,
+    ].filter(Boolean).join('\n');
+
+    await db.execute(
+      `INSERT INTO cases (
+        id, case_number, title, description, category, severity, status, type, source,
+        reported_by, metadata, tags, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        caseId, caseNumber, title, description,
+        'other', 'medium', 'open', 'user_reported', 'user_report',
+        user_id || null,
+        JSON.stringify({ reason, reason_detail, software_name, user_id, user_name, disabled_at: new Date().toISOString() }),
+        JSON.stringify(['sync-disabled', 'task-sync']),
+        now, now
+      ]
+    );
+
+    // Log activity
+    await db.execute(
+      'INSERT INTO case_activity (id, case_id, user_id, action, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [generateId(), caseId, user_id || null, 'created', caseNumber, now]
+    );
+
+    res.json({
+      status: 1,
+      message: `Sync disabled. Case ${caseNumber} opened.`,
+      data: { sources_disabled: affected, case_number: caseNumber, case_id: caseId },
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// POST /local-tasks/sync/enable — Re-enable sync on all sources
+localTasksRouter.post('/sync/enable', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    const affected = await db.execute('UPDATE task_sources SET sync_enabled = 1');
+    res.json({ status: 1, message: `Sync re-enabled on ${affected} source(s)`, data: { sources_enabled: affected } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
 // POST /local-tasks/sync — Sync all enabled sources
 localTasksRouter.post('/sync', requireAuth, async (_req: Request, res: Response) => {
   try {
@@ -359,6 +440,425 @@ localTasksRouter.get('/tags', requireAuth, async (_req: Request, res: Response) 
     const tags = rows.map((r: any) => r.tag);
     res.json({ status: 1, message: 'Success', data: { tags } });
   } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// ─── INVOICE STAGING ────────────────────────────────────────────
+// task_billed: 0 = unbilled, 1 = invoiced (synced), 2 = staged for invoicing (local only)
+
+// POST /local-tasks/invoice/stage — Stage selected tasks for invoicing (local only)
+localTasksRouter.post('/invoice/stage', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { task_ids, bill_date } = req.body;
+    if (!Array.isArray(task_ids) || task_ids.length === 0) {
+      return res.status(400).json({ status: 0, message: 'task_ids array required' });
+    }
+    const date = bill_date || new Date().toISOString().slice(0, 10);
+    // Only stage tasks that are currently unbilled (task_billed = 0)
+    const placeholders = task_ids.map(() => '?').join(',');
+    const affected = await db.execute(
+      `UPDATE local_tasks SET task_billed = 2, task_bill_date = ? WHERE external_id IN (${placeholders}) AND task_billed = 0`,
+      [date, ...task_ids]
+    );
+    res.json({ status: 1, message: `${affected} task(s) staged for invoicing`, data: { staged: affected } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// GET /local-tasks/invoice/staged — Get all tasks staged for invoicing
+localTasksRouter.get('/invoice/staged', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    const tasks = await db.query<any>(
+      `SELECT * FROM local_tasks WHERE task_billed = 2 AND task_deleted = 0 ORDER BY task_bill_date DESC, id DESC`
+    );
+    res.json({ status: 1, message: 'Success', data: { tasks, count: tasks.length } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// POST /local-tasks/invoice/clear — Clear all staged invoices (reset to unbilled)
+localTasksRouter.post('/invoice/clear', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    const affected = await db.execute(
+      `UPDATE local_tasks SET task_billed = 0, task_bill_date = NULL WHERE task_billed = 2`
+    );
+    res.json({ status: 1, message: `${affected} task(s) cleared from invoice staging`, data: { cleared: affected } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// POST /local-tasks/invoice/unstage/:id — Unstage a single task
+localTasksRouter.post('/invoice/unstage/:id', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await db.execute(
+      `UPDATE local_tasks SET task_billed = 0, task_bill_date = NULL WHERE id = ? AND task_billed = 2`,
+      [id]
+    );
+    res.json({ status: 1, message: 'Task removed from invoice staging' });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// POST /local-tasks/invoice/process — Process staged invoices (sync to external portal, then mark as billed)
+localTasksRouter.post('/invoice/process', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { apiUrl } = req.body;
+    if (!apiUrl) return res.status(400).json({ status: 0, message: 'apiUrl required' });
+
+    // Get all staged tasks
+    const staged = await db.query<any>(
+      `SELECT id, external_id, task_bill_date FROM local_tasks WHERE task_billed = 2 AND task_deleted = 0`
+    );
+    if (staged.length === 0) {
+      return res.json({ status: 1, message: 'No staged tasks to process', data: { processed: 0 } });
+    }
+
+    // Group by bill_date for the external API call
+    const billDate = staged[0].task_bill_date || new Date().toISOString().slice(0, 10);
+    const externalIds = staged.map((t: any) => t.external_id).filter(Boolean);
+
+    if (externalIds.length === 0) {
+      return res.status(400).json({ status: 0, message: 'No tasks with external IDs to sync' });
+    }
+
+    // Resolve the task source to get API key
+    const normalizedApiUrl = apiUrl.replace(/\/+$/, '');
+    let source: any = null;
+    const baseOrigin = (() => {
+      try { return new URL(normalizedApiUrl).origin; } catch { return ''; }
+    })();
+    if (baseOrigin) {
+      source = await db.queryOne<any>(
+        `SELECT id, base_url, api_key FROM task_sources WHERE TRIM(TRAILING '/' FROM base_url) LIKE ? ORDER BY id ASC LIMIT 1`,
+        [`${baseOrigin}%`]
+      );
+    }
+    if (!source) {
+      return res.status(400).json({ status: 0, message: 'Could not resolve task source for the given apiUrl' });
+    }
+
+    // Call external portal to invoice tasks
+    const url = `${source.base_url.replace(/\/+$/, '')}/api/tasks-api/invoice-tasks`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-API-Key': source.api_key,
+      },
+      body: JSON.stringify({ task_ids: externalIds, bill_date: billDate }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(response.status).json({ status: 0, message: `External API error: ${errText}` });
+    }
+
+    // Mark all staged tasks as fully invoiced (task_billed = 1)
+    const ids = staged.map((t: any) => t.id);
+    const placeholders = ids.map(() => '?').join(',');
+    await db.execute(
+      `UPDATE local_tasks SET task_billed = 1 WHERE id IN (${placeholders})`,
+      ids
+    );
+
+    res.json({
+      status: 1,
+      message: `${staged.length} task(s) invoiced and synced to portal`,
+      data: { processed: staged.length, bill_date: billDate },
+    });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// ─── BILLING SETTINGS & STATEMENT ───────────────────────────────
+
+// GET /local-tasks/billing-settings — Get billing settings (allocated hours etc.)
+localTasksRouter.get('/billing-settings', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    const row = await db.queryOne<any>(
+      `SELECT setting_value FROM app_settings WHERE setting_key = 'billing_allocated_hours'`
+    );
+    res.json({ status: 1, data: { allocated_hours: parseFloat(row?.setting_value || '0') || 0 } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// PUT /local-tasks/billing-settings — Save billing settings (no admin required)
+localTasksRouter.put('/billing-settings', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { allocated_hours } = req.body;
+    const val = parseFloat(allocated_hours) || 0;
+    await db.execute(
+      `INSERT INTO app_settings (setting_key, setting_value) VALUES ('billing_allocated_hours', ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+      [String(val)]
+    );
+    res.json({ status: 1, message: 'Billing settings saved', data: { allocated_hours: val } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// GET /local-tasks/billing-dates — Get distinct billing dates (for statement date-range picker)
+localTasksRouter.get('/billing-dates', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const sourceId = req.query.source_id ? Number(req.query.source_id) : null;
+    let sql = `
+      SELECT DISTINCT task_bill_date
+      FROM local_tasks
+      WHERE task_billed = 1
+        AND task_bill_date IS NOT NULL
+        AND task_bill_date != ''
+        AND task_bill_date != '0'
+        AND LENGTH(task_bill_date) > 5
+        AND task_deleted = 0
+    `;
+    const params: any[] = [];
+    if (sourceId) {
+      sql += ' AND source_id = ?';
+      params.push(sourceId);
+    }
+    sql += ' ORDER BY task_bill_date DESC';
+
+    const rows = await db.query<any>(sql, params);
+    const dates = rows.map((r: any) => r.task_bill_date);
+    res.json({ status: 1, message: 'Success', data: { dates } });
+  } catch (err: any) {
+    res.status(500).json({ status: 0, message: err.message });
+  }
+});
+
+// GET /local-tasks/statement-excel — Generate Excel statement for a billing date range
+localTasksRouter.get('/statement-excel', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { date_from, date_to, source_id, allocated_hours } = req.query;
+    if (!date_from || !date_to) {
+      return res.status(400).json({ status: 0, message: 'date_from and date_to are required' });
+    }
+
+    const allocHours = parseFloat(String(allocated_hours || '0')) || 0;
+
+    let sql = `
+      SELECT
+        t.external_id,
+        t.title,
+        t.hours,
+        t.actual_start,
+        t.actual_end,
+        t.start_date,
+        t.end_date,
+        t.created_by_name,
+        t.task_bill_date
+      FROM local_tasks t
+      WHERE t.task_billed = 1
+        AND t.task_bill_date IS NOT NULL
+        AND t.task_bill_date >= ?
+        AND t.task_bill_date <= ?
+        AND t.task_deleted = 0
+    `;
+    const params: any[] = [date_from, date_to];
+    if (source_id) {
+      sql += ' AND t.source_id = ?';
+      params.push(Number(source_id));
+    }
+    sql += ' ORDER BY t.actual_start ASC, t.external_id ASC';
+
+    const tasks = await db.query<any>(sql, params);
+
+    // Helper: convert HH:MM or decimal hours to decimal number
+    const toDecimal = (h: string | number | null): number => {
+      if (!h) return 0;
+      const s = String(h).trim();
+      if (!s.includes(':')) return parseFloat(s) || 0;
+      const p = s.split(':');
+      return (parseInt(p[0]) || 0) + (parseInt(p[1]) || 0) / 60;
+    };
+
+    // Format decimal → "Xh" or "Xh Ym" or "Ym"
+    const fmtHM = (dec: number): string => {
+      if (dec === 0) return '0h';
+      const hrs = Math.floor(dec);
+      const mins = Math.round((dec - hrs) * 60);
+      if (hrs > 0 && mins > 0) return `${hrs}h ${mins}m`;
+      if (hrs > 0) return `${hrs}h`;
+      return `${mins}m`;
+    };
+
+    // Format decimal → "HHh.MMm" (e.g. "104h.30m")
+    const fmtHMdot = (dec: number): string => {
+      const hrs = Math.floor(dec);
+      const mins = Math.round((dec - hrs) * 60);
+      return `${hrs}h.${String(mins).padStart(2, '0')}m`;
+    };
+
+    // Format date nicely: "Jan 30, 2026, 09:30 AM"
+    const fmtDate = (d: string | null): string => {
+      if (!d) return '';
+      try {
+        return new Date(d).toLocaleString('en-US', {
+          month: 'short', day: 'numeric', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', hour12: true,
+        });
+      } catch { return d; }
+    };
+
+    // Format date only: "30 January 2026"
+    const fmtDateOnly = (d: string | null): string => {
+      if (!d) return '';
+      try {
+        return new Date(d).toLocaleDateString('en-GB', {
+          day: 'numeric', month: 'long', year: 'numeric',
+        });
+      } catch { return d; }
+    };
+
+    // Compute totals
+    let totalHours = 0;
+    for (const t of tasks) totalHours += toDecimal(t.hours);
+
+    // Period string (earliest actual_start to latest actual_end)
+    const starts = tasks.map((t: any) => t.actual_start || t.start_date).filter(Boolean).sort();
+    const ends = tasks.map((t: any) => t.actual_end || t.end_date).filter(Boolean).sort();
+    const periodFrom = starts.length > 0 ? fmtDateOnly(starts[0]) : String(date_from);
+    const periodTo = ends.length > 0 ? fmtDateOnly(ends[ends.length - 1]) : String(date_to);
+
+    const balanceHours = allocHours > 0 ? Math.max(0, allocHours - totalHours) : 0;
+
+    // Build worksheet
+    const XLSX = await import('xlsx');
+    const wb = XLSX.utils.book_new();
+
+    const rows: any[][] = [];
+    const COL_COUNT = 5; // TASK NAME, REQUESTER, START, END, HOURS
+
+    // Title header rows
+    rows.push(['Support & Development Hours Statement', '', '', '', '']);     // row 0
+    rows.push([]);                                                           // row 1 blank
+    rows.push([`Period: ${periodFrom} - ${periodTo}`, '', '', '', '']);       // row 2
+    rows.push([]);                                                           // row 3 blank
+    rows.push([`Total:   ${fmtHMdot(totalHours)}`, '', '', '', '']);          // row 4
+    rows.push([]);                                                           // row 5 blank
+    if (allocHours > 0) {
+      rows.push([`Balance: ${fmtHMdot(balanceHours)}`, '', '', '', '']);      // row 6
+      rows.push([]);                                                         // row 7 blank
+    }
+
+    // Table header
+    const headerRowIdx = rows.length;
+    rows.push(['TASK NAME', 'REQUESTER', 'START', 'END', 'HOURS']);
+
+    // Task data rows
+    for (const t of tasks) {
+      const dec = toDecimal(t.hours);
+      rows.push([
+        t.title || '',
+        t.created_by_name || '',
+        fmtDate(t.actual_start || t.start_date),
+        fmtDate(t.actual_end || t.end_date),
+        fmtHM(dec),
+      ]);
+    }
+
+    // Total row
+    const totalRowIdx = rows.length;
+    rows.push(['', '', '', 'Total:', fmtHMdot(totalHours)]);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    // Column widths
+    ws['!cols'] = [
+      { wch: 45 },  // TASK NAME
+      { wch: 16 },  // REQUESTER
+      { wch: 28 },  // START
+      { wch: 28 },  // END
+      { wch: 12 },  // HOURS
+    ];
+
+    // Merge title row across all columns
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: COL_COUNT - 1 } },  // Title
+      { s: { r: 2, c: 0 }, e: { r: 2, c: COL_COUNT - 1 } },  // Period
+      { s: { r: 4, c: 0 }, e: { r: 4, c: COL_COUNT - 1 } },  // Total
+    ];
+    if (allocHours > 0) {
+      ws['!merges'].push({ s: { r: 6, c: 0 }, e: { r: 6, c: COL_COUNT - 1 } }); // Balance
+    }
+
+    // Styling helper
+    const headerFill = { fgColor: { rgb: '4472C4' } };
+    const headerFont = { bold: true, color: { rgb: 'FFFFFF' }, sz: 11 };
+    const titleFont = { bold: true, sz: 16 };
+    const metaFont = { bold: true, sz: 11 };
+    const altFill = { fgColor: { rgb: 'D6E4F0' } };
+    const borderThin = { style: 'thin', color: { rgb: '999999' } };
+    const borders = { top: borderThin, bottom: borderThin, left: borderThin, right: borderThin };
+
+    // Apply title style
+    const titleCell = ws['A1'];
+    if (titleCell) { titleCell.s = { font: titleFont }; }
+
+    // Apply meta styles (Period, Total, Balance)
+    for (const r of [2, 4, ...(allocHours > 0 ? [6] : [])]) {
+      const ref = XLSX.utils.encode_cell({ r, c: 0 });
+      if (ws[ref]) ws[ref].s = { font: metaFont };
+    }
+
+    // Apply header row style
+    for (let c = 0; c < COL_COUNT; c++) {
+      const ref = XLSX.utils.encode_cell({ r: headerRowIdx, c });
+      if (ws[ref]) {
+        ws[ref].s = {
+          fill: headerFill,
+          font: headerFont,
+          border: borders,
+          alignment: { horizontal: 'left' },
+        };
+      }
+    }
+
+    // Apply alternating row fill + borders to data rows
+    for (let r = headerRowIdx + 1; r < totalRowIdx; r++) {
+      const isAlt = (r - headerRowIdx) % 2 === 0;
+      for (let c = 0; c < COL_COUNT; c++) {
+        const ref = XLSX.utils.encode_cell({ r, c });
+        if (!ws[ref]) ws[ref] = { t: 's', v: '' };
+        ws[ref].s = {
+          border: borders,
+          ...(isAlt ? { fill: altFill } : {}),
+          alignment: { wrapText: true, vertical: 'top' },
+        };
+      }
+    }
+
+    // Total row style
+    for (let c = 0; c < COL_COUNT; c++) {
+      const ref = XLSX.utils.encode_cell({ r: totalRowIdx, c });
+      if (!ws[ref]) ws[ref] = { t: 's', v: '' };
+      ws[ref].s = {
+        font: { bold: true, sz: 11 },
+        border: { top: { style: 'medium', color: { rgb: '000000' } }, bottom: { style: 'double', color: { rgb: '000000' } } },
+      };
+    }
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Statement');
+
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = `task_statement_${date_from}_to_${date_to}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(buf));
+  } catch (err: any) {
+    console.error('[statement-excel] Error:', err);
     res.status(500).json({ status: 0, message: err.message });
   }
 });

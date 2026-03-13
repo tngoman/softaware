@@ -19,6 +19,7 @@ import { useAppSettings } from '../../hooks/useAppSettings';
 import NotificationDropdown from '../Notifications/NotificationDropdown';
 import UserAccountMenu from '../User/UserAccountMenu';
 import GlobalCallProvider from '../CallProvider/GlobalCallProvider';
+import ThemeToggle from '../UI/ThemeToggle';
 
 interface PortalLayoutProps {
   children: ReactNode;
@@ -86,13 +87,13 @@ const SidebarSection: React.FC<{ section: NavSection; pathname: string }> = ({
     <div className="mb-1">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700 transition-colors"
+        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
       >
         <span>{section.label}</span>
         {isOpen ? (
-          <ChevronDownIcon className="h-3.5 w-3.5 text-gray-400" />
+          <ChevronDownIcon className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
         ) : (
-          <ChevronRightIcon className="h-3.5 w-3.5 text-gray-400" />
+          <ChevronRightIcon className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
         )}
       </button>
       {isOpen && (
@@ -109,12 +110,12 @@ const SidebarSection: React.FC<{ section: NavSection; pathname: string }> = ({
                 className={`${
                   isActive
                     ? 'bg-picton-blue text-white shadow-sm'
-                    : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 hover:text-gray-900 dark:hover:text-gray-100'
                 } group flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-all duration-200`}
               >
                 <item.icon
                   className={`${
-                    isActive ? 'text-white' : 'text-gray-500 group-hover:text-gray-700'
+                    isActive ? 'text-white' : 'text-gray-500 dark:text-gray-400 group-hover:text-gray-700 dark:group-hover:text-gray-200'
                   } mr-3 h-5 w-5 flex-shrink-0`}
                 />
                 {item.name}
@@ -200,7 +201,7 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
   const sidebarContent = (
     <>
       {/* Logo */}
-      <div className="flex flex-shrink-0 items-center px-4 pb-4 border-b border-gray-200">
+      <div className="flex flex-shrink-0 items-center px-4 pb-4 border-b border-gray-200 dark:border-dark-700">
         <Link to="/portal" className="flex items-center">
           {logoUrl ? (
             <img
@@ -210,7 +211,7 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
           ) : (
-            <span className="text-xl font-bold text-gray-900">{siteName || 'Portal'}</span>
+            <span className="text-xl font-bold text-gray-900 dark:text-white">{siteName || 'Portal'}</span>
           )}
         </Link>
       </div>
@@ -229,12 +230,12 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
   );
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-gray-50 dark:bg-dark-900">
       {/* Global incoming-call listener (persists across pages) */}
       <GlobalCallProvider />
       {/* Desktop Sidebar */}
       <div className="hidden md:flex md:w-64 md:flex-col">
-        <div className="flex min-h-0 flex-1 flex-col bg-white border-r border-gray-200 shadow-sm">
+        <div className="flex min-h-0 flex-1 flex-col bg-white dark:bg-dark-850 border-r border-gray-200 dark:border-dark-700 shadow-sm">
           <div className="flex flex-1 flex-col overflow-y-auto pt-5 pb-4">
             {sidebarContent}
           </div>
@@ -245,9 +246,9 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
       {mobileOpen && (
         <div className="fixed inset-0 z-50 md:hidden">
           <div className="fixed inset-0 bg-black/30" onClick={() => setMobileOpen(false)} />
-          <div className="fixed inset-y-0 left-0 w-64 bg-white shadow-xl flex flex-col pt-5 pb-4 overflow-y-auto">
+          <div className="fixed inset-y-0 left-0 w-64 bg-white dark:bg-dark-850 shadow-xl flex flex-col pt-5 pb-4 overflow-y-auto">
             <div className="absolute top-3 right-3">
-              <button onClick={() => setMobileOpen(false)} className="p-1 text-gray-400 hover:text-gray-600">
+              <button onClick={() => setMobileOpen(false)} className="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300">
                 <XMarkIcon className="h-5 w-5" />
               </button>
             </div>
@@ -284,18 +285,19 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
         )}
 
         {/* Top header */}
-        <header className="bg-white shadow-md border-b-2 border-picton-blue/20">
+        <header className="bg-white dark:bg-dark-850 shadow-md border-b-2 border-picton-blue/20 dark:border-primary-700/30">
           <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-3">
               <button
-                className="md:hidden p-1.5 text-gray-500 hover:text-gray-700"
+                className="md:hidden p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
                 onClick={() => setMobileOpen(true)}
               >
                 <Bars3Icon className="h-6 w-6" />
               </button>
-              <h2 className="text-xl font-bold text-gray-900">{resolveTitle()}</h2>
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">{resolveTitle()}</h2>
             </div>
             <div className="flex items-center space-x-3">
+              <ThemeToggle />
               <NotificationDropdown />
               <UserAccountMenu user={user} onLogout={handleLogout} />
             </div>

@@ -31,13 +31,15 @@ export class AuthModel {
       requires_2fa?: boolean;
       two_factor_method?: string;
       temp_token?: string;
-      data: { token: string; user: User; requires_2fa?: boolean; two_factor_method?: string; temp_token?: string };
+      challenge_id?: string;
+      data: { token: string; user: User; requires_2fa?: boolean; two_factor_method?: string; temp_token?: string; challenge_id?: string };
     }>('/auth/login', { email, password, rememberMe });
     // Hoist 2FA fields into data so callers can find them in one place
     if (response.data.requires_2fa && response.data.data) {
       response.data.data.requires_2fa = true;
       response.data.data.two_factor_method = response.data.two_factor_method;
       response.data.data.temp_token = response.data.temp_token;
+      response.data.data.challenge_id = response.data.challenge_id;
     } else if (response.data.requires_2fa) {
       // Backend may omit `data` entirely on a 2FA challenge
       (response.data as any).data = {
@@ -46,6 +48,7 @@ export class AuthModel {
         requires_2fa: true,
         two_factor_method: response.data.two_factor_method,
         temp_token: response.data.temp_token,
+        challenge_id: response.data.challenge_id,
       };
     }
     return response.data;
@@ -54,7 +57,7 @@ export class AuthModel {
   /**
    * Register a new user
    */
-  static async register(data: { name: string; email: string; password: string }) {
+  static async register(data: { name: string; email: string; password: string; company_name?: string; phone?: string; address?: string }) {
     const response = await api.post<{ success: boolean; message: string; data: { token: string; user: User } }>(
       '/auth/register',
       data
@@ -306,11 +309,40 @@ export class AuthModel {
     return response.data;
   }
 
+  /** Poll push-to-approve challenge status (called during login when challenge_id exists) */
+  static async pollPushStatus(tempToken: string, challengeId: string): Promise<{
+    status: 'pending' | 'completed' | 'denied' | 'expired' | 'not_found';
+    token?: string;
+    user?: User;
+  }> {
+    const response = await api.post<{
+      success: boolean;
+      data: { status: string; token?: string; user?: User };
+      token?: string;
+      user?: User;
+    }>('/auth/2fa/push-status', { temp_token: tempToken, challenge_id: challengeId });
+    const data = response.data.data;
+    return {
+      status: data.status as any,
+      token: data.token || response.data.token,
+      user: data.user || response.data.user,
+    };
+  }
+
   /** Resend OTP (for email/SMS methods) */
   static async resend2FAOtp(tempToken: string) {
     const response = await api.post<{ success: boolean; message: string }>(
       '/auth/2fa/send-otp',
       { temp_token: tempToken }
+    );
+    return response.data;
+  }
+
+  /** Send alternative OTP (e.g. email) when primary method is unavailable (push/TOTP not working) */
+  static async sendAltOtp(tempToken: string, method: 'email' | 'sms' = 'email') {
+    const response = await api.post<{ success: boolean; message: string }>(
+      '/auth/2fa/send-alt-otp',
+      { temp_token: tempToken, method }
     );
     return response.data;
   }
@@ -348,6 +380,7 @@ export class AuthModel {
   static async getMobileAuthQR(): Promise<{
     has_pending: boolean;
     challenge_id?: string;
+    challenge_code?: string;
     qr_code?: string;
     expires_at?: string;
   }> {
@@ -361,5 +394,71 @@ export class AuthModel {
       `/auth/2fa/mobile-qr/status/${challengeId}`
     );
     return response.data.data;
+  }
+
+  // ─── PIN-Based Quick Login ──────────────────────────────────────
+
+  /** Check if current user has a PIN set (requires auth) */
+  static async getPinStatus(): Promise<{ has_pin: boolean }> {
+    const response = await api.get<{ success: boolean; data: { has_pin: boolean } }>('/auth/pin/status');
+    return response.data.data;
+  }
+
+  /** Set or update the user's PIN (requires auth + password) */
+  static async setPin(pin: string, password: string): Promise<void> {
+    await api.post('/auth/pin/set', { pin, password });
+  }
+
+  /** Remove the user's PIN (requires auth) */
+  static async removePin(): Promise<void> {
+    await api.delete('/auth/pin');
+  }
+
+  /** Check if an email has PIN login enabled (public, no auth needed) */
+  static async checkPinByEmail(email: string): Promise<{ has_pin: boolean }> {
+    const response = await api.get<{ success: boolean; data: { has_pin: boolean } }>(
+      `/auth/pin/check/${encodeURIComponent(email)}`
+    );
+    return response.data.data;
+  }
+
+  /** Quick login with email + PIN (public, no auth needed) */
+  static async loginWithPin(email: string, pin: string) {
+    const response = await api.post<{
+      success: boolean;
+      message: string;
+      requires_2fa?: boolean;
+      two_factor_method?: string;
+      temp_token?: string;
+      challenge_id?: string;
+      data: { token: string; user: User; requires_2fa?: boolean; two_factor_method?: string; temp_token?: string; challenge_id?: string };
+    }>('/auth/pin/verify', { email, pin });
+    // Hoist 2FA fields into data (same pattern as login)
+    if (response.data.requires_2fa && response.data.data) {
+      response.data.data.requires_2fa = true;
+      response.data.data.two_factor_method = response.data.two_factor_method;
+      response.data.data.temp_token = response.data.temp_token;
+      response.data.data.challenge_id = response.data.challenge_id;
+    } else if (response.data.requires_2fa) {
+      (response.data as any).data = {
+        token: '',
+        user: {} as User,
+        requires_2fa: true,
+        two_factor_method: response.data.two_factor_method,
+        temp_token: response.data.temp_token,
+        challenge_id: response.data.challenge_id,
+      };
+    }
+    return response.data;
+  }
+
+  /** Store the last logged-in email for PIN quick login */
+  static setLastEmail(email: string) {
+    localStorage.setItem('last_login_email', email);
+  }
+
+  /** Get the last logged-in email */
+  static getLastEmail(): string | null {
+    return localStorage.getItem('last_login_email');
   }
 }

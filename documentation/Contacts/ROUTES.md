@@ -2,11 +2,12 @@
 
 ## Route Registration
 
-**Backend mount point**: `/v1/contacts` (authenticated) and `/v1/leads` (public)
-
+**Backend mount points**:
 ```
-src/routes/contacts.ts       → router mounted at /v1/contacts (authMiddleware)
-src/routes/contactFormRouter.ts → router mounted at /v1/leads (NO auth)
+src/routes/contacts.ts           → /v1/contacts       (authMiddleware)
+src/routes/contactFormRouter.ts  → /v1/leads           (NO auth)
+src/routes/adminClientManager.ts → /admin/clients      (authMiddleware + requireAdmin)
+src/routes/siteBuilder.ts        → /v1/sites           (authMiddleware) — preview endpoint relevant
 ```
 
 ---
@@ -138,9 +139,107 @@ ORDER BY i.date DESC
 
 ---
 
+## Admin Routes (adminClientManager.ts)
+
+All routes require `requireAuth` + `requireAdmin`.
+
+### 8. GET `/admin/clients/overview`
+**Purpose**: Aggregated stats + full entity lists for the 5-tab Contacts hub  
+**Auth**: JWT + admin role required
+
+**Flow**:
+1. Query `users` excluding admin/staff via `NOT IN` subquery on `user_roles`
+2. Query `assistants` with `LEFT JOIN users`, include `personality`, `primary_goal`, `business_type`, `knowledge_categories`, plus subqueries:
+   - `knowledge_source_count`: `SELECT COUNT(DISTINCT ak.source) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci`
+   - `knowledge_chunk_count`: `SELECT COUNT(*) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci`
+3. Query `widget_clients` with `LEFT JOIN users`
+4. Query `generated_sites` with `LEFT JOIN users`, include `logo_url`, `hero_image_url`, `about_us`, `services`, `last_deployed_at`, `generated_html IS NOT NULL AS has_html`, `LENGTH(generated_html) AS html_size`
+5. Query enterprise endpoints from SQLite via `getAllEndpoints()`
+6. Compute aggregate stats (totals, active counts, contact counts with `COALESCE(contact_type, 1)`)
+7. Return `{ success: true, data: { stats, clients, assistants, widgets, landingPages, enterpriseEndpoints } }`
+
+**Collation note**: Subqueries on `assistant_knowledge` must use `a.id COLLATE utf8mb4_0900_ai_ci` because `assistants.id` is `utf8mb4_unicode_ci` while `assistant_knowledge.assistant_id` is `utf8mb4_0900_ai_ci`.
+
+---
+
+### 9. GET `/admin/clients/:userId`
+**Purpose**: Single client detail with enriched assistant and landing page data — used by ContactDetails.tsx  
+**Auth**: JWT + admin role required
+
+**Flow**:
+1. Query `users` table for the specified `userId`
+2. If not found → `404 { success: false, error: 'User not found' }`
+3. Query `assistants` with enriched fields:
+   - `name`, `description`, `status`, `tier`, `pages_indexed`
+   - `business_type`, `personality`, `primary_goal`, `website`, `lead_capture_email`
+   - `knowledge_categories` (JSON)
+   - `knowledge_source_count`: `SELECT COUNT(DISTINCT ak.source) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci`
+   - `knowledge_chunk_count`: `SELECT COUNT(*) FROM assistant_knowledge ak WHERE ak.assistant_id = a.id COLLATE utf8mb4_0900_ai_ci`
+4. Query `generated_sites` with:
+   - `business_name`, `tagline`, `contact_email`, `contact_phone`, `status`, `theme_color`
+   - `logo_url`, `hero_image_url`, `about_us`, `services`
+   - `ftp_server`, `ftp_directory`, `ftp_protocol`, `last_deployed_at`
+   - `has_html` (boolean), `html_size` (bytes)
+5. Return `{ success: true, client, assistants, landingPages }`
+
+**Note**: This endpoint does NOT return widgets (removed). Replaces older version that only returned basic assistant data + widgets.
+
+---
+
+### 10. PATCH `/admin/clients/:userId/status`
+**Purpose**: Master kill switch — update user account status  
+**Auth**: JWT + admin role required  
+**Body**: `{ status: 'active' | 'suspended' | 'demo_expired' }`
+
+---
+
+### 11. PATCH `/admin/clients/assistants/:assistantId/status`
+**Purpose**: Update individual assistant status  
+**Auth**: JWT + admin role required
+
+---
+
+### 12. PATCH `/admin/clients/widgets/:widgetId/status`
+**Purpose**: Update individual widget status  
+**Auth**: JWT + admin role required
+
+---
+
+### Enterprise Endpoint Admin Routes (in adminClientManager.ts)
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `POST` | `/admin/clients/endpoints` | Create new enterprise endpoint |
+| `PUT` | `/admin/clients/endpoints/:id` | Update endpoint config |
+| `DELETE` | `/admin/clients/endpoints/:id` | Delete endpoint |
+| `PATCH` | `/admin/clients/endpoints/:id/status` | Toggle endpoint status (active/paused) |
+| `GET` | `/admin/clients/endpoints/:id/logs` | Fetch request logs for endpoint |
+
+---
+
+## Site Preview Route (siteBuilder.ts)
+
+### 13. GET `/v1/sites/:siteId/preview`
+**Purpose**: Serve generated HTML for landing page preview  
+**Auth**: JWT required (via header OR `?token=` query param)
+
+**Flow**:
+1. Extract JWT from `Authorization` header or `req.query.token`
+2. Verify token, extract `userId`
+3. Query `generated_sites` for `siteId`
+4. **Owner check**:
+   - If `site.user_id === userId` → allowed
+   - Else: query `user_roles` + `roles` tables for admin/super_admin role
+   - If admin → allowed
+   - Else → `403 { error: 'Access denied' }`
+5. Remove CSP and X-Frame-Options headers (required for iframe preview)
+6. Return `200` with `generated_html` content, `Content-Type: text/html`
+
+---
+
 ## Public Routes (contactFormRouter.ts)
 
-### 8. POST `/v1/leads/submit`
+### 14. POST `/v1/leads/submit`
 **Purpose**: Public contact form submission  
 **Auth**: NONE  
 **Rate limit**: 5 requests/minute per IP (in-memory Map)
@@ -168,7 +267,7 @@ ORDER BY i.date DESC
 
 ---
 
-### 9. GET `/v1/leads/test`
+### 15. GET `/v1/leads/test`
 **Purpose**: Health check endpoint  
 **Auth**: NONE  
 **Response**: `200 { success: true, message: 'Contact form router is working' }`
@@ -179,22 +278,30 @@ ORDER BY i.date DESC
 
 | URL Path | Component | File |
 |----------|-----------|------|
-| `/contacts` | `Contacts` | `src/pages/Contacts.tsx` |
-| `/contacts/:id` | `ContactDetails` | `src/pages/ContactDetails.tsx` |
+| `/contacts` | `Contacts` | `src/pages/contacts/Contacts.tsx` |
+| `/contacts/:id` | `ContactDetails` | `src/pages/contacts/ContactDetails.tsx` |
 
 ---
 
 ## Frontend → Backend API Calls
 
-| Frontend Action | Model Method | HTTP Request | Backend Handler |
+| Frontend Action | Model / Method | HTTP Request | Backend Handler |
 |----------------|--------------|--------------|-----------------|
 | Load customer/supplier list | `ContactModel.getAll(type, page, search)` | `GET /v1/contacts?page=&search=` | `contacts.ts` GET `/` |
 | View contact detail | `ContactModel.getById(id)` | `GET /v1/contacts/:id` | `contacts.ts` GET `/:id` |
 | Create contact | `ContactModel.create(data)` | `POST /v1/contacts` | `contacts.ts` POST `/` |
 | Edit contact | `ContactModel.update(id, data)` | `PUT /v1/contacts/:id` | `contacts.ts` PUT `/:id` |
 | Delete contact | `ContactModel.delete(id)` | `DELETE /v1/contacts/:id` | `contacts.ts` DELETE `/:id` |
-| Load statement data | `ContactModel.getStatementData(id)` | `GET /v1/contacts/:id/statement` | *(not in current router — may be a separate route or unimplemented)* |
-| Download statement PDF | `ContactModel.downloadStatement(id, params)` | `GET /v1/contacts/:id/statement/download` | *(not in current router — may be a separate route or unimplemented)* |
+| Load overview data | `AdminClientModel.getOverview()` | `GET /admin/clients/overview` | `adminClientManager.ts` GET `/overview` |
+| Toggle endpoint status | `AdminEnterpriseModel.updateStatus(id, status)` | `PATCH /admin/clients/endpoints/:id/status` | `adminClientManager.ts` PATCH `/endpoints/:id/status` |
+| Fetch endpoint logs | `AdminEnterpriseModel.getLogs(id)` | `GET /admin/clients/endpoints/:id/logs` | `adminClientManager.ts` GET `/endpoints/:id/logs` |
+| Preview landing page | Direct `window.open()` | `GET /v1/sites/:siteId/preview?token=JWT` | `siteBuilder.ts` GET `/:siteId/preview` |
+| Chat with assistant | Direct `fetch()` SSE | `POST /v1/assistants/:id/chat` | `assistantRoutes.ts` |
+| Load client detail (ContactDetails) | `AdminClientModel.getClient(userId)` | `GET /admin/clients/:userId` | `adminClientManager.ts` GET `/:userId` |
+| Chat with assistant (ContactDetails) | Direct `fetch()` SSE | `POST /v1/assistants/:id/chat` | `assistantRoutes.ts` |
+| Preview landing page (ContactDetails) | Direct `window.open()` | `GET /v1/sites/:siteId/preview?token=JWT` | `siteBuilder.ts` GET `/:siteId/preview` |
+| Load statement data | `ContactModel.getStatementData(id)` | `GET /v1/contacts/:id/statement-data` | *(separate route)* |
+| Download statement PDF | `ContactModel.downloadStatement(id, params)` | `GET /v1/contacts/:id/statement/download` | *(separate route)* |
 
 ---
 
@@ -207,6 +314,12 @@ ORDER BY i.date DESC
 | Edit contact | `contacts.edit` | Frontend `<Can>` only |
 | Delete contact | `contacts.delete` | Frontend `<Can>` only |
 | View contact details | `contacts.view` | Frontend `<Can>` only |
+| Admin overview/tabs | Admin role | `requireAdmin` middleware |
+| Site preview (own) | JWT owner | Backend `site.user_id === userId` |
+| Site preview (admin) | Admin role | Backend `user_roles` + `roles` check |
+| Endpoint management | Admin role | `requireAdmin` middleware |
 | Submit contact form | *(none)* | Public endpoint |
 
-> ⚠️ **No backend permission enforcement exists.** All authorization is frontend-only.
+> ⚠️ **Contact CRUD has no backend permission enforcement.** All authorization is frontend-only.  
+> ✅ **Admin routes** enforce role via `requireAdmin` middleware.  
+> ✅ **Site preview** enforces ownership OR admin role at the backend level.

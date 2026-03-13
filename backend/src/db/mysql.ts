@@ -249,46 +249,6 @@ export interface api_keys {
   expiresAt?: Date;
 }
 
-export interface credit_balances {
-  id: string;
-  teamId: string;
-  balance: number;
-  totalPurchased: number;
-  totalUsed: number;
-  lowBalanceThreshold: number;
-  lowBalanceAlertSent: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface credit_transactions {
-  id: string;
-  creditBalanceId: string;
-  type: 'PURCHASE' | 'USAGE' | 'REFUND' | 'BONUS' | 'ADJUSTMENT';
-  amount: number;
-  requestType?: string;
-  requestMetadata?: any;
-  paymentProvider?: 'PAYFAST' | 'YOCO' | 'MANUAL';
-  externalPaymentId?: string;
-  description?: string;
-  balanceAfter: number;
-  createdAt: Date;
-}
-
-export interface credit_packages {
-  id: string;
-  name: string;
-  description?: string;
-  credits: number;
-  price: number;
-  bonusCredits: number;
-  isActive: boolean;
-  displayOrder: number;
-  featured: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
 export interface ai_model_config {
   id: string;
   teamId: string;

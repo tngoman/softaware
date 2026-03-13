@@ -186,8 +186,8 @@ const CreateQuotation: React.FC = () => {
   const handleSelectPricingItem = (pricingItem: PricingItem) => {
     if (currentItemIndex !== null) {
       const cost = pricingItem.pricing_price;
-      // Calculate selling price with markup
-      const sellingPrice = cost * (1 + markupPercentage / 100);
+      // Calculate selling price with margin-based markup: price = (cost * 100) / (100 - markup%)
+      const sellingPrice = (cost * 100) / (100 - markupPercentage);
       
       setValue(`items.${currentItemIndex}.item_product`, pricingItem.pricing_item);
       setValue(`items.${currentItemIndex}.item_cost`, cost);
@@ -541,10 +541,10 @@ const CreateQuotation: React.FC = () => {
                           // Update the cost value
                           setValue(`items.${index}.item_cost`, Number(e.target.value) || 0);
                           
-                          // Recalculate selling price based on cost + markup
+                          // Recalculate selling price with margin-based markup: price = (cost * 100) / (100 - markup%)
                           const cost = Number(e.target.value) || 0;
                           if (cost > 0) {
-                            const sellingPrice = cost * (1 + markupPercentage / 100);
+                            const sellingPrice = (cost * 100) / (100 - markupPercentage);
                             setValue(`items.${index}.item_price`, Number(sellingPrice.toFixed(2)));
                           }
                           

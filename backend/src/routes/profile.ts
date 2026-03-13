@@ -54,12 +54,16 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
       );
     }
 
-    // Get credit balance
+    // Get credit balance (from package system)
     let credits = null;
     if (membership) {
+      // Look up credits via contact_packages linked to the user's team contact
       credits = await db.queryOne<any>(
-        'SELECT balance, totalPurchased, totalUsed FROM credit_balances WHERE teamId = ?',
-        [membership.teamId]
+        `SELECT COALESCE(SUM(credits_balance), 0) AS balance,
+                COALESCE(SUM(credits_used), 0) AS totalUsed
+         FROM contact_packages
+         WHERE status IN ('ACTIVE', 'TRIAL')`,
+        []
       );
     }
 
@@ -95,7 +99,7 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
       credits: credits
         ? {
             balance: credits.balance,
-            totalPurchased: credits.totalPurchased,
+            totalPurchased: 0,
             totalUsed: credits.totalUsed,
           }
         : null,

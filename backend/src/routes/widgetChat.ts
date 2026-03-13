@@ -5,6 +5,7 @@ import { enforceMessageLimit } from '../middleware/usageTracking.js';
 import { checkWidgetStatus } from '../middleware/statusCheck.js';
 import { parseLeadCapture, storeCapturedLead, sendLeadNotification, buildLeadCapturePrompt } from '../services/leadCaptureService.js';
 import { chatCompletion } from '../services/assistantAIRouter.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 import axios from 'axios';
 
 const router = express.Router();
@@ -178,6 +179,13 @@ Answer the user's question based on this context. If the context doesn't contain
       response.leadCaptured = true;
       response.confirmation = "Thank you! We've received your information and will be in touch shortly.";
     }
+
+    // ── Anonymized telemetry (fire-and-forget) ──
+    // Widget clients don't have a per-user opt-out — only paid tiers can opt out
+    // via their linked user account. For now, log all widget chats.
+    logAnonymizedChat(clientId, message, assistantMessage, {
+      source: 'widget', model: modelToUse, provider: providerUsed,
+    });
 
     return res.json(response);
 

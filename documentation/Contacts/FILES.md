@@ -21,62 +21,122 @@
 
 ---
 
+### `/var/opt/backend/src/routes/adminClientManager.ts` (451 LOC)
+**Purpose**: Admin-only overview API returning aggregated stats and full entity lists for the 5-tab Contacts hub, plus per-client detail for ContactDetails.
+
+| Section | Lines | Description |
+|---------|-------|-------------|
+| Imports | 1–18 | Express, Zod, `db`, `requireAuth`, `requireAdmin`, `signAccessToken`, `buildFrontendUser`, `getAllEndpoints` (SQLite) |
+| Validation schemas | 27–40 | `statusSchema` (active/suspended/demo_expired), `updateAccountStatusSchema`, `updateAssistantStatusSchema`, `updateWidgetStatusSchema` |
+| `GET /overview` | 45–130 | **Main overview endpoint**: queries users, assistants (with `knowledge_categories`, `knowledge_source_count`, `knowledge_chunk_count` subqueries), widgets, landing pages (with `logo_url`, `hero_image_url`, `about_us`, `services`, `has_html`, `html_size`), enterprise endpoints (SQLite). Computes aggregate stats. Uses `COLLATE utf8mb4_0900_ai_ci` on assistant_knowledge subqueries. |
+| `GET /:userId` | 155–207 | **Per-client detail**: enriched assistant data (personality, primary_goal, business_type, website, lead_capture_email, knowledge_categories, knowledge_source_count, knowledge_chunk_count) + landing pages (logo, hero, about, services, FTP details, has_html, html_size). No widgets. Used by ContactDetails.tsx. |
+| `PATCH /:userId/status` | 209–240 | Master kill switch: update user's `account_status` |
+| `PATCH /assistants/:assistantId/status` | 242–275 | Update individual assistant status |
+| `PATCH /widgets/:widgetId/status` | 277–310 | Update individual widget status |
+| Enterprise endpoint routes | 310–451 | CRUD for enterprise endpoints: create, update, delete, status toggle, logs |
+
+**Key queries**:
+- Users: excludes admin/staff roles via `NOT IN` subquery on `user_roles`
+- Assistants (overview): `LEFT JOIN users`, includes `personality`, `primary_goal`, `business_type`, `knowledge_categories`, plus subqueries for `COUNT(DISTINCT ak.source)` and `COUNT(*)` from `assistant_knowledge`
+- Assistants (per-client `GET /:userId`): same enriched fields + `website`, `lead_capture_email`, `knowledge_source_count`, `knowledge_chunk_count` (with COLLATE). No widgets returned.
+- Landing pages: includes `logo_url`, `hero_image_url`, `about_us`, `services`, `last_deployed_at`, `generated_html IS NOT NULL AS has_html`, `LENGTH(generated_html) AS html_size`, `ftp_server`, `ftp_directory`, `ftp_protocol`
+- Contact stats: `COALESCE(contact_type, 1) = 1` for customers, `contact_type = 2` for suppliers
+
+---
+
+### `/var/opt/backend/src/routes/siteBuilder.ts` (1341 LOC) — Preview endpoint
+**Purpose**: Full site builder with generation, deployment, and preview. Relevant to Contacts module for the **admin preview bypass**.
+
+| Section | Lines | Description |
+|---------|-------|-------------|
+| `GET /:siteId/preview` | 218–260 | Serves generated HTML. Auth via header or `?token=` query param. **Admin bypass**: if `site.user_id !== userId`, checks `user_roles` for admin/super_admin role before returning 403. Removes CSP and X-Frame-Options headers for preview rendering. |
+
+---
+
 ### `/var/opt/backend/src/routes/contactFormRouter.ts` (215 LOC)
 **Purpose**: Public (no auth) endpoint for website contact form submissions with rate limiting and email forwarding.
 
 | Section | Lines | Description |
 |---------|-------|-------------|
 | Imports | 1–4 | Express, `db`, `env`, `nodemailer` |
-| Rate limit setup | 6–30 | In-memory `Map<IP, timestamps[]>`. 5 requests/minute per IP. Cleanup every 5 minutes. |
-| `POST /v1/leads/submit` | 32–185 | Full contact form handler: rate limit check → honeypot bot detection → field validation → email regex validation → site owner lookup (`generated_sites` → `widget_clients` → `users`) → nodemailer SMTP send → success response. |
-| `GET /v1/leads/test` | 187–215 | Health check endpoint returning rate limit config. |
-
-**Key patterns**:
-- Honeypot field: if `honeypot` is filled, silently returns success (drops spam)
-- Owner lookup cascade: `generated_sites.contact_email` → `users.email` via `user_id` → `widget_clients.user_id` → `users.email`
-- SMTP config from env: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
-- HTML + plain text email with reply-to set to submitter's email
+| Rate limit setup | 6–30 | In-memory `Map<IP, timestamps[]>`. 5 requests/minute per IP. |
+| `POST /v1/leads/submit` | 32–185 | Full contact form handler: rate limit → honeypot → validation → email regex → site owner lookup cascade → SMTP send → success. |
+| `GET /v1/leads/test` | 187–215 | Health check endpoint. |
 
 ---
 
 ## Frontend Files
 
-### `/var/opt/frontend/src/pages/Contacts.tsx` (510 LOC)
-**Purpose**: Main contacts page with customer/supplier tabs, search, DataTable, and inline CRUD form.
+### `/var/opt/frontend/src/pages/contacts/Contacts.tsx` (1431 LOC)
+**Purpose**: 5-tab admin hub — the central management interface for all client assets.
 
-| Section | Lines | Description |
+| Section | Lines (approx) | Description |
 |---------|-------|-------------|
-| Imports | 1–12 | React, Router, Heroicons, TanStack Table, models, store, types, UI components, Can |
-| State | 14–35 | `activeTab` (customers/suppliers), `showForm`, `editingContact`, `loading`, `pagination`, `search`, `formData` |
-| URL edit handling | 37–55 | Reads `?edit=` query param or `:id` route param to pre-populate edit form |
-| `loadContacts()` | 57–85 | Calls `ContactModel.getAll(activeTab, params)`. Stores in Zustand (`setCustomers`/`setSuppliers`). |
-| `handleSubmit()` | 95–120 | Create or update via `ContactModel`. Shows SweetAlert success/error. |
-| `handleDelete()` | 130–145 | `window.confirm()` → `ContactModel.delete()`. |
-| Table columns | 147–235 | TanStack column defs: Name (with icon), Email (mailto), Phone (tel), VAT, Actions (View/Edit/Delete with `<Can>` gates) |
-| Form view | 237–370 | 3-column grid form: Name, Contact Person, Type (select), Email, Phone, Alt Phone, VAT, Address (textarea), Notes (textarea). Cancel/Submit buttons. |
-| List view | 372–510 | Gradient header with search + "Add New" button, customer/supplier tabs with counts, `<DataTable>` with server-side pagination. Wrapped in `<Can permission="contacts.view">`. |
+| Imports | 1–20 | React, Router, Heroicons (24+ icons), TanStack Table, models (Contact, AdminClient, AdminEnterprise), store, types, UI components, SweetAlert2, `API_BASE_URL` |
+| Type & StatusBadge | 22–45 | `TabKey` union type, inline `StatusBadge` component with icon/color map for active/deployed/paused/suspended/generating/failed |
+| State declarations | 46–95 | `activeTab`, `showForm`, `editingContact`, pagination, search, `overviewData`, chat modal state (messages, input, streaming, refs), embed modal state, endpoint logs state, expanded endpoint state |
+| `loadContacts()` | ~96–120 | Server-side paginated contacts via `ContactModel.getAll()` |
+| `loadOverviewData()` | ~121–135 | Calls `AdminClientModel.getOverview()`, sets `overviewData` |
+| `handleSubmit()` | ~136–160 | Contact create/update via `ContactModel` |
+| `handleDelete()` | ~161–180 | Contact soft-delete with SweetAlert confirmation |
+| Table columns | ~181–450 | TanStack column defs for customer/supplier DataTable |
+| Enterprise helpers | ~451–475 | `copyWebhookUrl()`, `handleEndpointStatusToggle()` |
+| Tab definitions | ~476–485 | 5 tabs with icons and counts from overview stats |
+| **`renderAssistants()`** | ~486–660 | Rich card grid: parses `knowledge_categories` JSON, calculates health score, renders 2×2 info grid (Personality/Primary Goal/Business Type/Pages Indexed), Knowledge Health Score with progress bar + checklist, Knowledge Base stats (Sources/Pages/Chunks), owner info, Chat/Embed/Link buttons |
+| **`renderLandingPages()`** | ~661–830 | Rich card grid: hero image with gradient overlay (or theme color fallback), status + theme swatch, tagline, stats row (HTML size/services/deployed), info grid (contact/phone/deployment), Preview button (JWT-authenticated), Live Site link, ID copy |
+| **`renderEndpoints()`** | ~831–1050 | Rich card grid: LLM config grid (provider/model/temp/tokens), stats row (requests/target API/tools), webhook URL box, expandable system prompt, action buttons (Webhook copy/Logs/Pause-Activate/More-Less), **logs modal** with payload viewer |
+| Contact form view | ~1051–1170 | 3-column CRUD form for contacts |
+| Main list view | ~1171–1431 | Gradient header, search bar, 5 tab navigation with counts, conditional tab content rendering |
+
+**Chat Modal** (embedded in component): SSE streaming via `fetch()` to `/v1/assistants/:id/chat`, conversation history persisted in `chatHistoryRef`, auto-scroll, message rendering with user/assistant avatars.
+
+**Embed Modal** (embedded in component): Generates `<script>` embed code and direct chat URL.
+
+**Endpoint Logs Modal** (embedded in component): Fetches logs via `AdminEnterpriseModel.getLogs()`, displays timestamp/duration/status per log entry, expandable JSON payload viewer.
 
 ---
 
-### `/var/opt/frontend/src/pages/ContactDetails.tsx` (629 LOC)
-**Purpose**: Rich contact detail page with financial overview, invoices, quotations, and account statement.
+### `/var/opt/frontend/src/pages/contacts/ContactDetails.tsx` (1322 LOC)
+**Purpose**: Rich contact detail page with 6-tab interface — financial overview, invoices, quotations, statement, plus AI-enriched assistants and landing pages tabs filtered by the contact's linked user.
+
+| Section | Lines (approx) | Description |
+|---------|-------|-------------|
+| Imports | 1–46 | React (useState, useEffect, useRef), Router, Heroicons (30+ icons), models (Contact, Invoice, Quotation, AdminClient, Auth), store, types, UI components, formatters, `API_BASE_URL`, SweetAlert2 |
+| Interfaces | 48–72 | `Transaction`, `StatementData` (with aging analysis) |
+| StatusBadge component | 74–88 | Inline status badge with icon/color map for active/suspended/demo_expired |
+| State declarations | 90–115 | `contact`, `statementData`, `invoices`, `quotations`, `loading`, `activeTab` (6-tab union), `clientDetail`, `linkedUserId`, chat modal state (messages/input/streaming/refs), embed modal state |
+| Data loading | 117–200 | Loads contact + invoices + quotations + statement + linked user lookup (`users.contact_id`) + `AdminClientModel.getClient(userId)` for enriched AI data |
+| Chat/embed helpers | 200–340 | `sendChatMessage()` (SSE streaming via fetch), `handleChatKeyDown()`, `getEmbedCode()`, `copyToClipboard()`, `parseKnowledgeCategories()`, `formatSize()` |
+| Financial calculations | 340–400 | `calculateTotals()` for overview stats |
+| Header | 515–600 | Gradient banner with contact info, user avatar, company details |
+| Tab navigation | 630–690 | 6-tab bar: Overview, Invoices, Quotations, Statement, Assistants (count badge), Landing Pages (count badge) |
+| Overview tab | 700–780 | Financial summary cards + recent invoices table |
+| Invoices tab | 780–830 | Full invoices DataTable |
+| Quotations tab | 830–860 | Full quotations DataTable |
+| **Assistants tab** | 860–1030 | Rich card grid: 2×2 info grid (Personality/Primary Goal/Business Type/Pages Indexed), Knowledge Health Score (progress bar + checklist), Knowledge Base stats (Sources/Pages/Chunks), meta info (website, lead capture email, timestamps), status dropdown, Chat/Embed/Link action buttons |
+| **Landing Pages tab** | 1032–1185 | Rich card grid: hero image with gradient overlay (or theme color fallback), status badges + theme swatch, tagline/about, stats grid (HTML size/services/deployed), info grid (contact/phone/FTP deployment), Preview/Live Site/ID action buttons |
+| Supplier placeholder | 1185–1190 | Placeholder for future supplier-specific features |
+| **Chat Modal** | 1192–1275 | Full SSE streaming chat: conversation history, auto-scroll, typing indicators, clear button, message bubbles with user/assistant avatars |
+| **Embed Modal** | 1277–1317 | Embed code snippet (`<script>` tag), direct chat URL, copy button |
+
+**Chat Modal**: SSE streaming via `fetch()` to `/v1/assistants/:id/chat`, conversation history persisted in `chatHistoryRef`, auto-scroll, message rendering with user/assistant avatars.
+
+**Embed Modal**: Generates `<script>` embed code and direct chat URL.
+
+**Data flow**: Contact → `users.contact_id` → `linkedUserId` → `AdminClientModel.getClient(userId)` → `{ client, assistants, landingPages }`
+
+---
+
+### `/var/opt/frontend/src/pages/admin/EnterpriseEndpoints.tsx` (642 LOC)
+**Purpose**: Original standalone enterprise endpoints management page. Full functionality now also available as the Enterprise Endpoints tab in Contacts.tsx.
 
 | Section | Lines | Description |
 |---------|-------|-------------|
-| Imports | 1–25 | React, Router, Heroicons, models (Contact, Invoice, Quotation), UI components, formatters, `API_BASE_URL` |
-| Interfaces | 27–50 | `Transaction` (invoice/payment row), `StatementData` (transactions + closing balance + aging) |
-| State | 52–60 | `contact`, `statementData`, `invoices`, `quotations`, `loading`, `activeTab` (overview/invoices/quotations/statement) |
-| Data loading | 62–105 | `loadContactData()` → loads contact, then if customer: loads invoices (client-side filtered from all), quotations (client-side filtered), and statement data. |
-| `downloadStatement()` | 107–135 | Calls `ContactModel.downloadStatement()`, opens PDF URL in new tab. |
-| `calculateTotals()` | 137–155 | Derives totalInvoiced, totalOutstanding, totalPaid from invoices array. |
-| Table columns | 157–225 | Invoice columns (id, date, due date, amount, status, view) + Quotation columns (id, date, valid until, amount, status, view). |
-| Header | 227–310 | Gradient banner with contact name, type badge, contact person, email/phone/vat/address grid, edit button. |
-| Tab navigation | 312–365 | Overview, Invoices, Quotations, Statement tabs (customers only). |
-| Overview tab | 367–450 | Financial summary card (invoiced/outstanding/paid/counts) + recent invoices (last 5). |
-| Invoices tab | 452–465 | DataTable with invoice columns. |
-| Quotations tab | 467–480 | DataTable with quotation columns. |
-| Statement tab | 482–600 | Transaction table (date/description/debit/credit/balance) with closing balance footer. Download PDF button. Aging data available but displayed in statement context. |
-| Supplier placeholder | 602–629 | Empty state for supplier-type contacts. |
+| StatusBadge | 24–42 | Inline status badge (active/paused/disabled) |
+| State & CRUD | 60–215 | Endpoints list, create/edit form state, save/delete/status toggle handlers |
+| Endpoints table | 216–370 | Professional table with expandable detail rows (system prompt, target API, auth, tools, webhook URL) |
+| Create/Edit modal | 371–580 | Full form: client info (ID/name/linked contact), provider config, LLM config (model/temp/tokens), system prompt, tools config (JSON), target API config |
+| Logs modal | 581–642 | Request logs with timestamp, duration, status, error message, expandable payload |
 
 ---
 
@@ -85,12 +145,10 @@
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `getAll(type?, params?)` | `GET /contacts` | List contacts with pagination. `type` param filters customer/supplier. |
-| `getById(id)` | `GET /contacts/:id` | Single contact. |
-| `create(contact)` | `POST /contacts` | Create contact. |
-| `update(id, contact)` | `PUT /contacts/:id` | Update contact. |
-| `delete(id)` | `DELETE /contacts/:id` | Soft delete contact. |
-| `getStatementData(id)` | `GET /contacts/:id/statement-data` | Statement transactions + aging. |
-| `downloadStatement(id)` | `GET /contacts/:id/statement` | Generate and return PDF path. |
-
-**Exports**: `ContactModel` class.
+| `getAll(type?, params?)` | `GET /contacts` | List contacts with pagination |
+| `getById(id)` | `GET /contacts/:id` | Single contact |
+| `create(contact)` | `POST /contacts` | Create contact |
+| `update(id, contact)` | `PUT /contacts/:id` | Update contact |
+| `delete(id)` | `DELETE /contacts/:id` | Soft delete |
+| `getStatementData(id)` | `GET /contacts/:id/statement-data` | Statement transactions + aging |
+| `downloadStatement(id)` | `GET /contacts/:id/statement` | PDF generation |

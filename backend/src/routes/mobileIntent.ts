@@ -19,6 +19,7 @@ import { HttpError, unauthorized, badRequest, notFound, forbidden } from '../uti
 import { db } from '../db/mysql.js';
 import { getSecret } from '../services/credentialVault.js';
 import { env } from '../config/env.js';
+import { stripMarkdownForSpeech } from '../utils/stripMarkdown.js';
 
 const router = Router();
 
@@ -31,7 +32,7 @@ router.post('/intent', requireAuth, async (req: AuthRequest, res) => {
     const userId = req.userId;
     if (!userId) throw unauthorized('Authentication required.');
 
-    const { text, conversationId, assistantId, language } = req.body as MobileIntentRequest;
+    const { text, conversationId, assistantId, language, image } = req.body as MobileIntentRequest;
 
     // Validate input
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
@@ -39,6 +40,15 @@ router.post('/intent', requireAuth, async (req: AuthRequest, res) => {
     }
     if (text.length > 2000) {
       throw badRequest('Text exceeds maximum length of 2000 characters.');
+    }
+    // Validate image if provided (must be a data URI, max ~10MB base64)
+    if (image) {
+      if (typeof image !== 'string' || !image.startsWith('data:image/')) {
+        throw badRequest('Image must be a base64 data URI (data:image/...).');
+      }
+      if (image.length > 15_000_000) { // ~10MB image → ~13.3MB base64
+        throw badRequest('Image too large. Maximum size is ~10MB.');
+      }
     }
 
     // Verify the user's account is active
@@ -77,7 +87,7 @@ router.post('/intent', requireAuth, async (req: AuthRequest, res) => {
 
     // Process through AI + tools pipeline
     const result = await processMobileIntent(
-      { text: text.trim(), conversationId, assistantId: resolvedAssistantId, language },
+      { text: text.trim(), conversationId, assistantId: resolvedAssistantId, language, image },
       userId,
       userRole,
     );
@@ -85,6 +95,7 @@ router.post('/intent', requireAuth, async (req: AuthRequest, res) => {
     res.json({
       success: true,
       reply: result.reply,
+      tts_text: stripMarkdownForSpeech(result.reply),
       conversationId: result.conversationId,
       toolsUsed: result.toolsUsed,
       data: result.data ?? null,
@@ -253,8 +264,9 @@ router.post('/tts', requireAuth, async (req: AuthRequest, res) => {
       throw badRequest('"text" is required.');
     }
 
-    // Cap at ~4000 chars (OpenAI tts-1 limit is 4096)
-    const cleanText = text.slice(0, 4000).trim();
+    // Strip markdown formatting so TTS doesn't read asterisks, hashes, etc.
+    // Then cap at ~4000 chars (OpenAI tts-1 limit is 4096)
+    const cleanText = stripMarkdownForSpeech(text).slice(0, 4000).trim();
 
     // Use OpenAI key from vault (decrypted), fall back to env
     const apiKey = await getSecret('OpenAI', env.OPENAI || env.OPENAI_API_KEY);

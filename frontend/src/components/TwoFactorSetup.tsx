@@ -11,6 +11,7 @@ import {
   ClipboardDocumentIcon,
 } from '@heroicons/react/24/outline';
 import { AuthModel, TwoFactorStatus, TwoFactorSetupResult } from '../models/AuthModel';
+import { generateTOTP } from '../utils/totp';
 import Swal from 'sweetalert2';
 
 interface TwoFactorSetupProps {
@@ -22,8 +23,8 @@ type SetupStep = 'status' | 'choose-method' | 'setup' | 'verify' | 'backup-codes
 
 const METHOD_LABELS: Record<string, { label: string; description: string; icon: React.ReactNode }> = {
   totp: {
-    label: 'SoftAware App (Authenticator)',
-    description: 'Use an authenticator app like Google Authenticator, Authy, or SoftAware App to generate time-based codes.',
+    label: 'SoftAware App (Push-to-Approve)',
+    description: 'Enable one-tap login approval from your SoftAware mobile app. No codes to type — just tap Approve.',
     icon: <DevicePhoneMobileIcon className="h-6 w-6" />,
   },
   email: {
@@ -73,6 +74,9 @@ const TwoFactorSetup: React.FC<TwoFactorSetupProps> = ({ isStaffOrAdmin = false 
       setLoading(true);
       const result = await AuthModel.setup2FA(method);
       setSetupResult(result);
+
+      // For TOTP: always show the QR code + manual key so the user can
+      // add it to their authenticator app before verifying.
       setStep(method === 'totp' ? 'setup' : 'verify');
     } catch (err: any) {
       Swal.fire({ icon: 'error', title: 'Setup Failed', text: err.response?.data?.message || 'Failed to initiate 2FA setup.' });
@@ -268,6 +272,15 @@ const TwoFactorSetup: React.FC<TwoFactorSetupProps> = ({ isStaffOrAdmin = false 
           </div>
         )}
 
+        {selectedMethod === 'totp' && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+            <p className="text-sm text-green-800 font-medium">
+              After scanning, your authenticator app will display a 6-digit code that refreshes every 30 seconds.
+            </p>
+            <p className="text-sm text-green-700 mt-1">Enter that code below to verify your setup.</p>
+          </div>
+        )}
+
         {(selectedMethod === 'email' || selectedMethod === 'sms') && (
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
             <p className="text-sm text-blue-800">
@@ -280,7 +293,9 @@ const TwoFactorSetup: React.FC<TwoFactorSetupProps> = ({ isStaffOrAdmin = false 
         )}
 
         <div className="max-w-xs">
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">Verification Code</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">
+            {selectedMethod === 'totp' ? 'Code from Authenticator App' : 'Verification Code'}
+          </label>
           <input
             type="text"
             maxLength={8}

@@ -1,5 +1,7 @@
 # Subscription Module
 
+> ⚠️ **DEPRECATION NOTICE (June 2025)**: The legacy team-scoped credit system described in this document has been **superseded by the [Packages module](../Packages/README.md)**. The new system uses **contact-scoped billing** instead of team-scoped billing, with 7 defined package tiers, per-contact credit balances, and the `contact_packages` / `package_transactions` tables. Legacy tables (`credit_packages`, `credit_balances`, `credit_transactions`, `teams`) are retained for data reference but are **no longer the active billing path**. New AI credit deductions flow through `middleware/packages.ts` → `services/packages.ts`. See [Packages CHANGES.md](../Packages/CHANGES.md) for migration details.
+
 ## Overview
 
 The Subscription module manages two distinct billing domains for the SoftAware platform:
@@ -58,7 +60,7 @@ models/AdminAIModels.ts           → AdminCreditsModel + types
 
 - **Currency**: All prices stored in ZAR cents (R250/mo = 25000 cents)
 - **Credits ≠ Currency**: Credits are an internal unit; 1 credit ≈ R0.01 (100 credits = R1)
-- **Legacy Team Scoping**: Credit balances reference `teams.id` (legacy table retained solely for credit balance grouping — see Authentication v1.1.0). The system is **not multi-tenant**; `teams` exists only as a credit-scoping artifact from the original architecture
+- **Legacy Team Scoping**: Credit balances reference `teams.id` (legacy table retained solely for credit balance grouping — see Authentication v1.1.0). The system is **not multi-tenant**; `teams` exists only as a credit-scoping artifact from the original architecture. **Superseded by contact-scoped billing in the [Packages module](../Packages/README.md).**
 - **Dual Auth**: Credits endpoints accept API key (desktop) or JWT (web); admin endpoints require JWT + admin role
 - **Signup Bonus**: New registrations receive 100 credits automatically
 - **Low Balance Alerts**: WARNING at 5,000 credits, CRITICAL at 1,000 credits

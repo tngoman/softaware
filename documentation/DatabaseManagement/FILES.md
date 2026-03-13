@@ -2,96 +2,161 @@
 
 ## Backend Files
 
-### `/var/opt/backend/src/routes/databaseManager.ts` (525 LOC)
-**Purpose**: Express router providing 13 endpoints for all database operations — connection testing, schema browsing, query execution, server monitoring, and CSV export. All operations optionally routed through SSH tunnels.
+### `/var/opt/backend/src/routes/databaseManager.ts` (~835 LOC)
+**Purpose**: Express router providing 20 endpoints for all database operations — connection CRUD, connection testing, schema browsing, query execution, inline CRUD, SQL import, table actions (truncate/drop), server monitoring, and CSV export. All operations routed through SSH tunnels. Protected by `requireAuth` + `requireDeveloper` middleware.
 
-| Section | Lines | Description |
-|---------|-------|-------------|
-| Imports & constants | 1–11 | Express Router, `mysql2/promise`, `ssh2` Client, `net`, `fs`, `path`, `fileURLToPath`. Defines `KEYS_DIR = /var/opt/backend/keys/` |
-| `TunnelConfig` interface | 22–30 | SSH tunnel parameters: `sshHost`, `sshPort`, `sshUser`, `sshPassword?`, `sshKeyFile?` |
-| `ConnectionBody` interface | 32–45 | Full request body type: `host`, `port`, `user`, `password`, `database?`, `type` ('mysql'\|'mssql'), `tunnel?`, `table?`, `sql?`, `page?`, `pageSize?` |
-| `TunnelHandle` interface | 47–50 | Internal: `localPort` (number), `server` (net.Server), `sshClient` (SSHClient) |
-| `createTunnel()` | 52–100 | Creates SSH tunnel: resolves private key from KEYS_DIR, configures ssh2 with key or password auth, opens `net.Server` on random port, forwards via `sshClient.forwardOut()`. 15-second timeout. Returns `TunnelHandle`. |
-| `closeTunnel()` | 102–104 | Closes both `net.Server` and `sshClient` from a `TunnelHandle` |
-| `withMySQL()` | 107–135 | RAII helper: opens tunnel (if configured) → creates `mysql2` connection to `127.0.0.1:localPort` → executes callback → auto-closes connection and tunnel in `finally` block |
-| `withMSSQL()` | 137–170 | RAII helper: dynamically imports `mssql` → opens tunnel → creates `ConnectionPool` → executes callback → closes pool and tunnel. Catches `MODULE_NOT_FOUND` and returns helpful error. |
-| `GET /keys` | 174–190 | Lists private SSH key files from `KEYS_DIR`. Filters out `.pub` files and dotfiles. Returns array of `{ name, hasPublicKey, size }`. |
-| `POST /connect` | 192–205 | Tests connection: MySQL uses `connection.ping()`, MSSQL uses `SELECT 1 AS ok`. Returns `{ success: true }` or error. |
-| `POST /databases` | 207–220 | Lists databases: MySQL `SHOW DATABASES`, MSSQL `SELECT name FROM sys.databases WHERE state_desc='ONLINE'`. |
-| `POST /tables` | 222–250 | Lists tables in a database: queries `INFORMATION_SCHEMA.TABLES` for `TABLE_NAME`, `TABLE_TYPE`, `TABLE_ROWS`, `ENGINE` (MySQL) or `TABLE_NAME`, `TABLE_TYPE` (MSSQL). |
-| `POST /describe` | 252–290 | Describes table columns: MySQL uses `DESCRIBE tableName`, MSSQL queries `INFORMATION_SCHEMA.COLUMNS` joined with primary key detection via `TABLE_CONSTRAINTS` + `CONSTRAINT_COLUMN_USAGE`. |
-| `POST /indexes` | 292–320 | Lists table indexes: MySQL uses `SHOW INDEX FROM tableName`, MSSQL queries `sys.indexes` joined with `sys.index_columns` and `sys.columns`, aggregates column names with `STRING_AGG`. |
-| `POST /table-data` | 322–365 | Paginated data retrieval: `SELECT * FROM table LIMIT/OFFSET` (MySQL) or `OFFSET/FETCH` (MSSQL). Includes total row `COUNT(*)`. `pageSize` capped at 1000. Returns `{ rows, columns, total, page, pageSize }`. |
-| `POST /table-size` | 367–400 | Table size statistics: MySQL queries `information_schema.TABLES` for `TABLE_ROWS`, `DATA_LENGTH`, `INDEX_LENGTH`, `ENGINE`, `CREATE_TIME`, `TABLE_COLLATION`. MSSQL queries `sys.partitions` + `sys.allocation_units`. Returns `{ size: { row_count, data_kb, index_kb, total_kb, engine, ... } }`. |
-| `POST /table-create-sql` | 402–418 | DDL retrieval: MySQL uses `SHOW CREATE TABLE`. MSSQL returns placeholder string "(MSSQL CREATE TABLE scripting not yet supported)". Returns `{ sql }`. |
-| `POST /processes` | 420–445 | Active processes: MySQL uses `SHOW FULL PROCESSLIST`. MSSQL queries `sys.dm_exec_requests` joined with `sys.dm_exec_sessions` WHERE `session_id > 50`. Returns `{ processes: [...] }`. |
-| `POST /status` | 447–475 | Server status: MySQL returns `VERSION()` + `SHOW GLOBAL STATUS` (Uptime, Threads_connected, Questions, Slow_queries, etc.). MSSQL returns `@@SERVERNAME`, `@@VERSION`, `@@SPID`, `user_connections`. Returns `{ status: { key: value, ... } }`. |
-| `POST /query` | 477–510 | Arbitrary SQL execution: executes user SQL. For SELECT-like results, returns `{ columns, rows }`. For DML, returns `{ affectedRows, insertId, message }`. Measures `executionTime` in ms. |
-| `POST /export-csv` | 512–525 | Server-side CSV export: executes SQL, generates CSV with proper comma/quote/newline escaping, returns as `text/csv` file download with `Content-Disposition: attachment`. |
+| Section | Lines (approx.) | Description |
+|---------|-----------------|-------------|
+| Imports & middleware | 1–16 | Express Router, `mysql2/promise`, `ssh2` Client, `net`, `fs`, `path`, `crypto`, `fileURLToPath`, `requireAuth`, `AuthRequest`, `requireDeveloper`, `db`. Applies `router.use(requireAuth, requireDeveloper)`. |
+| Constants | 17–18 | `KEYS_DIR = /var/opt/backend/keys/` |
+| `TunnelConfig` interface | 29–35 | SSH tunnel parameters: `sshHost`, `sshPort`, `sshUser`, `sshPassword?`, `sshKeyFile?` |
+| `ConnectionBody` interface | 37–58 | Full request body type with enhanced fields: `sortColumn?`, `sortDirection?`, `filters?`, `row?`, `where?`, `primaryKeys?` |
+| `TunnelHandle` interface | 60–64 | Internal: `localPort`, `server`, `sshClient` |
+| `createTunnel()` | 66–112 | Creates SSH tunnel: resolves private key from KEYS_DIR, configures ssh2 with key or password auth, opens `net.Server` on random port, forwards via `sshClient.forwardOut()`. 15-second timeout. Returns `TunnelHandle`. |
+| `closeTunnel()` | 114–117 | Closes both `net.Server` and `sshClient` from a `TunnelHandle` |
+| `withMySQL()` | 119–140 | RAII helper: opens tunnel (if configured) → creates `mysql2` connection → executes callback → auto-closes in `finally` block |
+| `withMSSQL()` | 142–172 | RAII helper: dynamically imports `mssql` → opens tunnel → creates `ConnectionPool` → executes callback → closes. Catches `MODULE_NOT_FOUND`. |
+| `GET /connections` | 178–205 | Lists all saved connections from `db_connections` table. Maps flat DB rows to nested `Connection` shape. |
+| `POST /connections` | 207–240 | Creates or updates a connection via `INSERT ... ON DUPLICATE KEY UPDATE`. Generates UUID with `crypto.randomUUID()`. Stores `userId` from JWT. |
+| `DELETE /connections/:id` | 242–249 | Deletes a connection by UUID. |
+| `GET /keys` | 251–264 | Lists private SSH key files from `KEYS_DIR`. Filters out `.pub` files and dotfiles. |
+| `POST /connect` | 266–278 | Tests connection: MySQL `ping()`, MSSQL `SELECT 1`. |
+| `POST /databases` | 280–295 | Lists databases: MySQL `SHOW DATABASES`, MSSQL `sys.databases`. |
+| `POST /tables` | 297–318 | Lists tables: queries `INFORMATION_SCHEMA.TABLES` with rows/engine (MySQL) or name/type (MSSQL). |
+| `POST /describe` | 320–360 | Describes table columns: MySQL `DESCRIBE`, MSSQL `INFORMATION_SCHEMA.COLUMNS` with PK detection. |
+| `POST /indexes` | 362–388 | Lists indexes: MySQL `SHOW INDEX`, MSSQL `sys.indexes` with `STRING_AGG`. |
+| `POST /table-data` | 390–450 | Enhanced paginated data with server-side sort (`sortColumn`, `sortDirection`) and filter (`filters[]` array). Generates WHERE clauses with parameterized values (MySQL) or escaped strings (MSSQL). |
+| `POST /row-insert` | 452–480 | Inserts a new row. Parameterized INSERT with dynamic columns from `row` object. Empty strings → null. |
+| `POST /row-update` | 482–520 | Updates a row by primary key. Parameterized UPDATE with `SET` from `row` and `WHERE` from `where` object. `LIMIT 1` (MySQL). |
+| `POST /row-delete` | 522–558 | Deletes a row by primary key. `DELETE ... WHERE pk=? LIMIT 1` (MySQL) or `DELETE TOP(1)` (MSSQL). |
+| `POST /import-sql` | 560–608 | Executes SQL dump: splits by `;\n`, filters comments, executes sequentially, collects errors (max 20). Returns summary. |
+| `POST /truncate` | 610–630 | Truncates a table with identifier escaping. |
+| `POST /drop-table` | 632–652 | Drops a table with identifier escaping. |
+| `POST /table-size` | 654–685 | Table size statistics from `information_schema.TABLES` (MySQL) or `sys.partitions` + `sys.allocation_units` (MSSQL). |
+| `POST /table-create-sql` | 687–702 | DDL via `SHOW CREATE TABLE` (MySQL). MSSQL returns placeholder comment. |
+| `POST /processes` | 704–722 | Active processes: `SHOW FULL PROCESSLIST` (MySQL) or `sys.dm_exec_requests` (MSSQL). |
+| `POST /status` | 724–748 | Server status: `VERSION()` + `SHOW GLOBAL STATUS` (MySQL) or `@@SERVERNAME` + `@@VERSION` (MSSQL). |
+| `POST /query` | 750–790 | Arbitrary SQL execution. Returns `{ columns, rows, rowCount }` for SELECT, `{ affectedRows, message }` for DML. |
+| `POST /export-csv` | 792–833 | Server-side CSV export with proper escaping. Returns `text/csv` download. |
 
 **Key patterns**:
 - `withMySQL()` / `withMSSQL()` ensure tunnel and connection cleanup via `try/finally`
-- Every endpoint follows: validate type → call `withMySQL` or `withMSSQL` → return JSON → catch → 500
-- MSSQL queries use bracket-escaped identifiers (`[${table}]`) — **not parameterized** (SQL injection risk)
-- MySQL queries use backtick-escaped identifiers and `connection.execute()` for some queries
+- Every endpoint follows: validate inputs → call `withMySQL` or `withMSSQL` → return JSON → catch → 400/500
+- `router.use(requireAuth, requireDeveloper)` protects all routes at the router level
+- Row CRUD endpoints use parameterized queries where possible (MySQL fully parameterized, MSSQL uses `pool.request().input()`)
+- Table name escaping: MySQL strips backticks, MSSQL doubles `]` characters
+
+---
+
+### `/var/opt/backend/src/middleware/requireDeveloper.ts` (54 LOC)
+**Purpose**: Express middleware that restricts access to users with developer, admin, or super_admin roles. Must be chained after `requireAuth`.
+
+| Section | Lines | Description |
+|---------|-------|-------------|
+| Imports | 1–3 | `Response`, `NextFunction` from Express, `AuthRequest` from auth middleware, `db` from mysql |
+| `requireDeveloper()` | 12–54 | Extracts `userId` from `req.userId` (set by `requireAuth`). Queries `user_roles JOIN roles` for slug IN `('developer', 'admin', 'super_admin')`. Returns 403 if no matching role found. Calls `next()` on success. |
+
+**SQL Query**:
+```sql
+SELECT r.slug FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
+  AND r.slug IN ('developer', 'admin', 'super_admin')
+LIMIT 1
+```
 
 ---
 
 ## Frontend Files
 
-### `/var/opt/frontend/src/pages/general/DatabaseManager.tsx` (1305 LOC)
-**Purpose**: Full database administration interface with connection management, SQL editor, schema browser, table inspector, and server monitoring.
+### `/var/opt/frontend/src/pages/general/DatabaseManager.tsx` (~1939 LOC)
+**Purpose**: Full database administration interface with shared connection management, SQL editor, Adminer-like table browser with inline CRUD, SQL import, table actions, and server monitoring.
+
+| Section | Lines (approx.) | Description |
+|---------|-----------------|-------------|
+| Imports | 1–47 | React (useState, useEffect, useRef, useCallback), 40+ Heroicons, `notify`, `Swal`, `api` |
+| `TunnelConfig` interface | 56–62 | SSH tunnel parameters |
+| `Connection` interface | 64–74 | `id`, `name`, `host`, `port`, `user`, `password`, `database`, `type`, `tunnel` |
+| `QueryResult` interface | 76–83 | `columns`, `rows`, `affectedRows?`, `executionTime?`, `error?`, `message?` |
+| `TableInfo` interface | 85–90 | `name`, `type`, `rows?`, `engine?` |
+| `SSHKeyInfo` interface | 92–96 | `name`, `hasPublicKey`, `size` |
+| `MainTab` type | 98 | `'query' \| 'browse' \| 'structure' \| 'info' \| 'processes' \| 'status' \| 'import'` |
+| `connPayload()` helper | 100 | Builds API request body from Connection + optional extras |
+| **ConnectionDialog** component | 107–350 | Modal dialog for creating/editing connections. SSH Tunnel section (amber border, required): SSH Host, SSH Port (default 22), SSH User, Key File dropdown (from `GET /keys`), SSH Password. Database section: Host, Port, Username, Password, Database. Test Connection button. Always-visible edit button (PencilSquareIcon). |
+| **TableBrowser** component | 355–800 | Adminer-like paginated data browser with: server-side sorting (click column headers, ASC/DESC/none), server-side filtering (column selector, operator dropdown, value input), inline row editing (click edit icon, input fields, save/cancel), new row insertion (form at bottom), row deletion (with SweetAlert2 confirm), multi-select with checkboxes, bulk delete, export buttons (CSV/JSON/clipboard), row count display, pagination (first/prev/next/last). Props: `conn`, `tableName`, `onRunQuery`, `onRefreshTables`. |
+| **DatabaseManager** — state declarations | 805–870 | Connections (from API `GET /database/connections`), `loadingConnections`, `sshKeys`, `activeConnection`, `connected`, `connecting`, `sql`, `result`, `executing`, `databases`, `tables`, `loadingTables`, `expandedTable`, `tableColumns`, `dialogOpen`, `editingConn`, `mainTab`, `browsingTable`, `queryHistory`, `savedQueries`, `showHistory`, `showSaved`, `sidebarCollapsed`, `tableInfo`, `tableIndexes`, `createSQL`, `processes`, `serverStatus`, `infoTable` |
+| Load connections effect | 870–885 | Fetches connections from `GET /database/connections` API on mount. Shows loading spinner. |
+| SSH keys effect | 886–892 | Loads key list from `GET /database/keys` on mount |
+| `saveConnection()` | 894–910 | Calls `POST /database/connections`, refreshes connections list from API on success |
+| `deleteConnection()` | 912–930 | SweetAlert2 confirmation → `DELETE /database/connections/:id`, refreshes connections list |
+| `handleConnect()` | 932–960 | Sets `activeConnection`, calls `POST /connect`, then `fetchTables()` + `fetchDatabases()` in parallel |
+| `handleDisconnect()` | 962–970 | Resets connection state |
+| `fetchTables()` | 972–985 | Calls `POST /database/tables`, updates `tables` state |
+| `fetchDatabases()` | 987–995 | Calls `POST /database/databases`, updates `databases` state |
+| `fetchTableColumns()` | 997–1010 | Calls `POST /database/describe`, caches in `tableColumns[tableName]` |
+| `switchDatabase()` | 1012–1020 | Updates `activeConnection.database`, calls `fetchTables()` |
+| `handleExecute()` | 1022–1060 | Executes SQL via `POST /database/query`. Auto-adds to history (dedup, max 100). On DDL, auto-refreshes tables. |
+| `handleKeyDown()` | 1062–1075 | Keyboard handler: Ctrl+Enter → execute, Tab → insert 2 spaces |
+| Export helpers | 1077–1110 | `exportCSV()`, `exportJSON()`, `copyToClipboard()` — client-side export functions |
+| `loadTableInfo()` | 1112–1135 | Parallel fetch: `/table-size` + `/indexes` + `/table-create-sql`. Includes truncate/drop actions. |
+| `loadProcesses()` | 1137–1145 | Calls `POST /database/processes` |
+| `loadStatus()` | 1147–1155 | Calls `POST /database/status` |
+| `saveQuery()` | 1157–1170 | SweetAlert2 input prompt → saves to localStorage |
+| `quickSelect()` / `quickCount()` | 1172–1185 | Engine-aware SQL template generators |
+| **JSX — Sidebar** | 1190–1400 | Collapsible sidebar (w-64 / w-12). Connection list with connect/edit/delete. Database selector dropdown. Tables tree with expand/collapse. Action buttons per table: SELECT, Browse, Info, Truncate (hover), Drop (hover). |
+| **JSX — SQL Editor toolbar** | 1402–1470 | Execute button, Ctrl+Enter hint, Save/Saved/History toggles, Processes/Status buttons, connection status. |
+| **JSX — Saved queries panel** | 1472–1495 | Dropdown with saved queries list |
+| **JSX — History panel** | 1497–1515 | Dropdown with last 20 queries |
+| **JSX — SQL textarea** | 1517–1530 | Dark themed (`bg-[#1e1e2e]`, `text-[#cdd6f4]`), monospace |
+| **JSX — Tab bar** | 1532–1580 | 7 tabs: Results, Browse, Info, Processes, Server, Import. Export buttons on Results tab. |
+| **JSX — Results tab** | 1582–1660 | Results table with stats bar, sticky headers, NULL styling, boolean badges |
+| **JSX — Browse tab** | 1662–1680 | Renders `<TableBrowser>` with full CRUD capabilities |
+| **JSX — Info tab** | 1682–1780 | Table stats cards, columns table, indexes table, CREATE SQL, Truncate/Drop buttons in header |
+| **JSX — Processes tab** | 1782–1810 | Dynamic table from `processes` array with refresh |
+| **JSX — Server Status tab** | 1812–1835 | Key-value cards with refresh |
+| **JSX — Import tab** | 1837–1920 | File upload area (drag-and-drop + click), textarea for pasting SQL, execute button with progress. Shows results summary (executed count, errors). |
+| ConnectionDialog render | 1922–1939 | Renders `<ConnectionDialog>` with props |
+
+**Key patterns**:
+- Three sub-components: `ConnectionDialog` (modal), `TableBrowser` (Adminer-like browser), `DatabaseManager` (main)
+- Connections loaded from API (`GET /database/connections`) not localStorage
+- `loadingConnections` state shows spinner while fetching
+- All API calls go through the shared `api` axios instance
+- `connPayload()` centralizes connection→request-body mapping
+- Sidebar hover actions for truncate/drop with SweetAlert2 confirmation
+- TableBrowser manages its own state for sort, filter, inline edit, new row
+
+---
+
+### `/var/opt/frontend/src/components/DeveloperRoute.tsx` (37 LOC)
+**Purpose**: Route guard component that restricts access to users with developer, admin, or super_admin roles.
 
 | Section | Lines | Description |
 |---------|-------|-------------|
-| Imports | 1–36 | React (useState, useEffect, useRef, useCallback), 30+ Heroicons, `toast` (react-hot-toast), `Swal` (sweetalert2), `api` (axios instance) |
-| `TunnelConfig` interface | 44–55 | Mirrors backend: `sshHost`, `sshPort`, `sshUser`, `sshPassword?`, `sshKeyFile?` |
-| `Connection` interface | 57–67 | `id`, `name`, `host`, `port`, `user`, `password`, `database?`, `type` ('mysql'\|'mssql'), `tunnel` (TunnelConfig) |
-| `QueryResult` interface | 69–78 | `columns`, `rows`, `affectedRows?`, `executionTime?`, `error?`, `message?` |
-| `TableInfo` interface | 80–85 | `name`, `type`, `rows?`, `engine?` |
-| `SSHKeyInfo` interface | 87–91 | `name`, `hasPublicKey`, `size` |
-| `MainTab` type | 93 | `'query' \| 'browse' \| 'structure' \| 'info' \| 'processes' \| 'status'` |
-| `connPayload()` helper | 95 | Builds API request body from a `Connection` object — maps `tunnel` config fields to flat body |
-| **ConnectionDialog** component | 100–315 | Modal dialog for creating/editing connections. SSH Tunnel section (amber border, required): SSH Host, SSH Port (default 22), SSH User, Key File dropdown (from `GET /keys`), SSH Password (shown only when no key selected). Database section: Host, Port, Username, Password, Database. Test Connection button calls `POST /database/connect`. Validation requires name + SSH host + (key file or SSH password). |
-| **TableBrowser** component | 320–445 | Paginated data browser. Props: `conn`, `tableName`, `onRunQuery`. Fetches `POST /table-data` with page/pageSize. Toolbar: table name, row count, column filter dropdown + value input, refresh. Data table with row numbers, sticky headers, NULL styling. Pagination: first/prev/next/last with page counter. |
-| **DatabaseManager** — state declarations | 450–510 | Connections (from localStorage `db_connections_v2`), `sshKeys`, `activeConnection`, `connected`, `connecting`, `sql`, `result`, `executing`, `databases`, `tables`, `loadingTables`, `expandedTable`, `tableColumns`, `dialogOpen`, `editingConn`, `mainTab`, `browsingTable`, `queryHistory` (from localStorage, max 100), `savedQueries` (from localStorage), `showHistory`, `showSaved`, `sidebarCollapsed`, `tableInfo`, `tableIndexes`, `createSQL`, `processes`, `serverStatus`, `infoTable` |
-| SSH keys effect | 512–520 | Loads key list from `GET /database/keys` on component mount |
-| `saveConnection()` | 522–535 | Adds or updates connection in state + localStorage. Generates UUID for new connections. |
-| `deleteConnection()` | 537–550 | SweetAlert2 confirmation dialog → removes from state + localStorage |
-| `handleConnect()` | 552–575 | Sets `activeConnection`, calls `POST /connect` to test, then `fetchTables()` + `fetchDatabases()` in parallel |
-| `handleDisconnect()` | 577–582 | Resets `connected`, `activeConnection`, `tables`, `databases`, `expandedTable` |
-| `fetchTables()` | 584–595 | Calls `POST /database/tables`, updates `tables` state |
-| `fetchDatabases()` | 597–600 | Calls `POST /database/databases`, updates `databases` state |
-| `fetchTableColumns()` | 600–608 | Calls `POST /database/describe`, caches in `tableColumns[tableName]` |
-| `switchDatabase()` | 608–615 | Updates `activeConnection.database`, calls `fetchTables()` |
-| `handleExecute()` | 615–580 | Executes SQL via `POST /database/query`. Measures time, auto-adds to history (dedup, max 100). On DDL (ALTER/CREATE/DROP), auto-refreshes tables. |
-| `handleKeyDown()` | 580–598 | Keyboard handler: Ctrl+Enter → execute, Tab → insert 2 spaces |
-| Export helpers | 606–640 | `exportCSV()` — client-side CSV generation with escaping, blob download. `exportJSON()` — JSON.stringify rows, blob download. `copyToClipboard()` — tab-delimited text to clipboard. |
-| `loadTableInfo()` | 645–665 | Parallel fetch: `POST /table-size` + `POST /indexes` + `POST /table-create-sql`. Sets info tab active. |
-| `loadProcesses()` | 668–675 | Calls `POST /database/processes`, switches to processes tab |
-| `loadStatus()` | 677–684 | Calls `POST /database/status`, switches to status tab |
-| `saveQuery()` | 688–700 | SweetAlert2 input prompt for name → appends to `savedQueries` in state + localStorage |
-| `quickSelect()` | 703–708 | Generates `SELECT TOP 100 *` (MSSQL) or `SELECT * LIMIT 100` (MySQL), sets SQL editor |
-| `quickCount()` | 710–715 | Generates `SELECT COUNT(*)` with engine-appropriate syntax |
-| **JSX — Sidebar** | 718–895 | Collapsible sidebar (w-64 / w-12). Contains: connection list with connect/edit/delete actions, status indicators (emerald for connected), database selector dropdown, tables tree with expand/collapse for columns, action buttons per table (SELECT, Browse, Info). |
-| **JSX — SQL Editor toolbar** | 897–960 | Execute button (emerald, with spinner), Ctrl+Enter hint, Save/Saved/History toggle buttons, Processes/Status buttons (when connected), connection status indicator (amber/blue/emerald). |
-| **JSX — Saved queries panel** | 962–985 | Dropdown panel (amber-50 bg): list of saved queries with click-to-load and delete button |
-| **JSX — History panel** | 987–1002 | Dropdown panel (gray-100 bg): last 20 queries, font-mono, click-to-load |
-| **JSX — SQL textarea** | 1004–1015 | Dark themed (`bg-[#1e1e2e]`, `text-[#cdd6f4]`), resizable, 6 rows default, min-h-100px, monospace, placeholder with hint |
-| **JSX — Tab bar** | 1018–1060 | 5 tabs: Results (DocumentTextIcon), Browse (ListBulletIcon), Info (InformationCircleIcon), Processes (CommandLineIcon), Server (Cog6ToothIcon). Export buttons shown on Results tab (clipboard, CSV, JSON). |
-| **JSX — Results tab** | 1063–1135 | Empty state → executing spinner → error display (red panel with pre) → results table with stats bar (row count, affected, execution time, column count), sticky-header data table with NULL styling and boolean badges |
-| **JSX — Browse tab** | 1138–1150 | Renders `<TableBrowser>` when table selected, otherwise empty state prompt |
-| **JSX — Info tab** | 1153–1245 | Table name header, 4 stat cards (Rows, Data Size, Total Size, Engine), columns table (Column, Type, Null, Key, Default), indexes table (Name, Columns, Unique), CREATE SQL in dark pre block |
-| **JSX — Processes tab** | 1248–1275 | Dynamic table rendering from `processes` array. Column headers derived from first row's keys. Refresh button. |
-| **JSX — Server Status tab** | 1278–1298 | Key-value cards for each status entry. Underscore-to-space label formatting. Refresh button. |
-| ConnectionDialog render | 1300–1305 | Renders `<ConnectionDialog>` with open/close/save/sshKeys props |
+| Imports | 1–4 | React, Navigate (react-router-dom), useAppStore (Zustand), ProtectedRoute |
+| `hasDeveloperAccess()` | 19–26 | Checks `user.is_admin` (boolean), `user.role?.slug === 'developer'` (singular from backend), and `user.roles?.some(r => r.slug === 'developer')` (plural fallback). Returns `true` if any match. |
+| Render | 28–33 | Wraps children in `<ProtectedRoute>` (handles auth redirect). If `hasDeveloperAccess()` is false, redirects to `/` via `<Navigate>`. |
 
-**Key patterns**:
-- Three sub-components: `ConnectionDialog` (modal), `TableBrowser` (paginated viewer), `DatabaseManager` (main)
-- All API calls go through the shared `api` axios instance (base URL configured elsewhere)
-- `connPayload()` centralizes connection→request-body mapping to avoid duplication
-- Sidebar uses `group-hover:opacity-100` pattern for action button reveal
-- All tables use `sticky top-0` headers for scroll behavior
+**Critical Note**: Backend `mapUser()` returns `role` (singular object with `.slug`) NOT `roles` (plural array). The component checks both shapes for compatibility.
+
+---
+
+### `/var/opt/frontend/src/components/Layout/Layout.tsx` (sidebar changes)
+**Purpose**: Main layout with sidebar navigation. Modified to support role-based menu item visibility.
+
+**Changes**:
+- `NavItem` interface: Added `roleSlug?: string` field
+- Database menu item: `{ name: 'Database', href: '/database', icon: CircleStackIcon, permission: 'settings.view', roleSlug: 'developer' }`
+- `SidebarSection` component: Added role check logic — if an item has `roleSlug`, verifies `user.is_admin || user.role?.slug === item.roleSlug || user.roles?.includes(slug)`. Returns `null` (hides item) if no match.
+
+---
+
+### `/var/opt/frontend/src/App.tsx` (route change)
+**Purpose**: Main routing. Modified to wrap `/database` route with `<DeveloperRoute>`.
+
+```tsx
+<Route path="/database" element={<DeveloperRoute><Layout><DatabaseManager /></Layout></DeveloperRoute>} />
+```
 
 ---
 
@@ -101,9 +166,9 @@
 **Purpose**: Ed25519 SSH private key used for tunnel connections. Permissions: `chmod 600`.
 
 ### `/var/opt/backend/keys/softaware_id_ed25519.pub` (91 bytes)
-**Purpose**: Corresponding public key. Comment: "SoftAware".
+**Purpose**: Corresponding public key. Comment: "SoftAware". Must be in remote server's `~/.ssh/authorized_keys`.
 
 ### Route Registration
 **File**: `/var/opt/backend/src/app.ts`  
 **Line**: `apiRouter.use('/database', databaseManagerRouter)`  
-**Note**: No auth middleware applied at the router mount level.
+**Note**: Auth middleware is applied within the router itself (`router.use(requireAuth, requireDeveloper)`), not at the mount point.

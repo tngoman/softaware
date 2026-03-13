@@ -93,7 +93,9 @@ export function getApiBaseUrl(): string {
  */
 export function getBaseUrl(): string {
   const apiUrl = getApiBaseUrl();
-  return apiUrl.replace('/api', '');
+  // Use regex with $ anchor — plain .replace('/api', '') matches the '/api'
+  // inside '://api.softaware.net.za' instead of the trailing '/api' path.
+  return apiUrl.replace(/\/api$/, '');
 }
 
 /**

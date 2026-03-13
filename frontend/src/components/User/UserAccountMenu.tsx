@@ -39,7 +39,7 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
   if (!user) {
     return (
       <div className="flex items-center space-x-2 px-3 py-2">
-        <div className="h-8 w-8 rounded-full bg-gray-200 animate-pulse" />
+        <div className="h-8 w-8 rounded-full bg-gray-200 dark:bg-dark-700 animate-pulse" />
       </div>
     );
   }
@@ -87,7 +87,7 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors duration-200"
+        className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-dark-700 transition-colors duration-200"
       >
         {/* User Avatar/Initials */}
         <div className="flex-shrink-0">
@@ -105,13 +105,13 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
         </div>
 
         {/* User Name (hidden on mobile) */}
-        <span className="hidden md:block text-sm font-medium text-gray-700">
+        <span className="hidden md:block text-sm font-medium text-gray-700 dark:text-gray-200">
           {getDisplayName()}
         </span>
 
         {/* Dropdown Arrow */}
         <svg
-          className={`h-4 w-4 text-gray-500 transition-transform duration-200 ${
+          className={`h-4 w-4 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${
             isOpen ? 'transform rotate-180' : ''
           }`}
           fill="none"
@@ -123,11 +123,11 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-56 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
+        <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-dark-800 rounded-lg shadow-lg border border-gray-200 dark:border-dark-700 z-50">
           {/* User Info Header */}
-          <div className="px-4 py-3 border-b border-gray-200">
-            <p className="text-sm font-medium text-gray-900">{getDisplayName()}</p>
-            <p className="text-xs text-gray-500 truncate">{user.email}</p>
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-dark-700">
+            <p className="text-sm font-medium text-gray-900 dark:text-white">{getDisplayName()}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{user.email}</p>
             {user.role && (
               <p className="text-xs text-picton-blue font-medium mt-1">
                 {user.role.name}
@@ -139,26 +139,26 @@ const UserAccountMenu: React.FC<UserAccountMenuProps> = ({ user, onLogout }) => 
           <div className="py-2">
             <button
               onClick={handleProfileClick}
-              className="w-full flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors duration-150"
+              className="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700 transition-colors duration-150"
             >
-              <UserIcon className="h-5 w-5 mr-3 text-gray-500" />
+              <UserIcon className="h-5 w-5 mr-3 text-gray-500 dark:text-gray-400" />
               My Profile
             </button>
 
             <button
               onClick={handleSettingsClick}
-              className="w-full flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors duration-150"
+              className="w-full flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-dark-700 transition-colors duration-150"
             >
-              <Cog6ToothIcon className="h-5 w-5 mr-3 text-gray-500" />
+              <Cog6ToothIcon className="h-5 w-5 mr-3 text-gray-500 dark:text-gray-400" />
               Account Settings
             </button>
           </div>
 
           {/* Logout Button */}
-          <div className="py-2 border-t border-gray-200">
+          <div className="py-2 border-t border-gray-200 dark:border-dark-700">
             <button
               onClick={handleLogoutClick}
-              className="w-full flex items-center px-4 py-2 text-sm text-scarlet hover:bg-red-50 transition-colors duration-150"
+              className="w-full flex items-center px-4 py-2 text-sm text-scarlet dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors duration-150"
             >
               <ArrowRightOnRectangleIcon className="h-5 w-5 mr-3" />
               Logout

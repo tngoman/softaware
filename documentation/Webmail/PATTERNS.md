@@ -51,25 +51,106 @@ const encPwd = encryptPassword(data.password);
 ---
 
 ### 4. Lazy Table Initialization
-**Pattern**: The `user_mailboxes` table is created on first API request via middleware, not at server startup.
+**Pattern**: The `user_mailboxes` table is created on first API request via middleware, not at server startup. Wrapped in try/catch to prevent crash loops.
 
 ```typescript
 let tableReady = false;
 webmailRouter.use(async (_req, _res, next) => {
-  if (!tableReady) {
-    await ensureWebmailTable();
-    tableReady = true;
+  try {
+    if (!tableReady) {
+      await ensureWebmailTable();
+      tableReady = true;
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 });
 ```
 
-**Benefit**: No migration scripts needed for initial deployment. Table auto-creates with correct schema.
+**Benefit**: No migration scripts needed for initial deployment. Table auto-creates with correct schema. Error in migration doesn't crash the process.
 **Trade-off**: First request has slight delay. The in-memory flag resets on server restart.
+
+**Lesson learned**: MySQL strict mode rejects `TEXT DEFAULT ''`. The migration uses `TEXT NULL` instead. The `ensureWebmailTable()` also includes a try/catch ALTER TABLE for adding columns to existing tables — failures (e.g., column already exists) are silently ignored.
 
 ---
 
-### 5. MailComposer for Sent Folder
+### 5. Zod Boolean Coercion for MySQL TINYINT
+**Pattern**: MySQL `TINYINT(1)` columns return `0`/`1` (numbers) through `mysql2`, but Zod `z.boolean()` rejects numbers. A `coerceBool` preprocessor converts before validation.
+
+```typescript
+const coerceBool = z.preprocess(
+  (v) => (typeof v === 'number' ? v !== 0 : v),
+  z.boolean().optional(),
+);
+
+const UpdateAccountSchema = z.object({
+  is_default: coerceBool,
+  is_active: coerceBool,
+  // ...
+});
+```
+
+**Benefit**: Accepts both `true`/`false` and `0`/`1` transparently. Frontend doesn't need to worry about type conversion.
+**Trade-off**: None significant.
+
+---
+
+### 6. Dual-Mode Signature Editor
+**Pattern**: The signature editor offers two modes — "Visual" (ReactQuill WYSIWYG) for simple text signatures, and "HTML Source" (raw textarea + live preview) for complex HTML like tables. ReactQuill doesn't support `<table>` elements, so the template auto-switches to source mode.
+
+```tsx
+{signatureMode === 'code' ? (
+  <textarea value={formData.signature} onChange={...} />
+  <div dangerouslySetInnerHTML={{ __html: formData.signature }} />
+) : (
+  <RichTextEditor value={formData.signature} onChange={...} />
+)}
+```
+
+**Benefit**: Users get WYSIWYG for simple edits and full HTML control for complex templates. Live preview renders tables correctly.
+**Trade-off**: Switching from WYSIWYG to source mode preserves HTML, but switching back may lose table markup (ReactQuill strips unsupported elements). Users editing table-based signatures should stay in source mode.
+
+---
+
+### 7. Signature Auto-Append in Compose
+**Pattern**: When composing, replying, or forwarding, the active account's signature is automatically appended to the editor body. When switching accounts, the old signature div is swapped for the new one.
+
+```typescript
+const getSignatureHtml = useCallback((acctId: number) => {
+  const acct = accounts.find(a => a.id === acctId);
+  if (!acct?.signature) return '';
+  return `<br/><div class="email-signature" style="...">${acct.signature}</div>`;
+}, [accounts]);
+
+// On account switch in compose:
+const oldSig = editor.querySelector('.email-signature');
+if (oldSig) oldSig.remove();
+const newSigHtml = getSignatureHtml(newId);
+// Insert new signature HTML
+```
+
+**Benefit**: Consistent signature on all outgoing emails. Seamless account switching.
+**Trade-off**: Signature is identified by `.email-signature` CSS class — if user manually deletes or duplicates this div, swap logic may not work perfectly.
+
+---
+
+### 8. Template Insertion from User Profile
+**Pattern**: The "Insert Template" button in the signature editor populates a corporate HTML table template using the user's profile data from the Zustand store, not the mailbox form fields.
+
+```typescript
+const { user } = useAppStore();
+const name = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || 'Name';
+const email = formData.email_address || user?.email || 'your_email@softaware.co.za';
+const phone = (user as any)?.phone || '000000';
+```
+
+**Benefit**: Template reflects the user's actual name, email, and phone number from their profile. Different mailboxes for the same user get the same identity.
+**Trade-off**: `phone` is accessed via `(user as any).phone` because it's not typed on the User interface yet.
+
+---
+
+### 9. MailComposer for Sent Folder
 **Pattern**: After sending via SMTP, the full RFC822 message (including attachments) is rebuilt using nodemailer's `MailComposer` and appended to the IMAP Sent folder.
 
 ```typescript
@@ -86,7 +167,7 @@ await client.append(sentPath, rawMessage, ['\\Seen']);
 
 ---
 
-### 6. Auto-Detect Sent Folder Path
+### 10. Auto-Detect Sent Folder Path
 **Pattern**: The Sent folder path varies by mail server (e.g., `Sent`, `INBOX.Sent`, `Sent Items`). The code scans the IMAP folder tree for `specialUse === '\\Sent'` before appending.
 
 ```typescript
@@ -106,7 +187,7 @@ if (detected) sentPath = detected;
 
 ---
 
-### 7. Multipart Form Data for Send (multer)
+### 11. Multipart Form Data for Send (multer)
 **Pattern**: The send endpoint uses multer for file upload handling instead of JSON body. Text fields and files are mixed in a single multipart request.
 
 ```typescript
@@ -132,7 +213,7 @@ const res = await api.post('/webmail/send', formData);  // NO Content-Type heade
 
 ---
 
-### 8. IMAP Connection Per-Request
+### 12. IMAP Connection Per-Request
 **Pattern**: Every IMAP operation creates a new `ImapFlow` client, connects, performs the operation, and disconnects.
 
 ```typescript
@@ -152,7 +233,7 @@ export async function listMessages(account, folder, page, limit, search) {
 
 ---
 
-### 9. Attachment by Index (partId)
+### 13. Attachment by Index (partId)
 **Pattern**: Attachments are identified by their 1-based index in the parsed attachment array. The full message is re-downloaded and re-parsed to extract a single attachment.
 
 ```typescript

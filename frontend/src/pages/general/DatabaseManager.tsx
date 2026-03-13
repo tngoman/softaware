@@ -31,6 +31,17 @@ import {
   ChevronDoubleRightIcon,
   BoltIcon,
   Square3Stack3DIcon,
+  PencilSquareIcon,
+  PencilIcon,
+  CheckIcon,
+  FunnelIcon,
+  ArrowUpIcon,
+  ArrowDownIcon,
+  ArrowsUpDownIcon,
+  DocumentArrowUpIcon,
+  StopIcon,
+  NoSymbolIcon,
+  ClipboardDocumentIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
@@ -84,7 +95,7 @@ interface SSHKeyInfo {
   size: number;
 }
 
-type MainTab = 'query' | 'browse' | 'structure' | 'info' | 'processes' | 'status';
+type MainTab = 'query' | 'browse' | 'structure' | 'info' | 'processes' | 'status' | 'import';
 
 const connPayload = (c: Connection, extra?: Record<string, any>) => ({
   host: c.host, port: c.port, user: c.user, password: c.password,
@@ -290,7 +301,7 @@ const ConnectionDialog: React.FC<{
 };
 
 /* ═════════════════════════════════════════════════════════════
-   Table Browser Panel — paginated data view
+   Table Browser Panel — Adminer-style data viewer + editor
    ═════════════════════════════════════════════════════════════ */
 const TableBrowser: React.FC<{
   conn: Connection;
@@ -299,114 +310,514 @@ const TableBrowser: React.FC<{
 }> = ({ conn, tableName, onRunQuery }) => {
   const [data, setData] = useState<{ columns: string[]; rows: any[]; total: number } | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(100);
+  const [pageSize, setPageSize] = useState(50);
   const [loading, setLoading] = useState(false);
-  const [filterCol, setFilterCol] = useState('');
-  const [filterVal, setFilterVal] = useState('');
+  // Sort
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('ASC');
+  // Filters
+  const [filters, setFilters] = useState<{ column: string; operator: string; value: string }[]>([]);
+  const [showFilters, setShowFilters] = useState(false);
+  // Row editing
+  const [editingRow, setEditingRow] = useState<number | null>(null);
+  const [editData, setEditData] = useState<Record<string, any>>({});
+  const [showInsert, setShowInsert] = useState(false);
+  const [insertData, setInsertData] = useState<Record<string, any>>({});
+  // Row selection
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  // Column info (for PK detection)
+  const [colInfo, setColInfo] = useState<any[]>([]);
+  // Text search
+  const [searchText, setSearchText] = useState('');
+  const [showSearch, setShowSearch] = useState(false);
+  // Jump to page
+  const [jumpPage, setJumpPage] = useState('');
 
-  const load = useCallback(async (p: number) => {
+  const primaryKeys = colInfo.filter((c: any) => c.Key === 'PRI' || c.key_column === 1).map((c: any) => c.Field || c.COLUMN_NAME || c.name);
+
+  const buildWhere = (row: any) => {
+    if (primaryKeys.length > 0) {
+      const w: Record<string, any> = {};
+      primaryKeys.forEach(k => { w[k] = row[k] ?? null; });
+      return w;
+    }
+    // Fallback: use all columns
+    const w: Record<string, any> = {};
+    Object.keys(row).forEach(k => { w[k] = row[k]; });
+    return w;
+  };
+
+  const load = useCallback(async (p: number, ps?: number, sc?: string | null, sd?: 'ASC' | 'DESC', f?: typeof filters) => {
     setLoading(true);
     try {
-      const res = await api.post('/database/table-data', { ...connPayload(conn), table: tableName, page: p, pageSize });
+      const activeFilters = (f ?? filters).filter(fl => fl.column && (fl.operator === 'IS NULL' || fl.operator === 'IS NOT NULL' || fl.value));
+      // Add text search as LIKE filter on all columns if searchText is set
+      const allFilters = [...activeFilters];
+      const res = await api.post('/database/table-data', {
+        ...connPayload(conn), table: tableName,
+        page: p, pageSize: ps ?? pageSize,
+        sortColumn: sc !== undefined ? sc : sortCol,
+        sortDirection: sd ?? sortDir,
+        filters: allFilters.length > 0 ? allFilters : undefined,
+      });
       setData(res.data);
       setPage(p);
+      setEditingRow(null);
+      setSelectedRows(new Set());
     } catch (err: any) {
       notify.error(err.response?.data?.error || 'Failed to load data');
     } finally {
       setLoading(false);
     }
-  }, [conn, tableName, pageSize]);
+  }, [conn, tableName, pageSize, sortCol, sortDir, filters]);
 
-  useEffect(() => { load(1); }, [tableName]);
+  // Load column info for PK detection
+  useEffect(() => {
+    api.post('/database/describe', { ...connPayload(conn), table: tableName })
+      .then(r => setColInfo(r.data?.columns || []))
+      .catch(() => {});
+  }, [tableName]);
+
+  useEffect(() => {
+    setSortCol(null); setSortDir('ASC'); setFilters([]); setSearchText(''); setShowSearch(false);
+    load(1, pageSize, null, 'ASC', []);
+  }, [tableName]);
 
   const totalPages = data ? Math.ceil(data.total / pageSize) : 0;
-  const filteredRows = data?.rows?.filter(row => {
-    if (!filterCol || !filterVal) return true;
-    return String(row[filterCol] ?? '').toLowerCase().includes(filterVal.toLowerCase());
-  }) || [];
+
+  const handleSort = (col: string) => {
+    let newDir: 'ASC' | 'DESC' = 'ASC';
+    if (sortCol === col) newDir = sortDir === 'ASC' ? 'DESC' : 'ASC';
+    setSortCol(col);
+    setSortDir(newDir);
+    load(1, pageSize, col, newDir);
+  };
+
+  const addFilter = () => setFilters(prev => [...prev, { column: data?.columns[0] || '', operator: 'LIKE', value: '' }]);
+  const removeFilter = (i: number) => { const n = filters.filter((_, j) => j !== i); setFilters(n); load(1, pageSize, sortCol, sortDir, n); };
+  const updateFilter = (i: number, patch: Partial<typeof filters[0]>) => setFilters(prev => prev.map((f, j) => j === i ? { ...f, ...patch } : f));
+  const applyFilters = () => load(1, pageSize, sortCol, sortDir);
+
+  const handleTextSearch = () => {
+    if (!searchText.trim() || !data?.columns.length) return;
+    // Create a LIKE filter on the first column, or use the query editor for multi-col search
+    const f = [{ column: data.columns[0], operator: 'LIKE', value: searchText }];
+    setFilters(f);
+    setShowFilters(true);
+    load(1, pageSize, sortCol, sortDir, f);
+  };
+
+  const clearAllFilters = () => {
+    setFilters([]);
+    setSearchText('');
+    load(1, pageSize, sortCol, sortDir, []);
+  };
+
+  // Row editing
+  const startEdit = (i: number) => {
+    if (!data) return;
+    setEditingRow(i);
+    setEditData({ ...data.rows[i] });
+  };
+  const cancelEdit = () => { setEditingRow(null); setEditData({}); };
+  const saveEdit = async () => {
+    if (editingRow === null || !data) return;
+    try {
+      const origRow = data.rows[editingRow];
+      const where = buildWhere(origRow);
+      // Only send changed fields
+      const changes: Record<string, any> = {};
+      for (const k of Object.keys(editData)) {
+        if (String(editData[k] ?? '') !== String(origRow[k] ?? '')) changes[k] = editData[k];
+      }
+      if (Object.keys(changes).length === 0) { cancelEdit(); return; }
+      await api.post('/database/row-update', { ...connPayload(conn), table: tableName, row: changes, where });
+      notify.success('Row updated');
+      load(page);
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Update failed');
+    }
+  };
+
+  // Insert row
+  const handleInsert = async () => {
+    const nonEmpty = Object.fromEntries(Object.entries(insertData).filter(([_, v]) => v !== undefined && v !== ''));
+    if (Object.keys(nonEmpty).length === 0) { notify.error('No data to insert'); return; }
+    try {
+      await api.post('/database/row-insert', { ...connPayload(conn), table: tableName, row: nonEmpty });
+      notify.success('Row inserted');
+      setShowInsert(false);
+      setInsertData({});
+      load(page);
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Insert failed');
+    }
+  };
+
+  // Delete row
+  const deleteRow = async (row: any) => {
+    const r = await Swal.fire({
+      title: 'Delete Row?', text: 'This cannot be undone.', icon: 'warning',
+      showCancelButton: true, confirmButtonColor: '#ef4444', confirmButtonText: 'Delete',
+    });
+    if (!r.isConfirmed) return;
+    try {
+      const where = buildWhere(row);
+      await api.post('/database/row-delete', { ...connPayload(conn), table: tableName, where });
+      notify.success('Row deleted');
+      load(page);
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Delete failed');
+    }
+  };
+
+  // Delete selected rows
+  const deleteSelected = async () => {
+    if (selectedRows.size === 0) return;
+    const r = await Swal.fire({
+      title: `Delete ${selectedRows.size} row(s)?`, text: 'This cannot be undone.', icon: 'warning',
+      showCancelButton: true, confirmButtonColor: '#ef4444', confirmButtonText: 'Delete All',
+    });
+    if (!r.isConfirmed) return;
+    let ok = 0;
+    for (const i of Array.from(selectedRows)) {
+      try {
+        const where = buildWhere(data!.rows[i]);
+        await api.post('/database/row-delete', { ...connPayload(conn), table: tableName, where });
+        ok++;
+      } catch {}
+    }
+    notify.success(`${ok} row(s) deleted`);
+    setSelectedRows(new Set());
+    load(page);
+  };
+
+  // Export helpers
+  const exportBrowseCSV = () => {
+    if (!data) return;
+    const esc = (v: any) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const csv = [data.columns.map(esc).join(','), ...data.rows.map(r => data.columns.map(c => esc(r[c])).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${tableName}.csv`; a.click();
+    URL.revokeObjectURL(url);
+    notify.success('CSV exported');
+  };
+
+  const exportBrowseJSON = () => {
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data.rows, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${tableName}.json`; a.click();
+    URL.revokeObjectURL(url);
+    notify.success('JSON exported');
+  };
+
+  const exportBrowseSQL = () => {
+    if (!data || data.rows.length === 0) return;
+    const safe = tableName.replace(/`/g, '');
+    const lines = data.rows.map(row => {
+      const vals = data.columns.map(c => row[c] === null ? 'NULL' : `'${String(row[c]).replace(/'/g, "\\'")}'`);
+      return `INSERT INTO \`${safe}\` (\`${data.columns.join('`, `')}\`) VALUES (${vals.join(', ')});`;
+    });
+    const blob = new Blob([lines.join('\n')], { type: 'text/sql' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${tableName}_insert.sql`; a.click();
+    URL.revokeObjectURL(url);
+    notify.success('SQL export created');
+  };
+
+  const copyRows = () => {
+    if (!data) return;
+    const text = [data.columns.join('\t'), ...data.rows.map(r => data.columns.map(c => r[c] ?? '').join('\t'))].join('\n');
+    navigator.clipboard.writeText(text);
+    notify.success('Copied to clipboard');
+  };
+
+  const selectAll = () => {
+    if (!data) return;
+    if (selectedRows.size === data.rows.length) setSelectedRows(new Set());
+    else setSelectedRows(new Set(data.rows.map((_, i) => i)));
+  };
+
+  const toggleSelect = (i: number) => {
+    setSelectedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  };
+
+  const OPERATORS = ['LIKE', '=', '!=', '>', '<', '>=', '<=', 'REGEXP', 'IS NULL', 'IS NOT NULL'];
 
   return (
     <div className="flex flex-col h-full">
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b text-xs">
+      {/* Toolbar Row 1 — Table name, search, actions */}
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border-b text-xs flex-wrap">
         <TableCellsIcon className="h-4 w-4 text-gray-400" />
         <span className="font-semibold text-gray-700">{tableName}</span>
         {data && <span className="text-gray-400">({data.total.toLocaleString()} rows)</span>}
+
+        <div className="w-px h-4 bg-gray-200 mx-1" />
+
+        {/* Search */}
+        <div className="flex items-center gap-1">
+          <button onClick={() => setShowSearch(!showSearch)} className={`p-1 rounded ${showSearch ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-200 text-gray-400'}`} title="Search">
+            <MagnifyingGlassIcon className="h-3.5 w-3.5" />
+          </button>
+          {showSearch && (
+            <>
+              <input value={searchText} onChange={e => setSearchText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleTextSearch()}
+                placeholder="Search…" className="px-2 py-1 border rounded text-[11px] w-36 focus:ring-1 focus:ring-blue-300" />
+              {searchText && <button onClick={clearAllFilters} className="text-gray-400 hover:text-red-500"><XMarkIcon className="h-3 w-3" /></button>}
+            </>
+          )}
+        </div>
+
+        {/* Filter toggle */}
+        <button onClick={() => { setShowFilters(!showFilters); if (!showFilters && filters.length === 0) addFilter(); }}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] ${showFilters || filters.length > 0 ? 'bg-amber-100 text-amber-700' : 'hover:bg-gray-200 text-gray-500'}`}>
+          <FunnelIcon className="h-3 w-3" />
+          {filters.length > 0 ? `${filters.length} filter${filters.length > 1 ? 's' : ''}` : 'Filter'}
+        </button>
+
         <div className="flex-1" />
-        {/* Filter */}
-        {data && data.columns.length > 0 && (
-          <div className="flex items-center gap-1">
-            <MagnifyingGlassIcon className="h-3.5 w-3.5 text-gray-400" />
-            <select value={filterCol} onChange={e => setFilterCol(e.target.value)}
-              className="px-1.5 py-1 border rounded text-[11px] bg-white">
-              <option value="">Filter…</option>
-              {data.columns.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            {filterCol && (
-              <input value={filterVal} onChange={e => setFilterVal(e.target.value)}
-                placeholder="value" className="px-2 py-1 border rounded text-[11px] w-32" />
-            )}
-          </div>
+
+        {/* Limit selector */}
+        <label className="text-[10px] text-gray-400">Limit:</label>
+        <select value={pageSize} onChange={e => { const ps = +e.target.value; setPageSize(ps); load(1, ps); }}
+          className="px-1.5 py-0.5 border rounded text-[11px] bg-white w-16">
+          {[20, 50, 100, 200, 500, 1000].map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+
+        <div className="w-px h-4 bg-gray-200 mx-0.5" />
+
+        {/* Row actions */}
+        <button onClick={() => { setShowInsert(!showInsert); if (!showInsert) { const d: Record<string, any> = {}; data?.columns.forEach(c => d[c] = ''); setInsertData(d); } }}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium ${showInsert ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-emerald-50 text-emerald-600 border border-emerald-200'}`}
+          title="New row">
+          <PlusIcon className="h-3 w-3" /> New Row
+        </button>
+
+        {selectedRows.size > 0 && (
+          <button onClick={deleteSelected}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">
+            <TrashIcon className="h-3 w-3" /> Delete {selectedRows.size}
+          </button>
         )}
-        <button onClick={() => load(page)} className="p-1 rounded hover:bg-gray-200">
+
+        <div className="w-px h-4 bg-gray-200 mx-0.5" />
+
+        {/* Export */}
+        <div className="flex items-center gap-0.5">
+          <button onClick={copyRows} className="p-1 rounded hover:bg-gray-200 text-gray-400" title="Copy to clipboard">
+            <ClipboardDocumentIcon className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={exportBrowseCSV} className="p-1 rounded hover:bg-gray-200 text-gray-400" title="Export CSV">
+            <ArrowDownTrayIcon className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={exportBrowseJSON} className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded hover:bg-gray-200 text-gray-400 text-[10px]" title="Export JSON">
+            JSON
+          </button>
+          <button onClick={exportBrowseSQL} className="inline-flex items-center gap-0.5 px-1.5 py-1 rounded hover:bg-gray-200 text-gray-400 text-[10px]" title="Export as INSERT SQL">
+            SQL
+          </button>
+        </div>
+
+        <button onClick={() => load(page)} className="p-1 rounded hover:bg-gray-200" title="Refresh">
           <ArrowPathIcon className={`h-3.5 w-3.5 text-gray-400 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
-      {/* Data */}
+      {/* Filters bar */}
+      {showFilters && (
+        <div className="px-3 py-2 bg-amber-50/50 border-b space-y-1.5">
+          {filters.map((f, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-gray-400 w-8 text-right">{i === 0 ? 'WHERE' : 'AND'}</span>
+              <select value={f.column} onChange={e => updateFilter(i, { column: e.target.value })}
+                className="px-1.5 py-1 border rounded bg-white text-[11px] max-w-[140px]">
+                {data?.columns.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={f.operator} onChange={e => updateFilter(i, { operator: e.target.value })}
+                className="px-1.5 py-1 border rounded bg-white text-[11px] w-24">
+                {OPERATORS.map(op => <option key={op} value={op}>{op}</option>)}
+              </select>
+              {!['IS NULL', 'IS NOT NULL'].includes(f.operator) && (
+                <input value={f.value} onChange={e => updateFilter(i, { value: e.target.value })}
+                  onKeyDown={e => e.key === 'Enter' && applyFilters()}
+                  placeholder="value" className="px-2 py-1 border rounded text-[11px] flex-1 max-w-[200px] font-mono" />
+              )}
+              <button onClick={() => removeFilter(i)} className="p-0.5 rounded hover:bg-red-100 text-red-400"><XMarkIcon className="h-3 w-3" /></button>
+            </div>
+          ))}
+          <div className="flex items-center gap-2 pt-1">
+            <button onClick={addFilter} className="text-[11px] text-blue-600 hover:underline">+ Add condition</button>
+            <button onClick={applyFilters} className="px-3 py-1 text-[11px] bg-amber-500 text-white rounded hover:bg-amber-600 font-medium">Apply</button>
+            <button onClick={clearAllFilters} className="px-2 py-1 text-[11px] text-gray-500 hover:text-red-500">Clear all</button>
+          </div>
+        </div>
+      )}
+
+      {/* Insert row form */}
+      {showInsert && data && (
+        <div className="px-3 py-2 bg-emerald-50/50 border-b">
+          <div className="flex items-center gap-2 mb-2">
+            <PlusIcon className="h-3.5 w-3.5 text-emerald-600" />
+            <span className="text-[11px] font-semibold text-emerald-800">Insert New Row</span>
+            <div className="flex-1" />
+            <button onClick={handleInsert} className="px-3 py-1 text-[11px] bg-emerald-500 text-white rounded hover:bg-emerald-600 font-medium">Insert</button>
+            <button onClick={() => setShowInsert(false)} className="px-2 py-1 text-[11px] text-gray-500 hover:text-gray-700">Cancel</button>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5">
+            {data.columns.map(col => (
+              <div key={col}>
+                <label className="text-[9px] text-gray-500 font-medium uppercase tracking-wider">{col}</label>
+                <input value={insertData[col] || ''} onChange={e => setInsertData(prev => ({ ...prev, [col]: e.target.value }))}
+                  className="w-full px-2 py-1 border rounded text-[11px] font-mono bg-white focus:ring-1 focus:ring-emerald-300"
+                  placeholder="NULL" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Data Table */}
       <div className="flex-1 overflow-auto">
         {loading && !data ? (
           <div className="flex items-center justify-center h-full">
             <ArrowPathIcon className="h-6 w-6 animate-spin text-gray-300" />
           </div>
         ) : data && data.columns.length > 0 ? (
-          <table className="w-full text-xs">
+          <table className="w-full text-xs border-collapse">
             <thead className="sticky top-0 bg-gray-100 z-10">
               <tr>
+                <th className="px-1 py-2 border-b w-8">
+                  <input type="checkbox" checked={data.rows.length > 0 && selectedRows.size === data.rows.length}
+                    onChange={selectAll} className="h-3 w-3 rounded border-gray-300" />
+                </th>
                 <th className="px-2 py-2 text-left font-semibold text-gray-500 border-b w-10">#</th>
                 {data.columns.map(col => (
-                  <th key={col} className="px-2 py-2 text-left font-semibold text-gray-600 border-b whitespace-nowrap">{col}</th>
+                  <th key={col} className="px-2 py-2 text-left font-semibold text-gray-600 border-b whitespace-nowrap cursor-pointer hover:bg-gray-200 select-none group"
+                    onClick={() => handleSort(col)}>
+                    <span className="inline-flex items-center gap-1">
+                      {col}
+                      {primaryKeys.includes(col) && <KeyIcon className="h-2.5 w-2.5 text-amber-500" />}
+                      {sortCol === col
+                        ? (sortDir === 'ASC' ? <ArrowUpIcon className="h-3 w-3 text-blue-500" /> : <ArrowDownIcon className="h-3 w-3 text-blue-500" />)
+                        : <ArrowsUpDownIcon className="h-3 w-3 text-gray-300 opacity-0 group-hover:opacity-100" />}
+                    </span>
+                  </th>
                 ))}
+                <th className="px-2 py-2 text-center font-semibold text-gray-500 border-b w-20">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredRows.map((row, i) => (
-                <tr key={i} className="hover:bg-blue-50/50 border-b border-gray-50">
+              {data.rows.map((row, i) => (
+                <tr key={i} className={`border-b border-gray-50 ${selectedRows.has(i) ? 'bg-blue-50' : 'hover:bg-gray-50/80'} ${editingRow === i ? 'bg-yellow-50' : ''}`}>
+                  <td className="px-1 py-1 text-center">
+                    <input type="checkbox" checked={selectedRows.has(i)} onChange={() => toggleSelect(i)} className="h-3 w-3 rounded border-gray-300" />
+                  </td>
                   <td className="px-2 py-1 text-gray-400 font-mono text-[10px]">{(page - 1) * pageSize + i + 1}</td>
                   {data.columns.map(col => (
-                    <td key={col} className="px-2 py-1 max-w-[250px] truncate font-mono">
-                      {row[col] === null ? <span className="text-gray-300 italic">NULL</span> : String(row[col])}
+                    <td key={col} className="px-2 py-1 max-w-[280px] font-mono">
+                      {editingRow === i ? (
+                        <input value={editData[col] ?? ''} onChange={e => setEditData(prev => ({ ...prev, [col]: e.target.value }))}
+                          className="w-full px-1.5 py-0.5 border border-yellow-300 rounded text-[11px] font-mono bg-yellow-50 focus:ring-1 focus:ring-yellow-400 min-w-[60px]" />
+                      ) : (
+                        <span className="truncate block" title={row[col] !== null ? String(row[col]) : 'NULL'}>
+                          {row[col] === null
+                            ? <span className="text-gray-300 italic text-[10px]">NULL</span>
+                            : typeof row[col] === 'boolean'
+                              ? <span className={`text-[10px] px-1.5 py-0.5 rounded ${row[col] ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{String(row[col])}</span>
+                              : String(row[col]).length > 100 ? String(row[col]).substring(0, 100) + '…' : String(row[col])}
+                        </span>
+                      )}
                     </td>
                   ))}
+                  <td className="px-2 py-1 text-center">
+                    {editingRow === i ? (
+                      <div className="flex items-center justify-center gap-1">
+                        <button onClick={saveEdit} className="p-0.5 rounded hover:bg-emerald-100 text-emerald-600" title="Save"><CheckIcon className="h-3.5 w-3.5" /></button>
+                        <button onClick={cancelEdit} className="p-0.5 rounded hover:bg-gray-200 text-gray-400" title="Cancel"><XMarkIcon className="h-3.5 w-3.5" /></button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-center gap-0.5">
+                        <button onClick={() => startEdit(i)} className="p-0.5 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600" title="Edit row">
+                          <PencilIcon className="h-3 w-3" />
+                        </button>
+                        <button onClick={() => deleteRow(row)} className="p-0.5 rounded hover:bg-red-100 text-gray-400 hover:text-red-500" title="Delete row">
+                          <TrashIcon className="h-3 w-3" />
+                        </button>
+                        <button onClick={() => { navigator.clipboard.writeText(JSON.stringify(row, null, 2)); notify.success('Row copied'); }}
+                          className="p-0.5 rounded hover:bg-gray-200 text-gray-400" title="Copy row as JSON">
+                          <ClipboardDocumentIcon className="h-3 w-3" />
+                        </button>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : (
-          <div className="flex items-center justify-center h-full text-sm text-gray-400">No data</div>
+          <div className="flex items-center justify-center h-full text-sm text-gray-400">
+            {filters.length > 0 ? 'No rows match the filter criteria' : 'No data'}
+          </div>
         )}
       </div>
 
       {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-t text-xs text-gray-500">
-          <span>Page {page} of {totalPages} ({data?.total.toLocaleString()} rows)</span>
-          <div className="flex items-center gap-1">
-            <button onClick={() => load(1)} disabled={page <= 1} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
-              <ChevronDoubleLeftIcon className="h-3.5 w-3.5" />
-            </button>
-            <button onClick={() => load(page - 1)} disabled={page <= 1} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
-              <ChevronLeftIcon className="h-3.5 w-3.5" />
-            </button>
-            <button onClick={() => load(page + 1)} disabled={page >= totalPages} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
-              <ChevronRightIcon className="h-3.5 w-3.5" />
-            </button>
-            <button onClick={() => load(totalPages)} disabled={page >= totalPages} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
-              <ChevronDoubleRightIcon className="h-3.5 w-3.5" />
-            </button>
-          </div>
+      <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-t text-xs text-gray-500">
+        <div className="flex items-center gap-2">
+          <span>
+            {data ? `${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, data.total).toLocaleString()} of ${data.total.toLocaleString()}` : '—'}
+          </span>
+          {sortCol && (
+            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px]">
+              ↕ {sortCol} {sortDir}
+              <button onClick={() => { setSortCol(null); load(1, pageSize, null, 'ASC'); }} className="ml-1 hover:text-red-500">×</button>
+            </span>
+          )}
+          {filters.length > 0 && (
+            <span className="px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded text-[10px]">
+              {filters.length} filter(s)
+              <button onClick={clearAllFilters} className="ml-1 hover:text-red-500">×</button>
+            </span>
+          )}
         </div>
-      )}
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-gray-400 mr-1">Page {page}/{totalPages || 1}</span>
+          <input
+            value={jumpPage}
+            onChange={e => setJumpPage(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { const p = parseInt(jumpPage); if (p >= 1 && p <= totalPages) { load(p); setJumpPage(''); } } }}
+            placeholder="#"
+            className="w-10 px-1.5 py-0.5 border rounded text-[11px] text-center"
+            title="Jump to page"
+          />
+          <button onClick={() => load(1)} disabled={page <= 1} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
+            <ChevronDoubleLeftIcon className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={() => load(page - 1)} disabled={page <= 1} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
+            <ChevronLeftIcon className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={() => load(page + 1)} disabled={page >= totalPages} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
+            <ChevronRightIcon className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={() => load(totalPages)} disabled={page >= totalPages} className="p-1 rounded hover:bg-gray-200 disabled:opacity-30">
+            <ChevronDoubleRightIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -415,10 +826,9 @@ const TableBrowser: React.FC<{
    Main Database Manager Page
    ═════════════════════════════════════════════════════════════ */
 const DatabaseManager: React.FC = () => {
-  // Connections
-  const [connections, setConnections] = useState<Connection[]>(() => {
-    try { return JSON.parse(localStorage.getItem('db_connections_v2') || '[]'); } catch { return []; }
-  });
+  // Connections (shared via backend API)
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [loadingConnections, setLoadingConnections] = useState(true);
   const [activeConnection, setActiveConnection] = useState<Connection | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -465,24 +875,34 @@ const DatabaseManager: React.FC = () => {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load SSH keys on mount
+  // Load SSH keys and shared connections on mount
   useEffect(() => {
     api.get('/database/keys').then(r => setSshKeys(r.data?.keys || [])).catch(() => {});
+    api.get('/database/connections')
+      .then(r => setConnections(r.data?.connections || []))
+      .catch(() => {})
+      .finally(() => setLoadingConnections(false));
   }, []);
 
-  // Save connections
-  useEffect(() => { localStorage.setItem('db_connections_v2', JSON.stringify(connections)); }, [connections]);
+  // Save query history/saved queries to localStorage (per-user preference)
   useEffect(() => { localStorage.setItem('db_query_history', JSON.stringify(queryHistory)); }, [queryHistory]);
   useEffect(() => { localStorage.setItem('db_saved_queries', JSON.stringify(savedQueries)); }, [savedQueries]);
 
   // ── Connection ops ────────────────────────────────────────
-  const saveConnection = (conn: Connection) => {
-    setConnections(prev => {
-      const idx = prev.findIndex(c => c.id === conn.id);
-      if (idx >= 0) { const u = [...prev]; u[idx] = conn; return u; }
-      return [...prev, conn];
-    });
-    notify.success('Connection saved');
+  const saveConnection = async (conn: Connection) => {
+    try {
+      const res = await api.post('/database/connections', conn);
+      const savedId = res.data?.id || conn.id;
+      const saved = { ...conn, id: savedId };
+      setConnections(prev => {
+        const idx = prev.findIndex(c => c.id === saved.id);
+        if (idx >= 0) { const u = [...prev]; u[idx] = saved; return u; }
+        return [...prev, saved];
+      });
+      notify.success('Connection saved');
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Failed to save connection');
+    }
   };
 
   const deleteConnection = async (conn: Connection) => {
@@ -491,9 +911,14 @@ const DatabaseManager: React.FC = () => {
       showCancelButton: true, confirmButtonColor: '#ef4444', confirmButtonText: 'Delete',
     });
     if (!r.isConfirmed) return;
-    setConnections(prev => prev.filter(c => c.id !== conn.id));
-    if (activeConnection?.id === conn.id) { setActiveConnection(null); setConnected(false); }
-    notify.success('Removed');
+    try {
+      await api.delete(`/database/connections/${conn.id}`);
+      setConnections(prev => prev.filter(c => c.id !== conn.id));
+      if (activeConnection?.id === conn.id) { setActiveConnection(null); setConnected(false); }
+      notify.success('Removed');
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Failed to delete connection');
+    }
   };
 
   const handleConnect = async (conn: Connection) => {
@@ -705,6 +1130,88 @@ const DatabaseManager: React.FC = () => {
     setMainTab('query');
   };
 
+  // ── Import SQL ────────────────────────────────────────────
+  const [importSqlText, setImportSqlText] = useState('');
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
+
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setImportSqlText(ev.target?.result as string || '');
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // reset so same file can be re-selected
+  };
+
+  const executeImportSQL = async () => {
+    if (!activeConnection || !importSqlText.trim()) return;
+    setImportLoading(true);
+    setImportResult(null);
+    try {
+      const res = await api.post('/database/import-sql', {
+        ...connPayload(activeConnection),
+        sql: importSqlText.trim(),
+      });
+      setImportResult({ success: true, message: res.data?.message || 'SQL executed successfully', details: res.data });
+      notify.success('SQL import completed');
+      fetchTables(); // refresh table list
+    } catch (err: any) {
+      setImportResult({ success: false, message: err.response?.data?.error || 'Import failed' });
+      notify.error(err.response?.data?.error || 'Import failed');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  // ── Truncate / Drop table ─────────────────────────────────
+  const truncateTable = async (table: string) => {
+    const r = await Swal.fire({
+      title: 'Truncate Table?',
+      html: `This will <b>delete all rows</b> from <code>${table}</code>.<br/>This cannot be undone!`,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      confirmButtonText: 'Truncate',
+    });
+    if (!r.isConfirmed || !activeConnection) return;
+    try {
+      await api.post('/database/truncate', { ...connPayload(activeConnection), table });
+      notify.success(`Table ${table} truncated`);
+      fetchTables();
+      if (browsingTable === table) setBrowsingTable(null);
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Truncate failed');
+    }
+  };
+
+  const dropTable = async (table: string) => {
+    const r = await Swal.fire({
+      title: 'Drop Table?',
+      html: `This will <b>permanently delete</b> the table <code>${table}</code> and all its data.<br/><br/>Type the table name to confirm:`,
+      icon: 'error',
+      input: 'text',
+      inputPlaceholder: table,
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      confirmButtonText: 'Drop Table',
+      inputValidator: v => v !== table ? 'Table name does not match' : null,
+    });
+    if (!r.isConfirmed || !activeConnection) return;
+    try {
+      await api.post('/database/drop-table', { ...connPayload(activeConnection), table });
+      notify.success(`Table ${table} dropped`);
+      fetchTables();
+      if (browsingTable === table) setBrowsingTable(null);
+      if (infoTable === table) { setInfoTable(null); setTableInfo(null); }
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Drop failed');
+    }
+  };
+
   return (
     <div className="flex h-[calc(100vh-8rem)] bg-white rounded-xl shadow-sm border overflow-hidden">
       {/* ═════ SIDEBAR ═════ */}
@@ -742,7 +1249,11 @@ const DatabaseManager: React.FC = () => {
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto">
-            {connections.length === 0 ? (
+            {loadingConnections ? (
+              <div className="flex items-center justify-center py-8">
+                <ArrowPathIcon className="h-5 w-5 animate-spin text-gray-300" />
+              </div>
+            ) : connections.length === 0 ? (
               <div className="text-center py-8 px-4">
                 <ServerStackIcon className="h-8 w-8 text-gray-200 mx-auto mb-2" />
                 <p className="text-xs text-gray-400 mb-2">No connections</p>
@@ -769,14 +1280,14 @@ const DatabaseManager: React.FC = () => {
                           </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => { setEditingConn(conn); setDialogOpen(true); }}
-                          className="p-0.5 rounded hover:bg-gray-200" title="Edit">
-                          <CodeBracketIcon className="h-3 w-3" />
+                      <div className="flex items-center gap-0.5">
+                        <button onClick={(e) => { e.stopPropagation(); setEditingConn(conn); setDialogOpen(true); }}
+                          className="p-1 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600 transition-colors" title="Edit connection">
+                          <PencilSquareIcon className="h-3.5 w-3.5" />
                         </button>
-                        <button onClick={() => deleteConnection(conn)}
-                          className="p-0.5 rounded hover:bg-red-100 text-red-400" title="Delete">
-                          <TrashIcon className="h-3 w-3" />
+                        <button onClick={(e) => { e.stopPropagation(); deleteConnection(conn); }}
+                          className="p-1 rounded hover:bg-red-100 text-gray-400 hover:text-red-500 transition-colors" title="Delete connection">
+                          <TrashIcon className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </div>
@@ -847,6 +1358,12 @@ const DatabaseManager: React.FC = () => {
                             </button>
                             <button onClick={() => loadTableInfo(t.name)} className="p-0.5 rounded hover:bg-gray-200" title="Info">
                               <InformationCircleIcon className="h-3 w-3 text-gray-400" />
+                            </button>
+                            <button onClick={() => truncateTable(t.name)} className="p-0.5 rounded hover:bg-red-100" title="Truncate table">
+                              <StopIcon className="h-3 w-3 text-gray-400 hover:text-red-500" />
+                            </button>
+                            <button onClick={() => dropTable(t.name)} className="p-0.5 rounded hover:bg-red-100" title="Drop table">
+                              <NoSymbolIcon className="h-3 w-3 text-gray-400 hover:text-red-500" />
                             </button>
                           </div>
                         </div>
@@ -986,6 +1503,7 @@ const DatabaseManager: React.FC = () => {
             { key: 'query' as MainTab, label: 'Results', icon: DocumentTextIcon },
             { key: 'browse' as MainTab, label: 'Browse', icon: ListBulletIcon },
             { key: 'info' as MainTab, label: 'Info', icon: InformationCircleIcon },
+            { key: 'import' as MainTab, label: 'Import', icon: DocumentArrowUpIcon },
             { key: 'processes' as MainTab, label: 'Processes', icon: CommandLineIcon },
             { key: 'status' as MainTab, label: 'Server', icon: Cog6ToothIcon },
           ].map(tab => (
@@ -1125,14 +1643,130 @@ const DatabaseManager: React.FC = () => {
             )
           )}
 
+          {/* ── IMPORT SQL TAB ── */}
+          {mainTab === 'import' && (
+            <div className="p-4 max-w-3xl space-y-4">
+              <div className="flex items-center gap-3">
+                <DocumentArrowUpIcon className="h-6 w-6 text-blue-500" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">Import SQL</h3>
+                  <p className="text-xs text-gray-400">Execute SQL statements from a file or paste them directly</p>
+                </div>
+              </div>
+
+              {/* File upload */}
+              <div className="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center hover:border-blue-300 transition-colors cursor-pointer"
+                onClick={() => importFileRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-blue-400', 'bg-blue-50/50'); }}
+                onDragLeave={e => { e.currentTarget.classList.remove('border-blue-400', 'bg-blue-50/50'); }}
+                onDrop={e => {
+                  e.preventDefault();
+                  e.currentTarget.classList.remove('border-blue-400', 'bg-blue-50/50');
+                  const file = e.dataTransfer.files?.[0];
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => setImportSqlText(ev.target?.result as string || '');
+                    reader.readAsText(file);
+                  }
+                }}>
+                <DocumentArrowUpIcon className="h-8 w-8 text-gray-300 mx-auto mb-2" />
+                <p className="text-sm text-gray-500">Drop a <span className="font-mono">.sql</span> file here or click to upload</p>
+                <p className="text-[10px] text-gray-400 mt-1">Supports .sql, .txt files</p>
+              </div>
+              <input ref={importFileRef} type="file" accept=".sql,.txt" className="hidden" onChange={handleImportFile} />
+
+              {/* SQL text area */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-gray-600">SQL Statements</label>
+                  <div className="flex items-center gap-2">
+                    {importSqlText && (
+                      <span className="text-[10px] text-gray-400">{importSqlText.length.toLocaleString()} chars</span>
+                    )}
+                    <button onClick={() => { setImportSqlText(''); setImportResult(null); }}
+                      className="text-[10px] text-gray-400 hover:text-red-500">Clear</button>
+                  </div>
+                </div>
+                <textarea
+                  value={importSqlText}
+                  onChange={e => setImportSqlText(e.target.value)}
+                  rows={12}
+                  className="w-full p-3 font-mono text-sm resize-y border rounded-xl bg-[#1e1e2e] text-[#cdd6f4] focus:ring-2 focus:ring-blue-300 focus:outline-none"
+                  placeholder="-- Paste your SQL here…&#10;-- CREATE TABLE, INSERT INTO, ALTER TABLE, etc.&#10;-- Multiple statements separated by semicolons"
+                  spellCheck={false}
+                />
+              </div>
+
+              {/* Execute button */}
+              <div className="flex items-center gap-3">
+                <button onClick={executeImportSQL}
+                  disabled={importLoading || !importSqlText.trim() || !connected}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors shadow-sm">
+                  {importLoading ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <PlayIcon className="h-4 w-4" />}
+                  {importLoading ? 'Executing…' : 'Execute Import'}
+                </button>
+                {!connected && (
+                  <span className="text-xs text-amber-600 flex items-center gap-1">
+                    <ExclamationTriangleIcon className="h-3.5 w-3.5" /> Connect to a database first
+                  </span>
+                )}
+              </div>
+
+              {/* Import result */}
+              {importResult && (
+                <div className={`p-4 rounded-xl border ${importResult.success ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                  <div className="flex items-start gap-3">
+                    {importResult.success
+                      ? <CheckIcon className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
+                      : <ExclamationTriangleIcon className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />}
+                    <div className="flex-1 min-w-0">
+                      <h4 className={`text-sm font-semibold ${importResult.success ? 'text-emerald-800' : 'text-red-800'}`}>
+                        {importResult.success ? 'Import Successful' : 'Import Failed'}
+                      </h4>
+                      <pre className={`text-xs mt-2 whitespace-pre-wrap font-mono rounded-lg p-3 overflow-x-auto ${
+                        importResult.success ? 'text-emerald-600 bg-emerald-100/50' : 'text-red-600 bg-red-100/50'
+                      }`}>{importResult.message}</pre>
+                      {importResult.details?.results && (
+                        <div className="mt-2 text-xs text-gray-600">
+                          <span className="font-medium">{importResult.details.results.length} statement(s) executed</span>
+                          {importResult.details.results.some((r: any) => r.affectedRows !== undefined) && (
+                            <span className="ml-2">
+                              ({importResult.details.results.reduce((s: number, r: any) => s + (r.affectedRows || 0), 0)} total rows affected)
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ── TABLE INFO TAB ── */}
           {mainTab === 'info' && (
             infoTable ? (
               <div className="p-4 space-y-4 max-w-3xl">
-                <h3 className="text-lg font-semibold flex items-center gap-2">
-                  <TableCellsIcon className="h-5 w-5 text-gray-400" />
-                  {infoTable}
-                </h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold flex items-center gap-2">
+                    <TableCellsIcon className="h-5 w-5 text-gray-400" />
+                    {infoTable}
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => { setBrowsingTable(infoTable!); setMainTab('browse'); }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                      <ListBulletIcon className="h-3.5 w-3.5" /> Browse
+                    </button>
+                    <button onClick={() => truncateTable(infoTable!)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg hover:bg-amber-100 border border-amber-200 transition-colors">
+                      <StopIcon className="h-3.5 w-3.5" /> Truncate
+                    </button>
+                    <button onClick={() => dropTable(infoTable!)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 rounded-lg hover:bg-red-100 border border-red-200 transition-colors">
+                      <NoSymbolIcon className="h-3.5 w-3.5" /> Drop
+                    </button>
+                  </div>
+                </div>
 
                 {/* Size info */}
                 {tableInfo && (

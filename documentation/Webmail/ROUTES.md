@@ -36,12 +36,18 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
 | 13 | POST | `/webmail/send` | JWT | Send email (multipart) |
 | 14 | GET | `/webmail/attachment` | JWT | Download attachment |
 
+### Unread Count
+
+| # | Method | Path | Auth | Purpose |
+|---|--------|------|------|---------|
+| 15 | GET | `/webmail/unread-count` | JWT | Get total INBOX unseen count across all accounts |
+
 ### Admin Settings
 
 | # | Method | Path | Auth | Purpose |
 |---|--------|------|------|---------|
-| 15 | GET | `/webmail/settings` | JWT + Admin | Get domain mail server config |
-| 16 | PUT | `/webmail/settings` | JWT + Admin | Update domain mail server config |
+| 16 | GET | `/webmail/settings` | JWT + Admin | Get domain mail server config |
+| 17 | PUT | `/webmail/settings` | JWT + Admin | Update domain mail server config |
 
 ---
 
@@ -68,6 +74,7 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
     "smtp_port": 465,
     "smtp_secure": true,
     "smtp_username": "user@example.com",
+    "signature": "<table border=\"0\"><tbody><tr><td>...</td></tr></tbody></table>",
     "is_default": true,
     "is_active": true,
     "last_connected_at": "2026-03-06T20:10:00.000Z",
@@ -92,7 +99,10 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
 | `display_name` | `string` | Yes | Friendly name (1–255 chars) |
 | `email_address` | `string` | Yes | Valid email address |
 | `password` | `string` | Yes | Email account password |
+| `signature` | `string` | No | HTML email signature |
 | `is_default` | `boolean` | No | Set as default account |
+
+**Note**: `is_default` accepts both boolean and number (0/1) via `coerceBool` Zod preprocessor.
 
 **Flow**:
 1. Zod validate request body
@@ -124,8 +134,11 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
 | `display_name` | `string` | No | Friendly name |
 | `email_address` | `string` | No | Email address (also updates IMAP/SMTP username) |
 | `password` | `string` | No | New password (re-encrypted for both IMAP/SMTP) |
+| `signature` | `string` | No | HTML email signature |
 | `is_default` | `boolean` | No | Set as default |
 | `is_active` | `boolean` | No | Enable/disable account |
+
+**Note**: `is_default` and `is_active` accept both boolean and number (0/1) via `coerceBool` Zod preprocessor. This handles MySQL TINYINT values passed through from the frontend without explicit type conversion.
 
 **Response** `200`:
 ```json
@@ -394,7 +407,36 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
 
 ---
 
-### 15. GET `/webmail/settings`
+### 15. GET `/webmail/unread-count`
+**Purpose**: Get total unread (unseen) message count from INBOX across all user's active mailboxes
+**Auth**: JWT required
+
+**Flow**:
+1. List user's active mailboxes from DB
+2. For each account: decrypt credentials → IMAP connect → `STATUS INBOX (UNSEEN)` → logout
+3. Parallel execution via `Promise.all` — failed accounts return `unseen: 0`
+4. Sum all unseen counts
+
+**Response** `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "total": 5,
+    "accounts": [
+      { "id": 1, "email_address": "user@example.com", "unseen": 5 }
+    ]
+  }
+}
+```
+
+**Performance**: One IMAP connection + single STATUS command per account. No message listing or body download. Typically completes in <1 second per account.
+
+**Frontend usage**: `Layout.tsx` polls this endpoint every 2 minutes to update the sidebar badge.
+
+---
+
+### 16. GET `/webmail/settings`
 **Purpose**: Get domain-wide mail server configuration
 **Auth**: JWT + Admin required
 
@@ -415,7 +457,7 @@ src/routes/webmail.ts → webmailRouter mounted at /webmail
 
 ---
 
-### 16. PUT `/webmail/settings`
+### 17. PUT `/webmail/settings`
 **Purpose**: Update domain-wide mail server configuration
 **Auth**: JWT + Admin required
 **Body**: Validated with `WebmailSettingsSchema`

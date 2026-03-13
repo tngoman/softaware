@@ -83,6 +83,10 @@ const EnvSchema = z.object({
   OLLAMA_BASE_URL: z.string().default('http://127.0.0.1:11434'),
   OLLAMA_MODEL: z.string().default('qwen2.5-coder:7b'),
   OLLAMA_VISION_MODEL: z.string().default('moondream'),
+  // Vision models for file/image reading in assistant chat
+  VISION_OLLAMA_MODEL: z.string().default('qwen2.5vl:7b'),
+  VISION_OPENROUTER_MODEL: z.string().default('openai/gpt-4o'),
+  VISION_OPENROUTER_FALLBACK: z.string().default('google/gemini-2.0-flash-001'),
   LEADS_OLLAMA_MODEL: z.string().default('qwen2.5:1.5b-instruct'),
   // Assistant chat model — Qwen 2.5 0.5/1.5B (fastest CPU inference)
   ASSISTANT_OLLAMA_MODEL: z.string().default('qwen2.5:1.5b-instruct'),

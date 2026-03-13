@@ -5,6 +5,7 @@ export { default as Button } from './Button';
 export { default as Card } from './Card';
 export { default as BackButton } from './BackButton';
 export { default as DataTable } from './DataTable';
+export { default as ThemeToggle } from './ThemeToggle';
 export { default as EmailModal } from './EmailModal';
 export { default as PaymentModal } from './PaymentModal';
 export { default as CustomDatePicker } from './CustomDatePicker';

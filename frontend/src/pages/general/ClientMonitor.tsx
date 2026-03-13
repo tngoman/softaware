@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   SignalIcon,
   ComputerDesktopIcon,
@@ -18,6 +19,7 @@ import {
   CheckCircleIcon,
   ServerIcon,
   GlobeAltIcon,
+  BugAntIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
@@ -36,18 +38,18 @@ const STATUS_CONFIG: Record<ClientStatus, { label: string; color: string; bg: st
   offline:  { label: 'Offline',  color: 'text-gray-700',   bg: 'bg-gray-100',   dot: 'bg-gray-400' },
 };
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const secs = Math.floor(diff / 1000);
+function timeAgo(secondsAgo: number | null, dateStr?: string | null): string {
+  if (secondsAgo == null) return 'Never';
+  const secs = Math.max(0, Math.round(secondsAgo));
   if (secs < 60) return `${secs}s ago`;
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
+  if (hrs < 24) return `${hrs}h ${mins % 60}m ago`;
   const days = Math.floor(hrs / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
+  if (dateStr) return new Date(dateStr).toLocaleDateString();
+  return `${days}d ago`;
 }
 
 /* ── Detail Drawer ────────────────────────────────────────── */
@@ -100,7 +102,7 @@ const ClientDetailDrawer: React.FC<{
             <InfoRow icon={ComputerDesktopIcon} label="Machine" value={client.machine_name} />
             <InfoRow icon={ServerIcon} label="OS" value={client.os_info} />
             <InfoRow icon={CpuChipIcon} label="Version" value={client.app_version} />
-            <InfoRow icon={ClockIcon} label="Last Heartbeat" value={timeAgo(client.last_heartbeat)} />
+            <InfoRow icon={ClockIcon} label="Last Heartbeat" value={timeAgo(client.seconds_since_heartbeat, client.last_heartbeat)} />
             <InfoRow icon={ClockIcon} label="First Seen" value={client.first_seen ? new Date(client.first_seen).toLocaleDateString() : '—'} />
             <InfoRow icon={SignalIcon} label="Active Page" value={client.active_page} />
             <InfoRow icon={CpuChipIcon} label="CPU" value={client.cpu_usage != null ? `${client.cpu_usage}%` : null} />
@@ -177,6 +179,12 @@ const ClientDetailDrawer: React.FC<{
               color="red"
               onClick={() => onAction(client.id, 'delete')}
             />
+            <ActionBtn
+              icon={BugAntIcon}
+              label="View Error Reports"
+              color="blue"
+              onClick={() => onAction(client.id, 'view_errors')}
+            />
           </div>
         </div>
       </div>
@@ -225,9 +233,11 @@ const ActionBtn: React.FC<{
    ═══════════════════════════════════════════════════════════════ */
 
 const ClientMonitor: React.FC = () => {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [clients, setClients] = useState<UpdateClient[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterSoftware, setFilterSoftware] = useState<string>('all');
   const [selectedClient, setSelectedClient] = useState<UpdateClient | null>(null);
@@ -285,6 +295,13 @@ const ClientMonitor: React.FC = () => {
   /* ── Actions ───────────────────────────────────────────── */
   const handleAction = async (id: number, action: string, extra?: any) => {
     try {
+      if (action === 'view_errors') {
+        const client = clients.find((c) => c.id === id);
+        const hostname = client?.hostname || '';
+        navigate(`/error-reports?hostname=${encodeURIComponent(hostname)}`);
+        return;
+      }
+
       if (action === 'delete') {
         const result = await Swal.fire({
           title: 'Delete client?',
@@ -440,7 +457,7 @@ const ClientMonitor: React.FC = () => {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Version</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Heartbeat</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP / Activity</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
@@ -471,8 +488,11 @@ const ClientMonitor: React.FC = () => {
                       <td className="px-4 py-3 text-sm text-gray-700">{client.software_name || '—'}</td>
                       <td className="px-4 py-3 text-sm text-gray-700 font-mono">{client.app_version || '—'}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">{client.user_name || '—'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-500">{timeAgo(client.last_heartbeat)}</td>
-                      <td className="px-4 py-3 text-sm text-gray-500 font-mono">{client.ip_address || '—'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-500">{timeAgo(client.seconds_since_heartbeat, client.last_heartbeat)}</td>
+                      <td className="px-4 py-3 text-sm text-gray-500 font-mono">
+                        <div>{client.ip_address || '—'}</div>
+                        {client.active_page && <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[180px]" title={client.active_page}>{client.active_page}</div>}
+                      </td>
                       <td className="px-4 py-3 text-center">
                         <button
                           onClick={(e) => { e.stopPropagation(); setSelectedClient(client); }}

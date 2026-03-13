@@ -16,6 +16,7 @@ export interface User {
   is_active: boolean;
   is_admin: boolean;
   is_staff?: boolean;
+  contact_id?: number | null;
   roles?: Role[];
   created_at: string;
   updated_at: string;
@@ -322,6 +323,8 @@ export interface MobileIntentRequest {
   conversationId?: string;
   assistantId?: string;
   language?: string;
+  /** Base64 data-URI of an attached image (data:image/png;base64,...) */
+  image?: string;
 }
 
 export interface MobileIntentResponse {

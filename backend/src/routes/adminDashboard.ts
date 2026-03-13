@@ -54,24 +54,24 @@ adminDashboardRouter.get('/', requireAuth, async (req: AuthRequest, res: Respons
     const aiConfigRow = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM ai_model_config');
     const apiKeyTotal = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM api_keys');
 
-    // Credit usage (AI consumption)
+    // Credit usage (AI consumption — from package system)
     const creditStats = await db.queryOne<any>(`
       SELECT
         COALESCE(SUM(CASE WHEN type = 'USAGE' THEN ABS(amount) ELSE 0 END), 0) AS totalUsed,
-        COALESCE(SUM(CASE WHEN type = 'PURCHASE' OR type = 'BONUS' THEN amount ELSE 0 END), 0) AS totalPurchased,
+        COALESCE(SUM(CASE WHEN type = 'PURCHASE' OR type = 'BONUS' OR type = 'MONTHLY_ALLOCATION' THEN amount ELSE 0 END), 0) AS totalPurchased,
         COUNT(CASE WHEN type = 'USAGE' THEN 1 END) AS usageCount
-      FROM credit_transactions
+      FROM package_transactions
     `);
     const creditBalanceRow = await db.queryOne<any>(
-      'SELECT COALESCE(SUM(balance), 0) AS totalBalance FROM credit_balances'
+      'SELECT COALESCE(SUM(credits_balance), 0) AS totalBalance FROM contact_packages WHERE status IN (\'ACTIVE\', \'TRIAL\')'
     );
 
-    // AI usage by request type
+    // AI usage by request type (from package system)
     const aiUsageByType = await db.query<any>(`
-      SELECT requestType, COUNT(*) AS cnt, COALESCE(SUM(ABS(amount)), 0) AS totalCredits
-      FROM credit_transactions
-      WHERE type = 'USAGE' AND requestType IS NOT NULL
-      GROUP BY requestType
+      SELECT request_type AS requestType, COUNT(*) AS cnt, COALESCE(SUM(ABS(amount)), 0) AS totalCredits
+      FROM package_transactions
+      WHERE type = 'USAGE' AND request_type IS NOT NULL
+      GROUP BY request_type
       ORDER BY cnt DESC
     `);
 

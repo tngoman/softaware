@@ -245,16 +245,12 @@ router.post('/core-instructions', requireAuth, async (req: AuthRequest, res) => 
     const userId = req.userId;
     if (!userId) throw unauthorized('Authentication required.');
 
-    // Only super_admin can set core instructions
-    const adminCheck = await db.queryOne<{ slug: string }>(
-      `SELECT r.slug FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-         AND r.slug = 'super_admin'
-       LIMIT 1`,
+    // Only admins can set core instructions
+    const adminRow = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
       [userId],
     );
-    if (!adminCheck) throw forbidden('Only super admins can set core instructions.');
+    if (!adminRow || !adminRow.is_admin) throw forbidden('Only administrators can set core instructions.');
 
     const { assistantId, core_instructions } = req.body;
     if (!assistantId) throw badRequest('assistantId is required.');
@@ -276,10 +272,16 @@ router.post('/core-instructions', requireAuth, async (req: AuthRequest, res) => 
 });
 
 // ============================================================================
-// Software Token Management (for task proxy)
+// Software Token Management
+// ⚠️  DEPRECATED (v2.1.0) — Task tools now use source-level API keys from
+//    `task_sources` table instead of per-user software tokens.
+//    These endpoints remain for backward compatibility but will be removed
+//    in a future release.  No new code should call them.
+//    See: mobileActionExecutor.ts → resolveTaskSourceForTools()
 // ============================================================================
 
 // GET /software-tokens — List stored tokens for current staff user
+// DEPRECATED: No longer used by AI assistant task tools (v2.1.0)
 router.get('/software-tokens', requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.userId;

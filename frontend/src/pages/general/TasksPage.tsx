@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   PlusIcon,
   ArrowPathIcon,
@@ -7,6 +7,7 @@ import {
   CubeIcon,
   Squares2X2Icon,
   Bars3Icon,
+  ViewColumnsIcon,
   ArrowRightIcon,
   CheckCircleIcon,
   ExclamationCircleIcon,
@@ -29,7 +30,6 @@ import {
   ArrowUpTrayIcon,
   LinkIcon,
   ArrowsRightLeftIcon,
-  InformationCircleIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
@@ -44,8 +44,10 @@ import { Software, Task } from '../../types';
 import { LocalTasksModel } from '../../models';
 import ExcalidrawDrawer from '../../components/ExcalidrawDrawer';
 import TaskAttachmentsInline, { clearAttachmentCache } from '../../components/TaskAttachmentsInline';
+import TaskImageLightbox, { LightboxImage } from '../../components/TaskImageLightbox';
 import RichTextEditor from '../../components/RichTextEditor';
 import { canUserAssignTask, getPermissionErrorMessage } from '../../utils/workflowPermissions';
+import { TaskCard, KanbanBoard, TaskToolbar, TaskStatsBar } from '../../components/Tasks';
 
 /* ═══════════════════════════════════════════════════════════════
    Tasks Page — mirrors desktop TasksPage
@@ -129,6 +131,8 @@ function fixImageUrls(html: string, apiUrl: string): string {
 }
 
 function buildAttachmentUrl(apiUrl: string, att: any): string {
+  // Prefer the download_url returned by the external API
+  if (att.download_url) return att.download_url;
   if (att.file_path?.startsWith('http')) return att.file_path;
   try {
     const baseUrl = new URL(apiUrl).origin;
@@ -305,8 +309,9 @@ const TaskDialog: React.FC<{
       // Date fields
       if (form.task_start) taskData.task_start = formatDateToBackend(form.task_start);
       if (form.task_end) taskData.task_end = formatDateToBackend(form.task_end);
-      if (form.actual_start) taskData.actual_start = formatDateToBackend(form.actual_start);
-      if (form.actual_end) taskData.actual_end = formatDateToBackend(form.actual_end);
+      // Always send actual_start / actual_end so they can be cleared (null clears them)
+      taskData.actual_start = form.actual_start ? formatDateToBackend(form.actual_start) : null;
+      taskData.actual_end   = form.actual_end   ? formatDateToBackend(form.actual_end)   : null;
 
       if (form.module_id) taskData.module_id = parseInt(form.module_id);
       if (form.assigned_to) taskData.assigned_to = parseInt(form.assigned_to);
@@ -498,6 +503,32 @@ const TaskDialog: React.FC<{
                   <strong>Duration:</strong> {Math.ceil((form.task_end.getTime() - form.task_start.getTime()) / (1000 * 60 * 60 * 24))} day(s)
                 </div>
               )}
+              {/* Reset hours & actual dates */}
+              {(parseFloat(form.task_hours) > 0 || form.actual_start || form.actual_end) && (
+                <div className="pt-2 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      Swal.fire({
+                        title: 'Reset Hours & Timing?',
+                        html: `<p class="text-sm text-gray-600">This will set <b>Actual Hours</b> to 0 and clear <b>Actual Start</b> and <b>Actual End</b>.</p>`,
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonText: 'Reset',
+                        confirmButtonColor: '#dc2626',
+                      }).then(r => {
+                        if (r.isConfirmed) {
+                          setForm(f => ({ ...f, task_hours: '0.00', actual_start: null, actual_end: null }));
+                        }
+                      });
+                    }}
+                    className="text-sm text-red-600 hover:text-red-700 font-medium flex items-center gap-1"
+                  >
+                    <ArrowPathIcon className="h-4 w-4" />
+                    Reset Hours &amp; Actual Dates
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -583,12 +614,47 @@ const TaskDetailsDialog: React.FC<{
   const [isInternalComment, setIsInternalComment] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [drawingOpen, setDrawingOpen] = useState(false);
-  const [expandedImage, setExpandedImage] = useState<string | null>(null);
+  const [galleryImages, setGalleryImages] = useState<LightboxImage[]>([]);
+  const [galleryIndex, setGalleryIndex] = useState(0);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [loadingAttachments, setLoadingAttachments] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [deletingAttachment, setDeletingAttachment] = useState<number | null>(null);
+
+  // Collect all image URLs from attachments + comments for gallery navigation
+  const allImages = useMemo(() => {
+    const imgs: LightboxImage[] = [];
+    // Task-level attachments
+    for (const att of attachments) {
+      const url = buildAttachmentUrl(apiUrl, att);
+      const isImage = IMAGE_EXT_RE.test(att.file_name || '') || att.mime_type?.startsWith('image/');
+      if (isImage && url) imgs.push({ url, name: att.file_name });
+    }
+    // Comment attachments
+    for (const c of comments) {
+      if (c.attachments) {
+        for (const att of c.attachments) {
+          const url = buildAttachmentUrl(apiUrl, att);
+          const isImage = IMAGE_EXT_RE.test(att.file_name || '') || att.mime_type?.startsWith('image/');
+          if (isImage && url) imgs.push({ url, name: att.file_name });
+        }
+      }
+    }
+    return imgs;
+  }, [attachments, comments, apiUrl]);
+
+  const openGallery = useCallback((clickedUrl: string) => {
+    const idx = allImages.findIndex(img => img.url === clickedUrl);
+    if (idx >= 0) {
+      setGalleryImages(allImages);
+      setGalleryIndex(idx);
+    } else {
+      // Fallback: show as single image (e.g. inline description images)
+      setGalleryImages([{ url: clickedUrl }]);
+      setGalleryIndex(0);
+    }
+  }, [allImages]);
 
   useEffect(() => {
     if (!open || !task || !apiUrl) return;
@@ -831,7 +897,7 @@ const TaskDetailsDialog: React.FC<{
               <div className="prose prose-sm max-w-none p-4 bg-gray-50 rounded-lg border text-sm [&_img]:max-w-full [&_img]:rounded-lg [&_img]:border [&_img]:cursor-pointer"
                 onClick={(e) => {
                   const target = e.target as HTMLElement;
-                  if (target.tagName === 'IMG') setExpandedImage((target as HTMLImageElement).src);
+                  if (target.tagName === 'IMG') openGallery((target as HTMLImageElement).src);
                 }}
                 dangerouslySetInnerHTML={{ __html: fixImageUrls(task.description, apiUrl) }} />
             </div>
@@ -882,7 +948,7 @@ const TaskDetailsDialog: React.FC<{
                       {isImage ? (
                         <img src={url} alt={att.file_name}
                           className="w-full h-32 object-cover cursor-pointer hover:opacity-80 transition-opacity"
-                          onClick={() => setExpandedImage(url)} loading="lazy" />
+                          onClick={() => openGallery(url)} loading="lazy" />
                       ) : (
                         <a href={url} target="_blank" rel="noreferrer"
                           className="w-full h-32 flex flex-col items-center justify-center gap-1 hover:bg-gray-100 transition-colors">
@@ -992,7 +1058,7 @@ const TaskDetailsDialog: React.FC<{
                       onClick={(e) => {
                         const target = e.target as HTMLElement;
                         if (target.tagName === 'IMG') {
-                          setExpandedImage((target as HTMLImageElement).src);
+                          openGallery((target as HTMLImageElement).src);
                         }
                       }}
                       dangerouslySetInnerHTML={{ __html: fixImageUrls(c.content || c.comment || '', apiUrl) }} />
@@ -1004,7 +1070,7 @@ const TaskDetailsDialog: React.FC<{
                           const isImage = IMAGE_EXT_RE.test(att.file_name || '') || att.mime_type?.startsWith('image/');
                           return isImage ? (
                             <img key={att.attachment_id} src={url}
-                              alt={att.file_name} onClick={() => setExpandedImage(url)}
+                              alt={att.file_name} onClick={() => openGallery(url)}
                               className="max-h-32 rounded-lg border cursor-pointer hover:opacity-80 transition-opacity" loading="lazy" />
                           ) : (
                             <a key={att.attachment_id} href={url} target="_blank" rel="noreferrer"
@@ -1064,12 +1130,13 @@ const TaskDetailsDialog: React.FC<{
         taskTitle={task.title}
       />
 
-      {/* Image lightbox */}
-      {expandedImage && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 cursor-pointer"
-          onClick={() => setExpandedImage(null)}>
-          <img src={expandedImage} alt="Expanded" className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl" />
-        </div>
+      {/* Image gallery lightbox */}
+      {galleryImages.length > 0 && (
+        <TaskImageLightbox
+          images={galleryImages}
+          initialIndex={galleryIndex}
+          onClose={() => setGalleryImages([])}
+        />
       )}
     </div>
   );
@@ -1622,7 +1689,7 @@ const TaskAssociationDialog: React.FC<{
 };
 
 /* ══════════════════════════════════════════════════════════════
-   Main Tasks Page
+   Main Tasks Page — Modern Task Management UI
    ═══════════════════════════════════════════════════════════ */
 
 const TasksPage: React.FC = () => {
@@ -1630,34 +1697,56 @@ const TasksPage: React.FC = () => {
   const { software: softwareList, isLoading: softwareLoading } = useSoftware();
 
   const [selectedSoftware, setSelectedSoftware] = useState<Software | null>(null);
-  const [viewMode, setViewMode] = useState<'list' | 'grid'>(() =>
-    (localStorage.getItem('tasksViewMode') as 'list' | 'grid') || 'list'
+  const [viewMode, setViewMode] = useState<'list' | 'kanban'>(() =>
+    (localStorage.getItem('tasksViewMode') as 'list' | 'kanban') || 'kanban'
   );
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('new');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [priorityFilter, setPriorityFilter] = useState('all');
+  const [bookmarkFilter, setBookmarkFilter] = useState(false);
   const [typeFilter, setTypeFilter] = useState('all');
   const [phaseFilter, setPhaseFilter] = useState<string>(() => {
-    const role = (user?.role?.slug || user?.role_name || '').toLowerCase();
-    switch (role) {
-      case 'client_manager': return 'intake';
-      case 'qa_specialist': return 'quality_review';
-      case 'developer': return 'development';
-      default: return 'all';
-    }
+    try {
+      const stored = JSON.parse(localStorage.getItem('user') || '{}');
+      const role = (stored?.role?.slug || stored?.role_name || stored?.roles?.[0]?.slug || '').toLowerCase();
+      switch (role) {
+        case 'client_manager': return 'intake';
+        case 'qa_specialist': return 'quality_review';
+        case 'developer': return 'development';
+        default: return 'all';
+      }
+    } catch { return 'all'; }
   });
   const [moduleFilter, setModuleFilter] = useState('all');
   const [showBilled, setShowBilled] = useState(false);
+  const phaseInitialized = useRef(false);
 
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
-  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [cardGalleryImages, setCardGalleryImages] = useState<LightboxImage[]>([]);
+  const [cardGalleryIndex, setCardGalleryIndex] = useState(0);
   const [workflowDialogOpen, setWorkflowDialogOpen] = useState(false);
   const [workflowTask, setWorkflowTask] = useState<Task | null>(null);
   const [associationDialogOpen, setAssociationDialogOpen] = useState(false);
   const [associationTask, setAssociationTask] = useState<Task | null>(null);
-  const [lastComments, setLastComments] = useState<Record<number, string>>({});
+  const [lastComments, setLastComments] = useState<Record<number, { text: string; author: string; date: string | null }>>({});
+
+  // Set default phase filter based on user role (fallback if user wasn't in localStorage yet)
+  useEffect(() => {
+    if (phaseInitialized.current || !user) return;
+    const role = (user?.role?.slug || user?.role_name || (user as any)?.roles?.[0]?.slug || '').toLowerCase();
+    const defaultPhase =
+      role === 'client_manager' ? 'intake' :
+      role === 'qa_specialist'  ? 'quality_review' :
+      role === 'developer'      ? 'development' :
+      null;
+    if (defaultPhase) {
+      setPhaseFilter(defaultPhase);
+    }
+    phaseInitialized.current = true;
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const apiUrl = useMemo(() => {
     if (!selectedSoftware) return null;
@@ -1675,17 +1764,143 @@ const TasksPage: React.FC = () => {
     [softwareList]
   );
 
-  const { tasks, loading, error, loadTasks } = useTasks({ softwareId: selectedSoftware?.id });
+  const { tasks, loading, error, loadTasks, setTasks } = useTasks({ softwareId: selectedSoftware?.id });
   const { modules } = useModules(selectedSoftware?.id);
 
-  // Sync info panel state
-  const [syncInfoOpen, setSyncInfoOpen] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<any>(null);
+  // Sync state
   const [syncing, setSyncing] = useState(false);
   const [remoteStats, setRemoteStats] = useState<any>(null);
   const [selectedForBilling, setSelectedForBilling] = useState<Set<string | number>>(new Set());
   const [billingMode, setBillingMode] = useState(false);
   const [invoicing, setInvoicing] = useState(false);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+
+  // Invoice staging state
+  const [invoiceReviewMode, setInvoiceReviewMode] = useState(false);
+  const [stagedInvoiceCount, setStagedInvoiceCount] = useState(0);
+  const [stagedTasks, setStagedTasks] = useState<any[]>([]);
+  const [loadingStaged, setLoadingStaged] = useState(false);
+  const [processingInvoices, setProcessingInvoices] = useState(false);
+
+  // Sync enabled state
+  const [syncEnabled, setSyncEnabled] = useState(true);
+
+  // Statement download state
+  const [statementModalOpen, setStatementModalOpen] = useState(false);
+  const [billingDates, setBillingDates] = useState<string[]>([]);
+  const [statementDateFrom, setStatementDateFrom] = useState('');
+  const [statementDateTo, setStatementDateTo] = useState('');
+  const [loadingBillingDates, setLoadingBillingDates] = useState(false);
+  const [downloadingStatement, setDownloadingStatement] = useState(false);
+
+  // Allocated hours tracking
+  const [allocatedHours, setAllocatedHours] = useState<number>(0);
+  const [editingAllocated, setEditingAllocated] = useState(false);
+  const [allocatedInput, setAllocatedInput] = useState('');
+  const allocatedInputRef = useRef<HTMLInputElement>(null);
+
+  // Total billed hours (across ALL billed tasks, not just filtered view)
+  const totalBilledHours = useMemo(() => {
+    return tasks.filter(t => {
+      const billed = t.task_bill_date && t.task_bill_date !== '0' && String(t.task_bill_date).length > 5;
+      return billed;
+    }).reduce((sum, t) => sum + timeToDecimal(t.hours || 0), 0);
+  }, [tasks]);
+
+  const remainingHours = useMemo(() => Math.max(0, allocatedHours - totalBilledHours), [allocatedHours, totalBilledHours]);
+
+  // Font size — persisted per-user via localStorage
+  const [taskFontSize, setTaskFontSize] = useState<'sm' | 'md' | 'lg'>(() => {
+    const saved = localStorage.getItem('taskFontSize');
+    return (saved === 'sm' || saved === 'md' || saved === 'lg') ? saved : 'sm';
+  });
+  const handleTaskFontSizeChange = (size: 'sm' | 'md' | 'lg') => {
+    setTaskFontSize(size);
+    localStorage.setItem('taskFontSize', size);
+  };
+
+  const loadStagedCount = useCallback(async () => {
+    try {
+      const resp = await LocalTasksModel.getStagedInvoices();
+      if (resp.status === 1) {
+        setStagedInvoiceCount(resp.data.count);
+        setStagedTasks(resp.data.tasks);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      const resp = await LocalTasksModel.getSyncEnabled();
+      if (resp.status === 1) setSyncEnabled(resp.data.enabled);
+    } catch { /* ignore */ }
+  }, []);
+
+  // Load staged count and sync status on mount
+  useEffect(() => { loadStagedCount(); }, [loadStagedCount]);
+  useEffect(() => { loadSyncStatus(); }, [loadSyncStatus]);
+
+  // Load allocated hours from billing settings
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await api.get('/local-tasks/billing-settings');
+        const val = resp.data?.data?.allocated_hours;
+        if (val && !isNaN(val)) setAllocatedHours(val);
+      } catch { /* not set yet */ }
+    })();
+  }, []);
+
+  const saveAllocatedHours = useCallback(async (val: number) => {
+    setAllocatedHours(val);
+    setEditingAllocated(false);
+    try {
+      await api.put('/local-tasks/billing-settings', { allocated_hours: val });
+    } catch {
+      notify.error('Failed to save allocated hours');
+    }
+  }, []);
+
+  // Statement modal helpers
+  const openStatementModal = useCallback(async () => {
+    setStatementModalOpen(true);
+    setLoadingBillingDates(true);
+    try {
+      const resp = await LocalTasksModel.getBillingDates();
+      if (resp.status === 1 && resp.data.dates) {
+        setBillingDates(resp.data.dates);
+        // Default: select all billing dates
+        const dates = resp.data.dates as string[];
+        if (dates.length >= 2) {
+          setStatementDateFrom(dates[dates.length - 1]); // oldest
+          setStatementDateTo(dates[0]); // most recent
+        } else if (dates.length === 1) {
+          setStatementDateFrom(dates[0]);
+          setStatementDateTo(dates[0]);
+        }
+      }
+    } catch {
+      notify.error('Failed to load billing dates');
+    } finally {
+      setLoadingBillingDates(false);
+    }
+  }, []);
+
+  const handleStatementDownload = useCallback(async () => {
+    if (!statementDateFrom || !statementDateTo) {
+      notify.error('Please select both From and To billing dates');
+      return;
+    }
+    setDownloadingStatement(true);
+    try {
+      await LocalTasksModel.downloadStatementExcel(statementDateFrom, statementDateTo, undefined, allocatedHours || undefined);
+      notify.success('Statement downloaded');
+    } catch {
+      notify.error('Failed to download statement');
+    } finally {
+      setDownloadingStatement(false);
+    }
+  }, [statementDateFrom, statementDateTo, allocatedHours]);
 
   // Restore selected software
   useEffect(() => {
@@ -1697,18 +1912,17 @@ const TasksPage: React.FC = () => {
   useEffect(() => {
     if (!taskSoftware.length) return;
     if (selectedSoftware && taskSoftware.some(sw => sw.id === selectedSoftware.id)) return;
-    // Selected software is not in the filtered list — auto-select first
     const first = taskSoftware[0];
     setSelectedSoftware(first);
     localStorage.setItem('selectedTasksSoftware', JSON.stringify(first));
   }, [taskSoftware, selectedSoftware]);
 
-  // Load local tasks when software is selected (no external auth needed)
+  // Load local tasks when software is selected
   useEffect(() => {
     if (selectedSoftware) loadTasks();
   }, [selectedSoftware, loadTasks]);
 
-  // Fetch remote stats when apiUrl is available
+  // Fetch remote stats
   useEffect(() => {
     if (!apiUrl) { setRemoteStats(null); return; }
     api.get('/softaware/tasks/stats', { params: { apiUrl } })
@@ -1720,7 +1934,7 @@ const TasksPage: React.FC = () => {
   useEffect(() => {
     if (!apiUrl || tasks.length === 0) return;
     const fetchLastComments = async () => {
-      const comments: Record<number, string> = {};
+      const comments: Record<number, { text: string; author: string; date: string | null }> = {};
       await Promise.all(
         tasks.slice(0, 50).map(async (task) => {
           try {
@@ -1731,13 +1945,14 @@ const TasksPage: React.FC = () => {
             if (commentList.length > 0) {
               const lastComment = commentList[commentList.length - 1];
               const content = lastComment.content || lastComment.comment || '';
-              // Strip HTML and limit length
               const text = content.replace(/<[^>]*>/g, '').trim();
-              comments[Number(task.id)] = text.length > 60 ? text.substring(0, 60) + '...' : text;
+              comments[Number(task.id)] = {
+                text: text.length > 200 ? text.substring(0, 200) + '…' : text,
+                author: lastComment.user_name || lastComment.username || lastComment.created_by || 'Unknown',
+                date: lastComment.created_at || null,
+              };
             }
-          } catch {
-            // Ignore errors for individual tasks
-          }
+          } catch { /* ignore */ }
         })
       );
       setLastComments(comments);
@@ -1745,7 +1960,7 @@ const TasksPage: React.FC = () => {
     fetchLastComments();
   }, [tasks, apiUrl, selectedSoftware?.id]);
 
-  // Check for task ID from dashboard and open it in view mode
+  // Check for task ID from dashboard
   useEffect(() => {
     const openTaskId = localStorage.getItem('openTaskId');
     if (openTaskId && tasks.length > 0) {
@@ -1772,58 +1987,108 @@ const TasksPage: React.FC = () => {
     modules.map((m: any) => ({ id: m.id, name: m.name })).sort((a: any, b: any) => a.name.localeCompare(b.name)),
     [modules]);
 
+  // Unbilled tasks — excludes billed and staged; used for stats bar + task count denominator
+  const unbilledTasks = useMemo(() => {
+    return tasks.filter(t => {
+      const billed = t.task_bill_date && t.task_bill_date !== '0' && String(t.task_bill_date).length > 5;
+      const staged = (t as any).task_billed === 2;
+      return !billed && !staged;
+    });
+  }, [tasks]);
+
   const filteredTasks = useMemo(() => {
     return tasks.filter(t => {
-      // Filter billed/invoiced tasks: show only unbilled by default, only billed when toggled
       const billed = t.task_bill_date && t.task_bill_date !== '0' && String(t.task_bill_date).length > 5;
+      const staged = (t as any).task_billed === 2;
 
-      // Billing mode: show only completed + unbilled + has time logged tasks (ready for invoicing)
+      // Staged tasks only appear in the Invoice Review panel, not in any list view
+      if (staged) return false;
+
       if (billingMode) {
         if (billed) return false;
         if (t.status !== 'completed') return false;
         if (timeToDecimal(t.hours || 0) <= 0) return false;
         if (search) {
           const q = search.toLowerCase();
-          return t.title?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q) || t.creator?.toLowerCase().includes(q);
+          return t.title?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q);
         }
         return true;
       }
 
       if (showBilled) {
-        // When "Show Billed" is active, show ONLY billed tasks (ignore other filters)
         if (!billed) return false;
-        // Apply search filter only
         if (search) {
           const q = search.toLowerCase();
-          return t.title?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q) || t.creator?.toLowerCase().includes(q);
+          return t.title?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q);
         }
         return true;
       } else {
-        // When "Show Billed" is inactive, show ONLY unbilled tasks with normal filters
         if (billed) return false;
       }
-      if (statusFilter !== 'all' && t.status !== statusFilter) return false;
+
+      // Kanban shows all statuses; list can filter by status
+      if (viewMode === 'list' && statusFilter !== 'all' && t.status !== statusFilter) return false;
       if (typeFilter !== 'all' && t.type !== typeFilter) return false;
       if (phaseFilter !== 'all') {
         const p = t.workflow_phase?.toLowerCase() || 'intake';
         if (p !== phaseFilter) return false;
       }
       if (moduleFilter !== 'all' && String(t.module_id) !== moduleFilter) return false;
+      if (priorityFilter !== 'all' && (t.priority || 'normal') !== priorityFilter) return false;
+      if (bookmarkFilter && !t.is_bookmarked) return false;
       if (search) {
         const q = search.toLowerCase();
         return t.title?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q) || t.creator?.toLowerCase().includes(q);
       }
       return true;
     });
-  }, [tasks, statusFilter, typeFilter, phaseFilter, moduleFilter, search, showBilled, billingMode]);
+  }, [tasks, statusFilter, typeFilter, phaseFilter, moduleFilter, search, showBilled, billingMode, viewMode, priorityFilter, bookmarkFilter]);
 
   const totalHours = filteredTasks.reduce((sum, t) => {
     const billed = t.task_bill_date && t.task_bill_date !== '0' && String(t.task_bill_date).length > 5;
     return billed ? sum : sum + timeToDecimal(t.hours || 0);
   }, 0);
 
+  /** Handle kanban same-column reorder */
+  const handleReorder = async (updates: { id: number; kanban_order: number }[]) => {
+    // Build a quick lookup: _local_id → new kanban_order
+    const orderMap = new Map(updates.map(u => [u.id, u.kanban_order]));
+
+    // Optimistic UI update
+    setTasks(prev =>
+      prev.map(t => {
+        const newOrder = orderMap.get(t._local_id as number);
+        return newOrder !== undefined ? { ...t, kanban_order: newOrder } : t;
+      })
+    );
+
+    // Persist to local DB
+    try {
+      await api.patch('/local-tasks/bulk', { updates });
+    } catch {
+      // Revert on failure
+      loadTasks();
+      notify.error('Failed to save task order');
+    }
+  };
+
   const handleStatusChange = async (task: Task, newStatus: string) => {
     if (!apiUrl) return;
+
+    // Optimistically update the local UI immediately so Kanban / list reflect the change
+    setTasks(prev => prev.map(t =>
+      (t.id === task.id || t._local_id === task._local_id)
+        ? { ...t, status: newStatus as Task['status'] }
+        : t
+    ));
+
+    // Also persist to local DB so it survives a refresh (fire & forget)
+    if (task._local_id) {
+      api.patch('/local-tasks/bulk', {
+        updates: [{ id: task._local_id, status: newStatus }],
+      }).catch(() => {});
+    }
+
     try {
       if (newStatus === 'in-progress') {
         await api.post(`/softaware/tasks/${task.id}/start`, { apiUrl });
@@ -1838,8 +2103,11 @@ const TasksPage: React.FC = () => {
         });
         notify.success(`Task status updated to ${newStatus}`);
       }
+      // Re-sync local cache in background after external API confirms
       loadTasks();
     } catch {
+      // Revert optimistic update on failure
+      loadTasks();
       notify.error('Failed to update status');
     }
   };
@@ -1856,9 +2124,7 @@ const TasksPage: React.FC = () => {
     });
     if (!result.isConfirmed) return;
     try {
-      await api.delete(`/softaware/tasks/${task.id}`, {
-        params: { apiUrl },
-      });
+      await api.delete(`/softaware/tasks/${task.id}`, { params: { apiUrl } });
       notify.success('Task deleted');
       loadTasks();
     } catch {
@@ -1866,20 +2132,152 @@ const TasksPage: React.FC = () => {
     }
   };
 
-  const handleReorder = async (task: Task, direction: 'up' | 'down') => {
-    const idx = filteredTasks.indexOf(task);
-    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (targetIdx < 0 || targetIdx >= filteredTasks.length) return;
-    const other = filteredTasks[targetIdx];
+  const handleBookmark = async (task: Task) => {
+    if (!task._local_id) return;
     try {
-      await api.post('/softaware/tasks/reorder', {
-        apiUrl,
-        orders: { [String(task.id)]: targetIdx + 1, [String(other.id)]: idx + 1 },
-      });
-      notify.success('Task reordered');
-      loadTasks();
+      await LocalTasksModel.toggleBookmark(task._local_id);
+      // Optimistic update
+      setTasks(prev => prev.map(t =>
+        t._local_id === task._local_id
+          ? { ...t, is_bookmarked: t.is_bookmarked ? 0 : 1 }
+          : t
+      ));
     } catch {
-      notify.error('Failed to reorder task');
+      notify.error('Failed to toggle bookmark');
+    }
+  };
+
+  const handlePriorityChange = async (task: Task, priority: string) => {
+    if (!task._local_id) return;
+    try {
+      await LocalTasksModel.setPriority(task._local_id, priority);
+      setTasks(prev => prev.map(t =>
+        t._local_id === task._local_id ? { ...t, priority: priority as any } : t
+      ));
+      notify.success(`Priority set to ${priority}`);
+    } catch {
+      notify.error('Failed to update priority');
+    }
+  };
+
+  const handleColorLabel = async (task: Task, color: string | null) => {
+    if (!task._local_id) return;
+    try {
+      await LocalTasksModel.setColorLabel(task._local_id, color);
+      setTasks(prev => prev.map(t =>
+        t._local_id === task._local_id ? { ...t, color_label: color } : t
+      ));
+    } catch {
+      notify.error('Failed to update color label');
+    }
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      await LocalTasksModel.syncAll();
+      notify.success('Sync triggered — tasks are being pulled');
+      setTimeout(() => loadTasks(), 2000);
+    } catch (err: any) {
+      notify.error(err?.response?.data?.error || 'Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const SYNC_DISABLE_REASONS = [
+    'External API is down or unreachable',
+    'Data integrity concerns — incorrect data syncing',
+    'Performance issues — sync is slowing the system',
+    'Scheduled maintenance on external system',
+    'API key or credentials need rotation',
+    'Duplicate or stale data being imported',
+    'Testing or debugging locally without sync interference',
+    'Other — please describe below',
+  ];
+
+  const handleSyncStatusToggle = async () => {
+    if (syncEnabled) {
+      // Turning OFF — show reason dialog
+      const { value: formValues } = await Swal.fire({
+        title: '⚠️ Disable Task Sync',
+        html: `
+          <div style="text-align:left;">
+            <p style="margin-bottom:12px;color:#6b7280;font-size:14px;">
+              Disabling sync will stop all task sources from updating. A <strong>case will be opened</strong> to track this change.
+            </p>
+            <label style="display:block;font-weight:600;font-size:13px;margin-bottom:6px;color:#374151;">Select a reason:</label>
+            <select id="swal-reason" class="swal2-select" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;margin-bottom:12px;">
+              <option value="">— Choose a reason —</option>
+              ${SYNC_DISABLE_REASONS.map(r => `<option value="${r}">${r}</option>`).join('')}
+            </select>
+            <label style="display:block;font-weight:600;font-size:13px;margin-bottom:6px;color:#374151;">Additional details (optional):</label>
+            <textarea id="swal-detail" class="swal2-textarea" placeholder="Provide any additional context…" style="width:100%;min-height:80px;padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;resize:vertical;"></textarea>
+          </div>
+        `,
+        focusConfirm: false,
+        showCancelButton: true,
+        confirmButtonText: 'Disable Sync & Open Case',
+        confirmButtonColor: '#dc2626',
+        cancelButtonText: 'Cancel',
+        width: 520,
+        preConfirm: () => {
+          const reason = (document.getElementById('swal-reason') as HTMLSelectElement)?.value;
+          const detail = (document.getElementById('swal-detail') as HTMLTextAreaElement)?.value;
+          if (!reason) {
+            Swal.showValidationMessage('Please select a reason');
+            return false;
+          }
+          return { reason, detail };
+        },
+      });
+
+      if (!formValues) return;
+
+      try {
+        const userName = user?.first_name
+          ? `${user.first_name} ${user.last_name || ''}`.trim()
+          : user?.username || user?.email || 'Unknown';
+        const resp = await LocalTasksModel.disableSync(
+          formValues.reason,
+          formValues.detail || undefined,
+          selectedSoftware?.name,
+          user?.id != null ? String(user.id) : undefined,
+          userName
+        );
+        setSyncEnabled(false);
+        notify.success(resp.message || 'Sync disabled and case opened');
+      } catch {
+        notify.error('Failed to disable sync');
+      }
+    } else {
+      // Turning ON — simple confirmation
+      const result = await Swal.fire({
+        title: 'Re-enable Sync',
+        text: 'This will re-enable task syncing for all sources. Continue?',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Enable Sync',
+        confirmButtonColor: '#16a34a',
+      });
+      if (!result.isConfirmed) return;
+
+      try {
+        await LocalTasksModel.enableSync();
+        setSyncEnabled(true);
+        notify.success('Sync re-enabled');
+      } catch {
+        notify.error('Failed to enable sync');
+      }
+    }
+  };
+
+  const handleViewTask = (task: Task) => {
+    setViewingTask(task);
+    setDetailsOpen(true);
+    // Record view
+    if (task._local_id) {
+      LocalTasksModel.recordView(task._local_id).catch(() => {});
     }
   };
 
@@ -1887,219 +2285,163 @@ const TasksPage: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="bg-white rounded-lg shadow-sm border p-6">
+      <div className="bg-white rounded-xl shadow-sm border px-5 py-4">
         <div className="flex flex-col gap-4">
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            <div>
-              <h2 className="text-2xl font-semibold text-gray-900">Tasks</h2>
-              <p className="text-sm text-gray-500">Manage your development tasks</p>
+          {/* Row 1: 3-column layout — Title | Stats + Counts | Software + View */}
+          <div className="flex items-center justify-between gap-4">
+            {/* Left: Title */}
+            <div className="flex items-center gap-2.5 shrink-0">
+              <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-sm">
+                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-gray-900">Tasks</h2>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Software selector */}
-              <div className="flex items-center gap-1.5 border rounded-lg px-3 py-1.5 bg-white">
+
+            {/* Center: Stats + Counts */}
+            <div className="flex items-center gap-4 min-w-0">
+              <div className="hidden md:block">
+                <TaskStatsBar tasks={unbilledTasks} remoteStats={remoteStats} />
+              </div>
+              <div className="w-px h-6 bg-gray-200 hidden md:block" />
+              <div className="flex items-center gap-2 text-sm text-gray-500 shrink-0">
+                <span className="font-semibold text-gray-700">
+                  {filteredTasks.length === unbilledTasks.length ? unbilledTasks.length : `${filteredTasks.length}/${unbilledTasks.length}`}
+                </span>
+                <span className="text-gray-400">tasks</span>
+                {totalHours > 0 && (
+                  <>
+                    <span className="w-1 h-1 rounded-full bg-gray-300" />
+                    <span className="font-semibold text-indigo-600">{totalHours.toFixed(1)}</span>
+                    <span className="text-gray-400">hrs</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Right: Software selector + View toggle */}
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="flex items-center gap-2 border border-gray-200 dark:border-dark-600 rounded-lg px-3 py-2 bg-gray-50/50 dark:bg-dark-800 hover:bg-white dark:hover:bg-dark-700 transition-colors">
                 <CubeIcon className="h-4 w-4 text-gray-400" />
-                <select value={selectedSoftware?.id?.toString() || ''} onChange={handleSoftwareChange}
+                <select
+                  value={selectedSoftware?.id?.toString() || ''}
+                  onChange={handleSoftwareChange}
                   disabled={softwareLoading}
-                  className="text-sm border-0 p-0 bg-transparent focus:ring-0 min-w-[160px]">
+                  className="text-sm border-0 p-0 bg-transparent focus:ring-0 min-w-[140px] text-gray-700 dark:text-gray-200"
+                >
                   {softwareLoading && <option>Loading…</option>}
-                  {!softwareLoading && taskSoftware.length === 0 && <option>No software with integration</option>}
-                  {!softwareLoading && taskSoftware.length > 0 && !selectedSoftware && <option value="">Select Software…</option>}
+                  {!softwareLoading && taskSoftware.length === 0 && <option>No software configured</option>}
+                  {!softwareLoading && taskSoftware.length > 0 && !selectedSoftware && <option value="">Select…</option>}
                   {taskSoftware.map(sw => (
-                    <option key={sw.id} value={sw.id.toString()}>
-                      {sw.name}
-                    </option>
+                    <option key={sw.id} value={sw.id.toString()}>{sw.name}</option>
                   ))}
                 </select>
               </div>
 
-              {/* View toggle */}
-              <div className="flex border rounded-lg overflow-hidden">
-                <button onClick={() => { setViewMode('list'); localStorage.setItem('tasksViewMode', 'list'); }}
-                  className={`p-2 ${viewMode === 'list' ? 'bg-picton-blue text-white' : 'hover:bg-gray-50'}`}>
-                  <Bars3Icon className="h-4 w-4" />
+              <div className="flex items-center gap-1 bg-gray-100 dark:bg-dark-800 rounded-lg p-1">
+                <button
+                  onClick={() => { setViewMode('list'); localStorage.setItem('tasksViewMode', 'list'); }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${viewMode === 'list' ? 'bg-white dark:bg-dark-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                >
+                  <Bars3Icon className="w-4 h-4" />
+                  List
                 </button>
-                <button onClick={() => { setViewMode('grid'); localStorage.setItem('tasksViewMode', 'grid'); }}
-                  className={`p-2 ${viewMode === 'grid' ? 'bg-picton-blue text-white' : 'hover:bg-gray-50'}`}>
-                  <Squares2X2Icon className="h-4 w-4" />
+                <button
+                  onClick={() => { setViewMode('kanban'); localStorage.setItem('tasksViewMode', 'kanban'); }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${viewMode === 'kanban' ? 'bg-white dark:bg-dark-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+                >
+                  <ViewColumnsIcon className="w-4 h-4" />
+                  Kanban
                 </button>
               </div>
+            </div>
+          </div>
 
-              <button onClick={() => { setEditingTask(null); setTaskDialogOpen(true); }}
-                disabled={!selectedSoftware}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-picton-blue text-white rounded-lg hover:bg-picton-blue/90 disabled:opacity-50"
-                title="Create a new task">
-                <PlusIcon className="h-4 w-4" /> New Task
-              </button>
-              <button onClick={() => loadTasks()} disabled={loading || !selectedSoftware}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg hover:bg-gray-50 disabled:opacity-50">
-                <ArrowPathIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
-              </button>
-              <button onClick={() => {
-                const newState = !showBilled;
-                setShowBilled(newState);
-                notify.success(newState ? 'Now showing only billed/invoiced tasks' : 'Now showing only unbilled tasks');
-              }}
-                className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg ${showBilled ? 'bg-green-50 border-green-300 text-green-700' : 'hover:bg-gray-50'}`}
-                title={showBilled ? 'Hide billed/invoiced tasks' : 'Show billed/invoiced tasks'}>
-                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                {showBilled ? 'Showing Billed' : 'Show Billed'}
-              </button>
+          {/* Divider between rows */}
+          <div className="border-t border-gray-100" />
 
-              {/* Bill/Invoice toggle */}
-              {!showBilled && (
+          {/* Row 2: Toolbar */}
+          <TaskToolbar
+            search={search}
+            onSearchChange={setSearch}
+            viewMode={viewMode}
+            onViewModeChange={(v) => { setViewMode(v); localStorage.setItem('tasksViewMode', v); }}
+            statusFilter={statusFilter}
+            onStatusFilterChange={setStatusFilter}
+            priorityFilter={priorityFilter}
+            onPriorityFilterChange={setPriorityFilter}
+            bookmarkFilter={bookmarkFilter}
+            onBookmarkFilterToggle={() => setBookmarkFilter(!bookmarkFilter)}
+            onRefresh={() => loadTasks()}
+            onNewTask={() => { setEditingTask(null); setTaskDialogOpen(true); }}
+            onSync={handleSync}
+            syncing={syncing}
+            billingMode={billingMode}
+            onBillingModeToggle={() => {
+              const newState = !billingMode;
+              setBillingMode(newState);
+              if (!newState) setSelectedForBilling(new Set());
+              if (newState) setInvoiceReviewMode(false);
+            }}
+            loading={loading}
+            showAdvancedFilters={showAdvancedFilters}
+            onToggleAdvancedFilters={() => setShowAdvancedFilters(!showAdvancedFilters)}
+            advancedFilters={
+              <>
+                <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white">
+                  <option value="all">All Types</option>
+                  <option value="development">Development</option>
+                  <option value="bug-fix">Bug Fix</option>
+                  <option value="feature">Feature</option>
+                  <option value="maintenance">Maintenance</option>
+                  <option value="support">Support</option>
+                </select>
+                <select value={phaseFilter} onChange={e => setPhaseFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white">
+                  <option value="all">All Phases</option>
+                  <option value="intake">Intake</option>
+                  <option value="quality_review">QA Review</option>
+                  <option value="development">Development</option>
+                </select>
+                <select value={moduleFilter} onChange={e => setModuleFilter(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white">
+                  <option value="all">All Modules</option>
+                  {uniqueModules.map((m: any) => <option key={m.id} value={String(m.id)}>{m.name}</option>)}
+                </select>
                 <button
                   onClick={() => {
-                    const newState = !billingMode;
-                    setBillingMode(newState);
-                    if (!newState) setSelectedForBilling(new Set());
+                    const newState = !showBilled;
+                    setShowBilled(newState);
+                    notify.success(newState ? 'Now showing only billed/invoiced tasks' : 'Now showing only unbilled tasks');
                   }}
-                  className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg ${billingMode ? 'bg-amber-50 border-amber-300 text-amber-700' : 'hover:bg-gray-50'}`}
-                  title="Select tasks to invoice">
-                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  {billingMode ? 'Cancel Billing' : 'Invoice Tasks'}
-                </button>
-              )}
-
-              {/* Sync info icon */}
-              <button
-                onClick={async () => {
-                  setSyncInfoOpen(!syncInfoOpen);
-                  if (!syncInfoOpen) {
-                    try {
-                      const res = await LocalTasksModel.getSyncStatus();
-                      setSyncStatus(res?.data || null);
-                    } catch { /* ignore */ }
-                  }
-                }}
-                className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm border rounded-lg ${syncInfoOpen ? 'bg-blue-50 border-blue-300 text-blue-700' : 'hover:bg-gray-50'}`}
-                title="Sync information">
-                <InformationCircleIcon className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-
-          {/* Sync info panel (collapsible) */}
-          {syncInfoOpen && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-              <div className="flex items-start justify-between">
-                <div>
-                  <h4 className="text-sm font-semibold text-blue-900 flex items-center gap-1.5">
-                    <ArrowsRightLeftIcon className="h-4 w-4" /> Task Sync
-                  </h4>
-                  <p className="text-xs text-blue-700 mt-1">
-                    All task operations (create, edit, start, complete, etc.) are sent directly to the external portal in real-time.
-                    A local copy is also kept and periodically refreshed via sync.
-                  </p>
-                </div>
-                <button onClick={() => setSyncInfoOpen(false)} className="text-blue-400 hover:text-blue-600">
-                  <XMarkIcon className="h-4 w-4" />
-                </button>
-              </div>
-
-              <div className="text-xs text-blue-800 space-y-1">
-                <p><strong>How it works:</strong></p>
-                <ul className="list-disc list-inside ml-2 space-y-0.5">
-                  <li>External APIs (portals, project management tools) are registered as <em>task sources</em></li>
-                  <li>All writes (create, edit, delete, start, complete, invoice) go directly to the external API</li>
-                  <li>The sync service periodically pulls the latest task data and updates the local copy</li>
-                  <li>Changes are detected using content hashing — only modified tasks are refreshed locally</li>
-                  <li>Authentication is handled server-side using source API keys — no login required</li>
-                </ul>
-              </div>
-
-              {syncStatus && (
-                <div className="flex items-center gap-4 text-xs text-blue-800 bg-blue-100/50 rounded px-3 py-2">
-                  {syncStatus.data?.sources?.map((src: any) => (
-                    <div key={src.id} className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${src.sync_enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
-                      <span className="font-medium">{src.name}</span>
-                      {src.last_synced_at && (
-                        <span className="text-blue-600">
-                          Last sync: {new Date(src.last_synced_at).toLocaleString()}
-                        </span>
-                      )}
-                      {src.last_sync_count !== undefined && src.last_sync_count !== null && (
-                        <span className="text-blue-600">{src.last_sync_count} tasks</span>
-                      )}
-                    </div>
-                  )) || (
-                    <span>No sources configured</span>
-                  )}
-                </div>
-              )}
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={async () => {
-                    setSyncing(true);
-                    try {
-                      await LocalTasksModel.syncAll();
-                      notify.success('Sync triggered — tasks are being pulled');
-                      // Refresh sync status
-                      const res = await LocalTasksModel.getSyncStatus();
-                      setSyncStatus(res?.data || null);
-                      // Reload tasks after a short delay
-                      setTimeout(() => loadTasks(), 2000);
-                    } catch (err: any) {
-                      notify.error(err?.response?.data?.error || 'Sync failed');
-                    } finally {
-                      setSyncing(false);
-                    }
-                  }}
-                  disabled={syncing}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                  className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium border rounded-lg transition-colors ${showBilled ? 'bg-green-50 border-green-300 text-green-700' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
                 >
-                  <ArrowPathIcon className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
-                  {syncing ? 'Syncing…' : 'Sync Now'}
+                  {showBilled ? '✓ Billed' : 'Show Billed'}
                 </button>
-              </div>
-            </div>
-          )}
+              </>
+            }
+            syncEnabled={syncEnabled}
+            onSyncStatusToggle={handleSyncStatusToggle}
+            taskFontSize={taskFontSize}
+            onTaskFontSizeChange={handleTaskFontSizeChange}
+            stagedInvoiceCount={stagedInvoiceCount}
+            invoiceReviewMode={invoiceReviewMode}
+            onInvoiceReviewToggle={() => {
+              const newState = !invoiceReviewMode;
+              setInvoiceReviewMode(newState);
+              if (newState) {
+                loadStagedCount();
+                setBillingMode(false);
+                setSelectedForBilling(new Set());
+              }
+            }}
+          />
 
-          {/* Filters row */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="relative flex-1 min-w-[200px]">
-              <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-              <input value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Search tasks…" className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm" />
-            </div>
-            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-              className="px-3 py-2 border rounded-lg text-sm bg-white min-w-[130px]">
-              <option value="all">All Status</option>
-              <option value="new">New</option>
-              <option value="in-progress">In Progress</option>
-              <option value="completed">Completed</option>
-            </select>
-            <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
-              className="px-3 py-2 border rounded-lg text-sm bg-white min-w-[130px]">
-              <option value="all">All Types</option>
-              <option value="development">Development</option>
-              <option value="bug-fix">Bug Fix</option>
-              <option value="feature">Feature</option>
-              <option value="maintenance">Maintenance</option>
-              <option value="support">Support</option>
-            </select>
-            <select value={phaseFilter} onChange={e => setPhaseFilter(e.target.value)}
-              className="px-3 py-2 border rounded-lg text-sm bg-white min-w-[140px]">
-              <option value="all">All Phases</option>
-              <option value="intake">Intake</option>
-              <option value="quality_review">QA Review</option>
-              <option value="development">Development</option>
-            </select>
-            <select value={moduleFilter} onChange={e => setModuleFilter(e.target.value)}
-              className="px-3 py-2 border rounded-lg text-sm bg-white min-w-[140px]">
-              <option value="all">All Modules</option>
-              {uniqueModules.map((m: any) => <option key={m.id} value={String(m.id)}>{m.name}</option>)}
-            </select>
-          </div>
-
-          {/* Billing action bar */}
+          {/* Billing action bar — now stages locally instead of syncing */}
           {billingMode && (
-            <div className="flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+            <div className="flex items-center justify-between bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-xl px-4 py-3">
               <div className="flex items-center gap-3 text-sm">
                 <span className="font-medium text-amber-800">
                   {selectedForBilling.size} task{selectedForBilling.size !== 1 ? 's' : ''} selected
@@ -2111,70 +2453,215 @@ const TasksPage: React.FC = () => {
                 )}
                 <button
                   onClick={() => {
-                    if (selectedForBilling.size === filteredTasks.length) {
-                      setSelectedForBilling(new Set());
-                    } else {
-                      setSelectedForBilling(new Set(filteredTasks.map(t => t.id)));
-                    }
+                    if (selectedForBilling.size === filteredTasks.length) setSelectedForBilling(new Set());
+                    else setSelectedForBilling(new Set(filteredTasks.map(t => t.id)));
                   }}
                   className="text-xs text-amber-700 underline hover:text-amber-900"
                 >
                   {selectedForBilling.size === filteredTasks.length ? 'Deselect All' : 'Select All'}
                 </button>
+
+                {/* Divider */}
+                <div className="w-px h-5 bg-amber-300" />
+
+                {/* Allocated Hours */}
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-amber-200 rounded-lg shadow-sm">
+                  <span className="text-xs text-gray-500">Allocated:</span>
+                  {editingAllocated ? (
+                    <input
+                      ref={allocatedInputRef}
+                      type="number"
+                      value={allocatedInput}
+                      onChange={e => setAllocatedInput(e.target.value)}
+                      onBlur={() => saveAllocatedHours(parseFloat(allocatedInput) || 0)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') saveAllocatedHours(parseFloat(allocatedInput) || 0);
+                        if (e.key === 'Escape') setEditingAllocated(false);
+                      }}
+                      className="w-16 text-xs font-semibold text-center border border-amber-300 rounded px-1 py-0.5 focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                      autoFocus
+                    />
+                  ) : (
+                    <button
+                      onClick={() => { setAllocatedInput(String(allocatedHours)); setEditingAllocated(true); }}
+                      className="text-xs font-semibold text-amber-800 hover:text-amber-600 underline decoration-dotted cursor-pointer"
+                      title="Click to edit allocated hours"
+                    >
+                      {allocatedHours}h
+                    </button>
+                  )}
+                  <div className="w-px h-4 bg-amber-200" />
+                  <span className="text-xs text-gray-500">Used:</span>
+                  <span className="text-xs font-semibold text-red-600">{totalBilledHours.toFixed(1)}h</span>
+                  <div className="w-px h-4 bg-amber-200" />
+                  <span className="text-xs text-gray-500">Remaining:</span>
+                  <span className={`text-xs font-semibold ${remainingHours > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {remainingHours.toFixed(1)}h
+                  </span>
+                </div>
+
+                {/* Divider */}
+                <div className="w-px h-5 bg-amber-300" />
+
+                {/* Statement Download */}
+                <button
+                  onClick={openStatementModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-300 bg-white text-indigo-700 rounded-lg hover:bg-indigo-50 transition-colors shadow-sm"
+                  title="Download billing statement as Excel"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Statement
+                </button>
               </div>
               <button
                 onClick={async () => {
                   if (selectedForBilling.size === 0) { notify.error('Select at least one task'); return; }
-                  if (!apiUrl) return;
                   const result = await Swal.fire({
-                    title: 'Invoice Tasks',
-                    html: `<p>Mark <strong>${selectedForBilling.size}</strong> task(s) as invoiced with today's date?</p>`,
+                    title: 'Stage for Invoicing',
+                    html: `<p>Add <strong>${selectedForBilling.size}</strong> task(s) to the invoice review list?</p><p class="text-sm text-gray-500 mt-2">Tasks will be staged locally. You can review and process them from the Invoice Review panel.</p>`,
                     icon: 'question',
                     showCancelButton: true,
-                    confirmButtonText: 'Invoice',
+                    confirmButtonText: 'Stage for Invoice',
                     confirmButtonColor: '#d97706',
                   });
                   if (!result.isConfirmed) return;
                   setInvoicing(true);
                   try {
                     const today = new Date().toISOString().slice(0, 10);
-                    await api.post('/softaware/tasks/invoice-tasks', {
-                      apiUrl,
-                      task_ids: Array.from(selectedForBilling),
-                      bill_date: today,
-                    });
-                    notify.success(`${selectedForBilling.size} task(s) invoiced`);
+                    await LocalTasksModel.stageForInvoice(Array.from(selectedForBilling), today);
+                    notify.success(`${selectedForBilling.size} task(s) staged for invoicing`);
                     setSelectedForBilling(new Set());
                     setBillingMode(false);
                     loadTasks();
+                    loadStagedCount();
                   } catch {
-                    notify.error('Failed to invoice tasks');
+                    notify.error('Failed to stage tasks');
                   } finally {
                     setInvoicing(false);
                   }
                 }}
                 disabled={selectedForBilling.size === 0 || invoicing}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 shadow-sm"
               >
-                {invoicing ? 'Invoicing…' : `Invoice ${selectedForBilling.size} Task${selectedForBilling.size !== 1 ? 's' : ''}`}
+                {invoicing ? 'Staging…' : `Stage ${selectedForBilling.size} Task${selectedForBilling.size !== 1 ? 's' : ''}`}
               </button>
             </div>
           )}
 
-          {/* Stats bar */}
-          {filteredTasks.length > 0 && (
-            <div className="flex items-center gap-4 text-xs text-gray-500 flex-wrap">
-              <span>{filteredTasks.length} task{filteredTasks.length !== 1 ? 's' : ''}</span>
-              <span className="flex items-center gap-1"><ClockIcon className="h-3.5 w-3.5" /> {totalHours.toFixed(1)}h unbilled</span>
-              {remoteStats && (
-                <>
-                  <span className="h-3 w-px bg-gray-300" />
-                  <span className="text-blue-600 font-medium">Portal: {remoteStats.total_tasks ?? '—'} total</span>
-                  <span className="text-amber-600">{remoteStats.in_progress ?? 0} active</span>
-                  <span className="text-emerald-600">{remoteStats.completed ?? 0} done</span>
-                  {remoteStats.total_hours > 0 && <span>{remoteStats.total_hours}h total</span>}
-                  {remoteStats.overdue_tasks > 0 && <span className="text-red-600">{remoteStats.overdue_tasks} overdue</span>}
-                </>
+          {/* Invoice Review panel */}
+          {invoiceReviewMode && (
+            <div className="bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-orange-200 bg-orange-100/50">
+                <div className="flex items-center gap-2">
+                  <span className="text-base font-semibold text-orange-800">📋 Invoice Review</span>
+                  <span className="inline-flex items-center justify-center min-w-[24px] h-6 px-2 text-xs font-bold rounded-full bg-orange-500 text-white">
+                    {stagedTasks.length}
+                  </span>
+                  {stagedTasks.length > 0 && (
+                    <span className="text-sm text-orange-600 ml-1">
+                      ({stagedTasks.reduce((sum: number, t: any) => sum + timeToDecimal(t.hours || 0), 0).toFixed(1)}h total)
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      if (stagedTasks.length === 0) { notify.error('No staged tasks to process'); return; }
+                      if (!apiUrl) { notify.error('No API URL configured'); return; }
+                      const result = await Swal.fire({
+                        title: 'Process Invoices',
+                        html: `<p>Sync <strong>${stagedTasks.length}</strong> staged task(s) to the external portal as invoiced?</p><p class="text-sm text-gray-500 mt-2">This will permanently mark them as billed on the portal.</p>`,
+                        icon: 'warning',
+                        showCancelButton: true,
+                        confirmButtonText: 'Process & Sync',
+                        confirmButtonColor: '#16a34a',
+                      });
+                      if (!result.isConfirmed) return;
+                      setProcessingInvoices(true);
+                      try {
+                        const resp = await LocalTasksModel.processStagedInvoices(apiUrl);
+                        notify.success(resp.message || `${resp.data?.processed || 0} task(s) invoiced and synced`);
+                        loadTasks();
+                        loadStagedCount();
+                      } catch {
+                        notify.error('Failed to process invoices');
+                      } finally {
+                        setProcessingInvoices(false);
+                      }
+                    }}
+                    disabled={stagedTasks.length === 0 || processingInvoices}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 shadow-sm"
+                  >
+                    {processingInvoices ? 'Processing…' : 'Process & Sync'}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (stagedTasks.length === 0) { notify.error('Nothing to clear'); return; }
+                      const result = await Swal.fire({
+                        title: 'Clear Invoice List',
+                        html: `<p>Remove all <strong>${stagedTasks.length}</strong> task(s) from the invoice staging list?</p><p class="text-sm text-gray-500 mt-2">Tasks will go back to unbilled status.</p>`,
+                        icon: 'question',
+                        showCancelButton: true,
+                        confirmButtonText: 'Clear All',
+                        confirmButtonColor: '#dc2626',
+                      });
+                      if (!result.isConfirmed) return;
+                      try {
+                        await LocalTasksModel.clearStagedInvoices();
+                        notify.success('Invoice staging list cleared');
+                        loadTasks();
+                        loadStagedCount();
+                      } catch {
+                        notify.error('Failed to clear staged invoices');
+                      }
+                    }}
+                    disabled={stagedTasks.length === 0}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 disabled:opacity-50"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+
+              {/* Staged task list */}
+              {stagedTasks.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-orange-500">
+                  No tasks staged for invoicing. Use the <strong>Billing</strong> mode to select and stage tasks.
+                </div>
+              ) : (
+                <div className="max-h-[400px] overflow-y-auto divide-y divide-orange-100">
+                  {stagedTasks.map((t: any) => (
+                    <div key={t.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-orange-50/60 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-gray-800 truncate">{t.task_name || t.title || `Task #${t.external_id}`}</span>
+                          <span className="text-xs text-gray-400">#{t.external_id}</span>
+                        </div>
+                        <div className="flex items-center gap-3 mt-0.5">
+                          <span className="text-xs text-gray-500">{timeToDecimal(t.hours || 0).toFixed(1)}h</span>
+                          <span className="text-xs text-orange-500">Staged: {t.task_bill_date}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await LocalTasksModel.unstageInvoice(t.id);
+                            notify.success('Task removed from staging');
+                            loadTasks();
+                            loadStagedCount();
+                          } catch {
+                            notify.error('Failed to remove task');
+                          }
+                        }}
+                        className="ml-3 text-xs text-red-500 hover:text-red-700 underline"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}
@@ -2183,178 +2670,103 @@ const TasksPage: React.FC = () => {
 
       {/* Content */}
       {loading && tasks.length === 0 ? (
-        <div className="flex items-center justify-center py-16">
+        <div className="flex items-center justify-center py-20">
           <div className="text-center">
-            <ArrowPathIcon className="h-8 w-8 animate-spin text-gray-300 mx-auto mb-3" />
+            <div className="w-12 h-12 rounded-full bg-indigo-50 flex items-center justify-center mx-auto mb-3">
+              <ArrowPathIcon className="h-6 w-6 animate-spin text-indigo-500" />
+            </div>
             <p className="text-sm text-gray-400">Loading tasks…</p>
           </div>
         </div>
       ) : !selectedSoftware ? (
-        <div className="bg-white rounded-lg shadow-sm border p-16 text-center">
-          <CubeIcon className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-sm text-gray-500">
+        <div className="bg-white rounded-xl shadow-sm border p-16 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-4">
+            <CubeIcon className="h-8 w-8 text-gray-300" />
+          </div>
+          <h3 className="text-lg font-medium text-gray-700 mb-1">No Project Selected</h3>
+          <p className="text-sm text-gray-400">
             {taskSoftware.length === 0
-              ? 'No software with external integration configured. Set up integration in Software Management.'
-              : 'Select a software product to view tasks'}
+              ? 'No software with external integration configured.'
+              : 'Select a project to view and manage tasks.'}
           </p>
         </div>
       ) : filteredTasks.length === 0 ? (
-        <div className="bg-white rounded-lg shadow-sm border p-16 text-center">
-          <ClockIcon className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-sm text-gray-500 mb-3">No tasks found</p>
+        <div className="bg-white rounded-xl shadow-sm border p-16 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-indigo-50 flex items-center justify-center mx-auto mb-4">
+            <ClockIcon className="h-8 w-8 text-indigo-300" />
+          </div>
+          <h3 className="text-lg font-medium text-gray-700 mb-1">No Tasks Found</h3>
+          <p className="text-sm text-gray-400 mb-4">
+            {search || statusFilter !== 'all' || priorityFilter !== 'all' || bookmarkFilter
+              ? 'Try adjusting your filters'
+              : 'Create your first task to get started'}
+          </p>
           <button onClick={() => { setEditingTask(null); setTaskDialogOpen(true); }}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-picton-blue text-white rounded-lg hover:bg-picton-blue/90">
-            <PlusIcon className="h-4 w-4" /> Create First Task
+            className="inline-flex items-center gap-1.5 px-5 py-2.5 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 shadow-sm">
+            <PlusIcon className="h-4 w-4" /> Create Task
           </button>
         </div>
+      ) : viewMode === 'kanban' ? (
+        /* ── Kanban View ── */
+        <KanbanBoard
+          tasks={filteredTasks}
+          onView={handleViewTask}
+          onBookmark={handleBookmark}
+          onStatusChange={handleStatusChange}
+          onReorder={handleReorder}
+          onPriorityChange={handlePriorityChange}
+          onEdit={(t) => { setEditingTask(t); setTaskDialogOpen(true); }}
+          onDelete={handleDelete}
+          onAssign={(t) => { setWorkflowTask(t); setWorkflowDialogOpen(true); }}
+          onLink={(t) => { setAssociationTask(t); setAssociationDialogOpen(true); }}
+          lastComments={lastComments}
+          apiUrl={apiUrl || ''}
+          softwareId={selectedSoftware?.id}
+          onImageClick={(url) => { setCardGalleryImages([{ url }]); setCardGalleryIndex(0); }}
+          onGalleryOpen={(images, idx) => { setCardGalleryImages(images); setCardGalleryIndex(idx); }}
+          fontSize={taskFontSize}
+        />
       ) : (
-        <div className={viewMode === 'grid'
-          ? 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4'
-          : 'space-y-3'
-        }>
-          {filteredTasks.map((task, idx) => (
-            <div key={task.id}
-              className="bg-white rounded-lg shadow-sm border p-4 hover:shadow-md transition-all overflow-hidden"
-              style={{ borderLeft: `4px solid ${task.backgroundColor || '#667eea'}` }}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0 flex items-start gap-2">
-                  {billingMode && (
-                    <input
-                      type="checkbox"
-                      checked={selectedForBilling.has(task.id)}
-                      onChange={() => {
-                        setSelectedForBilling(prev => {
-                          const next = new Set(prev);
-                          if (next.has(task.id)) next.delete(task.id);
-                          else next.add(task.id);
-                          return next;
-                        });
-                      }}
-                      className="mt-1 h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500 shrink-0"
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <h3 className="font-bold text-gray-900 line-clamp-2 text-sm leading-tight">{task.title}</h3>
-                    <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500 mt-1">
-                      <span>{relativeDate(task.start || task.created_at || task.time || task.date)}</span>
-                      {task.created_by_name && <><span>·</span><span>{task.created_by_name}</span></>}
-                      {timeToDecimal(task.hours) > 0 && (
-                        <><span>·</span><span className="flex items-center gap-0.5 font-medium text-picton-blue">
-                          <ClockIcon className="h-3 w-3" />{timeToDecimal(task.hours).toFixed(2)}h
-                        </span></>
-                      )}
-                    </div>
-                  </div>
+        /* ── List View ── */
+        <div className="space-y-2">
+          {filteredTasks.map((task) => (
+            <div key={task.id} className="relative">
+              {billingMode && (
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 z-10">
+                  <input
+                    type="checkbox"
+                    checked={selectedForBilling.has(task.id)}
+                    onChange={() => {
+                      setSelectedForBilling(prev => {
+                        const next = new Set(prev);
+                        if (next.has(task.id)) next.delete(task.id);
+                        else next.add(task.id);
+                        return next;
+                      });
+                    }}
+                    className="h-4 w-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500"
+                  />
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {task.approval_required === 1 && (
-                    <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] border ${
-                      task.approved_by ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'
-                    }`}>
-                      {task.approved_by ? <><ShieldCheckIcon className="h-3 w-3" /> Approved</> : <><ShieldExclamationIcon className="h-3 w-3" /> Pending</>}
-                    </span>
-                  )}
-                  <span className="inline-flex items-center px-2 py-0.5 rounded border text-xs text-gray-600">{task.type}</span>
-                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${STATUS_COLORS[task.status]}`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[task.status]}`} />
-                    {task.status}
-                  </span>
-                </div>
-              </div>
-
-              {/* Description preview */}
-              {task.description && (
-                <div className="mt-2 text-xs text-gray-600 line-clamp-2 [&_img]:hidden [&_table]:hidden"
-                  dangerouslySetInnerHTML={{ __html: task.description }} />
               )}
-
-              {/* Inline attachment thumbnails */}
-              {apiUrl && (
-                <TaskAttachmentsInline
-                  taskId={task.id}
-                  apiUrl={apiUrl}
+              <div className={billingMode ? 'pl-10' : ''}>
+                <TaskCard
+                  task={task}
+                  variant="list"
+                  fontSize={taskFontSize}
+                  onView={handleViewTask}
+                  onBookmark={handleBookmark}
+                  onEdit={(t) => { setEditingTask(t); setTaskDialogOpen(true); }}
+                  onDelete={handleDelete}
+                  onStatusChange={handleStatusChange}
+                  onPriorityChange={handlePriorityChange}
+                  onAssign={(t) => { setWorkflowTask(t); setWorkflowDialogOpen(true); }}
+                  onLink={(t) => { setAssociationTask(t); setAssociationDialogOpen(true); }}
+                  lastComment={lastComments[Number(task.id)]}
+                  apiUrl={apiUrl || ''}
                   softwareId={selectedSoftware?.id}
-                  onImageClick={(url) => setLightboxImage(url)}
+                  onImageClick={(url) => { setCardGalleryImages([{ url }]); setCardGalleryIndex(0); }}
+                  onGalleryOpen={(images, idx) => { setCardGalleryImages(images); setCardGalleryIndex(idx); }}
                 />
-              )}
-
-              {/* Workflow phase */}
-              {task.workflow_phase && (
-                <div className="mt-2 p-2 rounded border bg-gray-50 text-xs">
-                  <div className="flex items-center flex-wrap gap-2 mb-1">
-                    <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 text-[10px] border border-purple-200">
-                      {PHASE_LABELS[task.workflow_phase] || task.workflow_phase}
-                    </span>
-                    {task.assigned_to_name && (
-                      <span className="text-gray-500 flex items-center gap-1">
-                        <UserIcon className="h-3 w-3" />{task.assigned_to_name}
-                      </span>
-                    )}
-                    {task.module_name && (
-                      <span className="text-gray-500 flex items-center gap-1">
-                        <CubeIcon className="h-3 w-3" />{task.module_name}
-                      </span>
-                    )}
-                    {task.parent_task_id && (
-                      <span className="text-gray-500 flex items-center gap-1">
-                        <ArrowRightIcon className="h-3 w-3" />{task.association_type || 'related'} of #{task.parent_task_id}
-                      </span>
-                    )}
-                  </div>
-                  {lastComments[Number(task.id)] && (
-                    <div className="flex items-start gap-1 text-gray-600 italic border-t border-gray-200 pt-1.5 mt-1.5">
-                      <ChatBubbleLeftIcon className="h-3 w-3 mt-0.5 shrink-0" />
-                      <span className="line-clamp-1">{lastComments[Number(task.id)]}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-                <button onClick={() => handleReorder(task, 'up')} disabled={idx === 0}
-                  className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30"><ChevronUpIcon className="h-4 w-4" /></button>
-                <button onClick={() => handleReorder(task, 'down')} disabled={idx === filteredTasks.length - 1}
-                  className="p-1.5 rounded hover:bg-gray-100 disabled:opacity-30"><ChevronDownIcon className="h-4 w-4" /></button>
-                <div className="h-5 w-px bg-gray-200 mx-0.5" />
-                <button onClick={() => { setViewingTask(task); setDetailsOpen(true); }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg hover:bg-gray-50">
-                  <EyeIcon className="h-3 w-3" /> View
-                </button>
-                <button onClick={() => { setEditingTask(task); setTaskDialogOpen(true); }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg hover:bg-gray-50">
-                  <PencilIcon className="h-3 w-3" /> Edit
-                </button>
-                {canUserAssignTask(user, task) ? (
-                  <button onClick={() => { setWorkflowTask(task); setWorkflowDialogOpen(true); }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg text-purple-600 hover:bg-purple-50">
-                    <ArrowsRightLeftIcon className="h-3 w-3" /> Assign
-                  </button>
-                ) : task.workflow_phase ? (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-purple-50 text-purple-600 border border-purple-200">
-                    {PHASE_LABELS[task.workflow_phase.toLowerCase()] || task.workflow_phase}
-                  </span>
-                ) : null}
-                <button onClick={() => { setAssociationTask(task); setAssociationDialogOpen(true); }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg text-blue-600 hover:bg-blue-50">
-                  <LinkIcon className="h-3 w-3" /> Link
-                </button>
-                {(task.status === 'new' || task.status === 'pending') && (
-                  <button onClick={() => handleStatusChange(task, 'in-progress')}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg text-emerald-600 hover:bg-emerald-50">
-                    <PlayIcon className="h-3 w-3" /> Start
-                  </button>
-                )}
-                {(task.status === 'in-progress' || task.status === 'progress') && (
-                  <button onClick={() => handleStatusChange(task, 'completed')}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg text-emerald-600 hover:bg-emerald-50">
-                    <CheckCircleIcon className="h-3 w-3" /> Complete
-                  </button>
-                )}
-                <button onClick={() => handleDelete(task)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg text-red-500 hover:bg-red-50">
-                  <TrashIcon className="h-3 w-3" /> Delete
-                </button>
               </div>
             </div>
           ))}
@@ -2370,7 +2782,6 @@ const TasksPage: React.FC = () => {
         softwareId={selectedSoftware?.id}
         onSaved={(createdTaskId) => {
           loadTasks();
-          // Auto-open newly created task in view mode
           if (createdTaskId && !editingTask) {
             setTimeout(() => {
               const newTask = tasks.find(t => t.id === createdTaskId);
@@ -2412,11 +2823,179 @@ const TasksPage: React.FC = () => {
         onSuccess={() => loadTasks()}
       />
 
-      {/* Image lightbox for card thumbnails */}
-      {lightboxImage && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 cursor-pointer"
-          onClick={() => setLightboxImage(null)}>
-          <img src={lightboxImage} alt="Expanded" className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl" />
+      {/* Image gallery lightbox (from task cards) */}
+      {cardGalleryImages.length > 0 && (
+        <TaskImageLightbox
+          images={cardGalleryImages}
+          initialIndex={cardGalleryIndex}
+          onClose={() => setCardGalleryImages([])}
+        />
+      )}
+
+      {/* Statement Download Modal */}
+      {statementModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setStatementModalOpen(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-indigo-500 to-indigo-600">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-white/20 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Billing Statement</h3>
+                  <p className="text-xs text-indigo-200">Download task hours as Excel</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setStatementModalOpen(false)}
+                className="text-white/70 hover:text-white transition-colors"
+              >
+                <XMarkIcon className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-5">
+              {loadingBillingDates ? (
+                <div className="flex items-center justify-center py-8">
+                  <ArrowPathIcon className="w-6 h-6 animate-spin text-indigo-400" />
+                  <span className="ml-2 text-sm text-gray-500">Loading billing dates…</span>
+                </div>
+              ) : billingDates.length === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm text-gray-500">No billing dates found.</p>
+                  <p className="text-xs text-gray-400 mt-1">Invoice some tasks first to generate a statement.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-lg px-4 py-3">
+                    <p className="text-xs text-indigo-600">
+                      <strong>{billingDates.length}</strong> billing date{billingDates.length !== 1 ? 's' : ''} found.
+                      Select a range below to include in your statement.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">From (billing date)</label>
+                      <select
+                        value={statementDateFrom}
+                        onChange={e => setStatementDateFrom(e.target.value)}
+                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400"
+                      >
+                        <option value="">Select…</option>
+                        {billingDates.slice().reverse().map(d => (
+                          <option key={d} value={d}>{d}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">To (billing date)</label>
+                      <select
+                        value={statementDateTo}
+                        onChange={e => setStatementDateTo(e.target.value)}
+                        className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400"
+                      >
+                        <option value="">Select…</option>
+                        {billingDates.map(d => (
+                          <option key={d} value={d} disabled={!!statementDateFrom && d < statementDateFrom}>{d}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Quick select: last N billings */}
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 mb-2">Quick select:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {[1, 2, 3, 4, 6, 9, 12].filter(n => n <= billingDates.length).map(n => {
+                        const isActive = statementDateFrom === billingDates[Math.min(n - 1, billingDates.length - 1)] && statementDateTo === billingDates[0];
+                        return (
+                          <button
+                            key={n}
+                            onClick={() => {
+                              const last = billingDates.slice(0, n);
+                              setStatementDateFrom(last[last.length - 1]);
+                              setStatementDateTo(last[0]);
+                            }}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                              isActive
+                                ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
+                                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                            }`}
+                          >
+                            Last {n}
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => {
+                          setStatementDateFrom(billingDates[billingDates.length - 1]);
+                          setStatementDateTo(billingDates[0]);
+                        }}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                          statementDateFrom === billingDates[billingDates.length - 1] && statementDateTo === billingDates[0]
+                            ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
+                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                        }`}
+                      >
+                        All ({billingDates.length})
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Preview: selected date count */}
+                  {statementDateFrom && statementDateTo && (
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+                      <p className="text-xs text-gray-600">
+                        Statement will include <strong>{billingDates.filter(d => d >= statementDateFrom && d <= statementDateTo).length}</strong> billing date{billingDates.filter(d => d >= statementDateFrom && d <= statementDateTo).length !== 1 ? 's' : ''}:
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {billingDates.filter(d => d >= statementDateFrom && d <= statementDateTo).map(d => (
+                          <span key={d} className="inline-flex items-center px-2 py-0.5 text-xs font-medium bg-white border border-gray-200 rounded text-gray-700">
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-3 px-6 py-4 bg-gray-50 border-t border-gray-100">
+              <button
+                onClick={() => setStatementModalOpen(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleStatementDownload}
+                disabled={!statementDateFrom || !statementDateTo || downloadingStatement || billingDates.length === 0}
+                className="inline-flex items-center gap-2 px-5 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+              >
+                {downloadingStatement ? (
+                  <>
+                    <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                    Generating…
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Download Excel
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

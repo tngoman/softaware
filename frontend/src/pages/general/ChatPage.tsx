@@ -622,6 +622,44 @@ export default function ChatPage() {
   }, [selectConversation]);
 
   /* ================================================================ */
+  /*  URL param handling: auto-select conversation & join call          */
+  /* ================================================================ */
+  const joinCallProcessed = useRef(false);
+  useEffect(() => {
+    if (joinCallProcessed.current || loadingConvs || conversations.length === 0) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const convIdParam = params.get('c');
+    const joinCallId = params.get('joinCallId');
+    const callTypeParam = params.get('callType') as 'voice' | 'video' | null;
+
+    if (convIdParam) {
+      const convId = Number(convIdParam);
+      const conv = conversations.find((c) => c.id === convId);
+      if (conv) {
+        selectConversation(conv);
+
+        // If we have a call to join, start WebRTC directly (call session already created by backend)
+        if (joinCallId && callTypeParam) {
+          joinCallProcessed.current = true;
+          const callId = Number(joinCallId);
+          // Small delay to let socket room join complete
+          setTimeout(async () => {
+            try {
+              await webrtcService.startCall(callId, convId, callTypeParam);
+              emitCallInitiate(convId, callTypeParam, callId);
+            } catch (err: any) {
+              notify.error(err?.message || 'Failed to join call');
+            }
+          }, 500);
+        }
+      }
+      // Clean URL params
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [conversations, loadingConvs, selectConversation]);
+
+  /* ================================================================ */
   /*  Offline message queue flush                                       */
   /* ================================================================ */
   const flushOfflineQueue = useCallback(async () => {
@@ -795,12 +833,15 @@ export default function ChatPage() {
       const result = await StaffChatModel.startScheduledCall(scheduledCallId);
       notify.success('Scheduled call started!');
       setShowScheduledCalls(false);
-      // The backend creates a real call session — now start WebRTC
-      handleStartCall(result.conversation_id, result.call_type as 'voice' | 'video');
-    } catch {
-      notify.error('Failed to start scheduled call');
+      // The backend already created the call_session — start WebRTC directly
+      // (don't call handleStartCall which would create a SECOND call_session via initiateCall)
+      const callType = (result.call_type as 'voice' | 'video') || 'video';
+      await webrtcService.startCall(result.call_id, result.conversation_id, callType);
+      emitCallInitiate(result.conversation_id, callType, result.call_id);
+    } catch (err: any) {
+      notify.error(err?.response?.data?.error || err?.message || 'Failed to start scheduled call');
     }
-  }, [handleStartCall]);
+  }, []);
 
   /* ================================================================ */
   /*  Message actions                                                   */

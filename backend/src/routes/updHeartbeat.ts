@@ -31,22 +31,31 @@ async function storeRecentErrors(
 ): Promise<number> {
   let stored = 0;
   for (const error of recentErrors) {
-    if (!error.type || !error.level || !error.label || !error.message) continue;
+    // Accept both spec names (error_type) and short names (type)
+    const errorType = error.type || error.error_type;
+    const errorLevel = error.level || error.error_level;
+    const errorLabel = error.label || errorType || 'unknown';
+    const errorMessage = error.message;
+    if (!errorType || !errorLevel || !errorMessage) continue;
     try {
       await db.insert(
         `INSERT INTO error_reports (
           software_key, client_identifier, hostname, source,
           error_type, error_level, error_label, error_message,
           error_file, error_line, error_column, error_trace, error_url,
+          request_method, request_uri,
           app_version, os_info,
           error_occurred_at, received_at
-        ) VALUES (?, ?, ?, 'backend', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        ) VALUES (?, ?, ?, 'backend', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           softwareKey, clientIdentifier, hostname,
-          error.type, error.level, error.label,
-          String(error.message).substring(0, 65000),
+          errorType, errorLevel, errorLabel,
+          String(errorMessage).substring(0, 65000),
           error.file || null, error.line || null, error.column || null,
-          error.trace || null, error.url || null,
+          error.trace || error.stack_trace || null,
+          error.url || null,
+          error.request_method || error.request?.method || null,
+          error.request_uri || error.request?.uri || null,
           appVersion, osInfo,
           error.timestamp || new Date().toISOString(),
         ]
@@ -57,9 +66,9 @@ async function storeRecentErrors(
 
   // Update summary
   if (stored > 0) {
-    const errorCount = recentErrors.filter(e => e.level === 'error').length;
-    const warningCount = recentErrors.filter(e => e.level === 'warning').length;
-    const noticeCount = recentErrors.filter(e => e.level === 'notice').length;
+    const errorCount = recentErrors.filter(e => (e.level || e.error_level) === 'error').length;
+    const warningCount = recentErrors.filter(e => (e.level || e.error_level) === 'warning').length;
+    const noticeCount = recentErrors.filter(e => (e.level || e.error_level) === 'notice').length;
     try {
       await db.execute(
         `INSERT INTO client_error_summaries

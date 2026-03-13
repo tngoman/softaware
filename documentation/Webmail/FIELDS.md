@@ -18,6 +18,7 @@
 | `smtp_secure` | `TINYINT(1)` | No | `1` | `smtp_secure` | SMTP TLS enabled |
 | `smtp_username` | `VARCHAR(255)` | No | — | `smtp_username` | SMTP username (= email_address) |
 | `smtp_password` | `TEXT` | No | — | — | AES-256-GCM encrypted password ⚠️ Never sent to frontend |
+| `signature` | `TEXT` | Yes | `NULL` | `signature` | HTML email signature (appended to outgoing emails) |
 | `is_default` | `TINYINT(1)` | No | `0` | `is_default` | Default account flag (one per user) |
 | `is_active` | `TINYINT(1)` | No | `1` | `is_active` | Account enabled/disabled |
 | `last_connected_at` | `DATETIME` | Yes | `NULL` | `last_connected_at` | Last successful connection time |
@@ -77,6 +78,7 @@ interface MailboxAccount {
   smtp_secure: boolean;
   smtp_username: string;
   smtp_password: string;   // decrypted
+  signature: string;       // HTML signature
   is_default: boolean;
   is_active: boolean;
   last_connected_at: string | null;
@@ -172,6 +174,7 @@ interface CreateMailboxInput {
   display_name: string;
   email_address: string;
   password: string;
+  signature?: string;
   is_default?: boolean;
 }
 ```
@@ -181,6 +184,14 @@ interface CreateMailboxInput {
 interface ConnectionTestResult {
   imap: { connected: boolean; message: string };
   smtp: { connected: boolean; message: string };
+}
+```
+
+### `UnreadCountResponse`
+```typescript
+interface UnreadCountResponse {
+  total: number;
+  accounts: { id: number; email_address: string; unseen: number }[];
 }
 ```
 

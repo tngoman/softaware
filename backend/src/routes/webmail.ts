@@ -44,6 +44,7 @@ import {
   sendMail,
   getWebmailSettings,
   saveWebmailSettings,
+  getUnreadCount,
 } from '../services/webmailService.js';
 
 export const webmailRouter = Router();
@@ -54,11 +55,15 @@ webmailRouter.use(requireAuth);
 // Ensure table exists on first load
 let tableReady = false;
 webmailRouter.use(async (_req, _res, next) => {
-  if (!tableReady) {
-    await ensureWebmailTable();
-    tableReady = true;
+  try {
+    if (!tableReady) {
+      await ensureWebmailTable();
+      tableReady = true;
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -76,12 +81,19 @@ webmailRouter.get('/accounts', async (req, res, next) => {
   }
 });
 
+// ─── Zod coercion: MySQL TINYINT comes as 0/1, coerce to boolean ─────────
+const coerceBool = z.preprocess(
+  (v) => (typeof v === 'number' ? v !== 0 : v),
+  z.boolean().optional(),
+);
+
 // ─── POST /webmail/accounts — Add a mailbox ──────────────────────────────
 const CreateAccountSchema = z.object({
   display_name: z.string().min(1).max(255),
   email_address: z.string().email().max(255),
   password: z.string().min(1),
-  is_default: z.boolean().optional(),
+  signature: z.string().optional(),
+  is_default: coerceBool,
 });
 
 webmailRouter.post('/accounts', async (req, res, next) => {
@@ -91,6 +103,7 @@ webmailRouter.post('/accounts', async (req, res, next) => {
       display_name: string;
       email_address: string;
       password: string;
+      signature?: string;
       is_default?: boolean;
     };
     const result = await createMailbox(userId, data);
@@ -105,8 +118,9 @@ const UpdateAccountSchema = z.object({
   display_name: z.string().min(1).max(255).optional(),
   email_address: z.string().email().max(255).optional(),
   password: z.string().min(1).optional(),
-  is_default: z.boolean().optional(),
-  is_active: z.boolean().optional(),
+  signature: z.string().optional(),
+  is_default: coerceBool,
+  is_active: coerceBool,
 });
 
 webmailRouter.put('/accounts/:id', async (req, res, next) => {
@@ -365,6 +379,17 @@ webmailRouter.get('/attachment', async (req, res, next) => {
     res.setHeader('Content-Type', attachment.contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${attachment.filename}"`);
     res.send(attachment.content);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /webmail/unread-count — Unread INBOX count across all accounts ──
+webmailRouter.get('/unread-count', async (req, res, next) => {
+  try {
+    const { userId } = getAuth(req);
+    const result = await getUnreadCount(userId);
+    res.json({ success: true, data: result });
   } catch (err) {
     next(err);
   }

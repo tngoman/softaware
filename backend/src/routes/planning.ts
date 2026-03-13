@@ -44,6 +44,12 @@ import {
   listMailboxes,
   getMessage,
 } from '../services/webmailService.js';
+import {
+  emitCallRinging,
+  emitCallMissed,
+  isUserOnline,
+} from '../services/chatSocket.js';
+import { sendPushToUser } from '../services/firebaseService.js';
 
 export const planningRouter = Router();
 
@@ -586,32 +592,276 @@ planningRouter.post('/invite/:token/accept', async (req: AuthRequest, res: Respo
 planningRouter.post('/events/:id/start-call', async (req: AuthRequest, res: Response, next) => {
   try {
     const { userId } = getAuth(req);
+    const eventId = req.params.id;
+
+    // Allow event creator OR any attendee (regardless of RSVP) to start the call
     const rows: any = await db.query(
-      `SELECT * FROM calendar_events WHERE id = ? AND user_id = ?`,
-      [req.params.id, userId]
+      `SELECT ce.* FROM calendar_events ce
+       WHERE ce.id = ? AND (
+         ce.user_id = ?
+         OR EXISTS (
+           SELECT 1 FROM calendar_event_attendees cea
+           WHERE cea.event_id = ce.id AND cea.user_id = ? AND cea.rsvp IN ('accepted', 'tentative', 'pending')
+         )
+       )`,
+      [eventId, userId, userId]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Event not found' });
+    if (!rows.length) return res.status(404).json({ error: 'Event not found or you are not a participant' });
 
     const event = rows[0];
+    const callType = event.call_type || 'video';
+
+    // ── Path A: Event linked to a scheduled call → delegate to scheduled call start logic ──
     if (event.scheduled_call_id) {
+      const scheduled: any = await db.queryOne(
+        `SELECT * FROM scheduled_calls WHERE id = ? AND status = 'scheduled'`,
+        [event.scheduled_call_id]
+      );
+      if (!scheduled) {
+        // Scheduled call already started/completed/cancelled — return existing info
+        const existing: any = await db.queryOne(
+          `SELECT * FROM scheduled_calls WHERE id = ?`,
+          [event.scheduled_call_id]
+        );
+        if (existing?.call_session_id) {
+          return res.json({
+            success: true,
+            data: {
+              call_id: existing.call_session_id,
+              conversation_id: existing.conversation_id,
+              call_type: existing.call_type || callType,
+              screen_share: !!existing.screen_share,
+              status: existing.status,
+            },
+          });
+        }
+        return res.status(400).json({ error: 'Scheduled call is not in a startable state' });
+      }
+
+      // Check no active call already in that conversation
+      const activeCall: any = await db.queryOne(
+        `SELECT id FROM call_sessions WHERE conversation_id = ? AND status IN ('ringing', 'active')`,
+        [scheduled.conversation_id]
+      );
+      if (activeCall) return res.status(400).json({ error: 'There is already an active call in this conversation' });
+
+      // Create the real call session
+      const callId = await db.insert(
+        `INSERT INTO call_sessions (conversation_id, type, initiated_by, status) VALUES (?, ?, ?, 'ringing')`,
+        [scheduled.conversation_id, scheduled.call_type || callType, userId]
+      );
+
+      // Add accepted participants to call_participants
+      const scParticipants: any = await db.query(
+        `SELECT user_id FROM scheduled_call_participants WHERE scheduled_call_id = ? AND rsvp = 'accepted'`,
+        [scheduled.id]
+      );
+      for (const p of scParticipants) {
+        await db.execute(
+          `INSERT INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)`,
+          [callId, p.user_id, p.user_id === userId ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null]
+        );
+      }
+
+      // Update scheduled call to active + link to call_session
+      await db.execute(
+        `UPDATE scheduled_calls SET status = 'active', call_session_id = ? WHERE id = ?`,
+        [callId, scheduled.id]
+      );
+
+      // Update calendar event too
+      await db.execute(
+        `UPDATE calendar_events SET call_session_id = ? WHERE id = ?`,
+        [callId, eventId]
+      );
+
+      // Emit ringing to conversation
+      const caller: any = await db.queryOne(`SELECT name, email FROM users WHERE id = ?`, [userId]);
+      const callerName = caller?.name || caller?.email || 'Unknown';
+
+      emitCallRinging(scheduled.conversation_id, {
+        callId: Number(callId),
+        callType: (scheduled.call_type || callType) as 'voice' | 'video',
+        callerId: userId,
+        callerName,
+        conversationName: null,
+      });
+
+      // Push notify offline participants
+      for (const p of scParticipants) {
+        if (p.user_id === userId) continue;
+        try {
+          const online = await isUserOnline(p.user_id);
+          if (online) continue;
+          await sendPushToUser(p.user_id, {
+            title: `Incoming ${scheduled.call_type || callType} call`,
+            body: `${callerName} is starting: "${scheduled.title || event.title}"`,
+            data: {
+              type: 'incoming_call',
+              callId: String(callId),
+              callType: scheduled.call_type || callType,
+              conversationId: String(scheduled.conversation_id),
+              callerId: userId,
+              callerName,
+              link: `/chat?c=${scheduled.conversation_id}`,
+            },
+          });
+        } catch { /* ignore push errors */ }
+      }
+
+      // 45-second auto-miss timeout
+      setTimeout(async () => {
+        try {
+          const session: any = await db.queryOne(`SELECT status FROM call_sessions WHERE id = ?`, [callId]);
+          if (session?.status === 'ringing') {
+            await db.execute(`UPDATE call_sessions SET status = 'missed', ended_at = NOW() WHERE id = ?`, [callId]);
+            await db.execute(`UPDATE call_participants SET left_at = NOW() WHERE call_id = ? AND left_at IS NULL`, [callId]);
+            await db.execute(`UPDATE scheduled_calls SET status = 'scheduled', call_session_id = NULL WHERE id = ? AND status = 'active'`, [scheduled.id]);
+            emitCallMissed(scheduled.conversation_id, Number(callId));
+          }
+        } catch { /* ignore */ }
+      }, 45_000);
+
       return res.json({
         success: true,
-        data: { action: 'start_scheduled_call', scheduled_call_id: event.scheduled_call_id, call_session_id: event.call_session_id },
+        data: {
+          call_id: Number(callId),
+          conversation_id: scheduled.conversation_id,
+          call_type: scheduled.call_type || callType,
+          screen_share: !!scheduled.screen_share,
+          status: 'ringing',
+        },
       });
     }
 
-    const attendees: any = await db.query(
-      `SELECT user_id FROM calendar_event_attendees WHERE event_id = ? AND rsvp = 'accepted' AND user_id != ?`,
-      [req.params.id, userId]
+    // ── Path B: Plain calendar event → find/create a conversation and start a call ──
+    const allAttendees: any = await db.query(
+      `SELECT user_id FROM calendar_event_attendees WHERE event_id = ?`,
+      [eventId]
     );
+    // Collect unique user IDs: creator + all attendees
+    const participantIds = [...new Set([event.user_id, ...allAttendees.map((a: any) => a.user_id)])];
+
+    let conversationId: number | null = null;
+
+    if (participantIds.length === 2) {
+      // 2-person call → find existing DM or create one
+      const otherId = participantIds.find(id => id !== userId) || participantIds[1];
+      const existingDM: any = await db.queryOne(`
+        SELECT c.id FROM conversations c
+        JOIN conversation_members cm1 ON cm1.conversation_id = c.id AND cm1.user_id = ? AND cm1.removed_at IS NULL
+        JOIN conversation_members cm2 ON cm2.conversation_id = c.id AND cm2.user_id = ? AND cm2.removed_at IS NULL
+        WHERE c.type = 'direct'
+        LIMIT 1
+      `, [userId, otherId]);
+      if (existingDM) {
+        conversationId = existingDM.id;
+      } else {
+        conversationId = Number(await db.insert(
+          `INSERT INTO conversations (type, created_by) VALUES ('direct', ?)`,
+          [userId]
+        ));
+        await db.execute(`INSERT INTO conversation_members (conversation_id, user_id, role) VALUES (?, ?, 'admin')`, [conversationId, userId]);
+        await db.execute(`INSERT INTO conversation_members (conversation_id, user_id, role) VALUES (?, ?, 'member')`, [conversationId, otherId]);
+      }
+    } else {
+      // Group call → find existing group or create ad-hoc group
+      conversationId = Number(await db.insert(
+        `INSERT INTO conversations (type, name, created_by) VALUES ('group', ?, ?)`,
+        [event.title || 'Meeting Call', userId]
+      ));
+      for (const pid of participantIds) {
+        await db.execute(
+          `INSERT INTO conversation_members (conversation_id, user_id, role) VALUES (?, ?, ?)`,
+          [conversationId, pid, pid === userId ? 'admin' : 'member']
+        );
+      }
+    }
+
+    // Check for existing active call
+    await db.execute(
+      `UPDATE call_sessions SET status = 'missed', ended_at = NOW()
+       WHERE conversation_id = ? AND status = 'ringing'
+         AND started_at < DATE_SUB(NOW(), INTERVAL 60 SECOND)`,
+      [conversationId]
+    );
+    const activeCall: any = await db.queryOne(
+      `SELECT id FROM call_sessions WHERE conversation_id = ? AND status IN ('ringing', 'active')`,
+      [conversationId]
+    );
+    if (activeCall) return res.status(400).json({ error: 'There is already an active call in this conversation' });
+
+    // Create call session
+    const callId = await db.insert(
+      `INSERT INTO call_sessions (conversation_id, type, initiated_by, status) VALUES (?, ?, ?, 'ringing')`,
+      [conversationId, callType, userId]
+    );
+
+    // Add all participants
+    for (const pid of participantIds) {
+      await db.execute(
+        `INSERT INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)`,
+        [callId, pid, pid === userId ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null]
+      );
+    }
+
+    // Update calendar event with call_session_id
+    await db.execute(`UPDATE calendar_events SET call_session_id = ? WHERE id = ?`, [callId, eventId]);
+
+    // Emit ringing
+    const caller: any = await db.queryOne(`SELECT name, email FROM users WHERE id = ?`, [userId]);
+    const callerName = caller?.name || caller?.email || 'Unknown';
+
+    emitCallRinging(conversationId, {
+      callId: Number(callId),
+      callType: callType as 'voice' | 'video',
+      callerId: userId,
+      callerName,
+      conversationName: event.title || null,
+    });
+
+    // Push notify offline participants
+    for (const pid of participantIds) {
+      if (pid === userId) continue;
+      try {
+        const online = await isUserOnline(pid);
+        if (online) continue;
+        await sendPushToUser(pid, {
+          title: `Incoming ${callType} call`,
+          body: `${callerName} is calling: "${event.title}"`,
+          data: {
+            type: 'incoming_call',
+            callId: String(callId),
+            callType,
+            conversationId: String(conversationId),
+            callerId: userId,
+            callerName,
+            link: `/chat?c=${conversationId}`,
+          },
+        });
+      } catch { /* ignore push errors */ }
+    }
+
+    // 45-second auto-miss timeout
+    setTimeout(async () => {
+      try {
+        const session: any = await db.queryOne(`SELECT status FROM call_sessions WHERE id = ?`, [callId]);
+        if (session?.status === 'ringing') {
+          await db.execute(`UPDATE call_sessions SET status = 'missed', ended_at = NOW() WHERE id = ?`, [callId]);
+          await db.execute(`UPDATE call_participants SET left_at = NOW() WHERE call_id = ? AND left_at IS NULL`, [callId]);
+          emitCallMissed(conversationId!, Number(callId));
+        }
+      } catch { /* ignore */ }
+    }, 45_000);
 
     res.json({
       success: true,
       data: {
-        action: 'initiate_call',
-        event_id: event.id, call_type: event.call_type || 'video',
-        title: event.title,
-        attendee_user_ids: attendees.map((a: any) => a.user_id),
+        call_id: Number(callId),
+        conversation_id: conversationId,
+        call_type: callType,
+        screen_share: false,
+        status: 'ringing',
       },
     });
   } catch (err) { next(err); }

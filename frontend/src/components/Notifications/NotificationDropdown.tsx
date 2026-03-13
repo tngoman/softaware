@@ -138,7 +138,7 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="relative p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors duration-200"
+        className="relative p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-lg transition-colors duration-200"
       >
         <BellIcon className="h-6 w-6" />
         {unreadCount > 0 && (
@@ -149,9 +149,9 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-96 bg-white rounded-lg shadow-lg border border-gray-200 z-50">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-900">Notifications</h3>
+        <div className="absolute right-0 mt-2 w-96 bg-white dark:bg-dark-800 rounded-lg shadow-lg border border-gray-200 dark:border-dark-700 z-50">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-dark-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Notifications</h3>
             {unreadCount > 0 && (
               <button
                 onClick={handleMarkAllAsRead}
@@ -168,17 +168,17 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-picton-blue"></div>
               </div>
             ) : !notifications || notifications.length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                <BellIcon className="h-12 w-12 mx-auto mb-2 text-gray-300" />
+              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                <BellIcon className="h-12 w-12 mx-auto mb-2 text-gray-300 dark:text-gray-600" />
                 <p>No notifications</p>
               </div>
             ) : (
-              <div className="divide-y divide-gray-200">
+              <div className="divide-y divide-gray-200 dark:divide-dark-700">
                 {notifications.map((notification) => (
                   <div
                     key={notification.id}
-                    className={`px-4 py-3 hover:bg-gray-50 cursor-pointer transition-colors duration-150 ${
-                      !notification.read_at ? 'bg-blue-50' : ''
+                    className={`px-4 py-3 hover:bg-gray-50 dark:hover:bg-dark-700 cursor-pointer transition-colors duration-150 ${
+                      !notification.read_at ? 'bg-blue-50 dark:bg-blue-900/20' : ''
                     }`}
                     onClick={() => handleNotificationClick(notification)}
                   >
@@ -187,14 +187,14 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
                         {getNotificationIcon(notification.type)}
                       </span>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900">
+                        <p className="text-sm font-medium text-gray-900 dark:text-white">
                           {notification.title}
                         </p>
                         <div 
-                          className="text-sm text-gray-600 mt-1"
+                          className="text-sm text-gray-600 dark:text-gray-400 mt-1"
                           dangerouslySetInnerHTML={{ __html: notification.message }}
                         />
-                        <p className="text-xs text-gray-500 mt-1">
+                        <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
                           {formatDistanceToNow(new Date(notification.created_at), { addSuffix: true })}
                         </p>
                       </div>
@@ -211,7 +211,7 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
           </div>
 
           {notifications && notifications.length > 0 && (
-            <div className="px-4 py-3 border-t border-gray-200 text-center">
+            <div className="px-4 py-3 border-t border-gray-200 dark:border-dark-700 text-center">
               <a
                 href="/notifications"
                 className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium"

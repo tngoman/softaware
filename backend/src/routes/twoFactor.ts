@@ -13,6 +13,7 @@ import { env } from '../config/env.js';
 import { buildFrontendUser } from './auth.js';
 import { sendTwoFactorOtp } from '../services/emailService.js';
 import { sendSms } from '../services/smsService.js';
+import { sendPushToUser } from '../services/firebaseService.js';
 
 export const twoFactorRouter = Router();
 
@@ -76,18 +77,14 @@ function createTOTP(secretBase32: string, userEmail: string): TOTP {
   });
 }
 
-/** Check if user role is staff/admin (cannot disable 2FA) */
+/** Check if user is staff/admin (cannot disable 2FA) */
 async function isStaffOrAdmin(userId: string): Promise<boolean> {
-  const roleRow = await db.queryOne<{ slug: string }>(
-    `SELECT r.slug FROM user_roles ur
-     JOIN roles r ON r.id = ur.role_id
-     WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-     LIMIT 1`,
+  const row = await db.queryOne<{ is_admin: number; is_staff: number }>(
+    'SELECT is_admin, is_staff FROM users WHERE id = ?',
     [userId],
   );
-  if (!roleRow) return false;
-  const staffSlugs = ['admin', 'super_admin', 'developer', 'client_manager', 'qa_specialist', 'deployer'];
-  return staffSlugs.includes(roleRow.slug);
+  if (!row) return false;
+  return !!row.is_admin || !!row.is_staff;
 }
 
 /** Send OTP via the chosen method */
@@ -368,29 +365,49 @@ twoFactorRouter.post('/verify', async (req, res, next) => {
     let isValid = false;
     let usedBackupCode = false;
 
-    if (method === 'totp') {
-      // Try TOTP verification first
-      if (input.code.length === 6 && /^\d+$/.test(input.code)) {
-        const totp = createTOTP(row.secret, user.email);
-        const delta = totp.validate({ token: input.code, window: 1 });
-        isValid = delta !== null;
-      }
-    } else {
-      // Email/SMS OTP verification
-      if (row.otp_code && row.otp_expires_at) {
-        const now = new Date();
-        const expiresAt = new Date(row.otp_expires_at);
-        if (now <= expiresAt) {
-          const codeHash = crypto.createHash('sha256').update(input.code).digest('hex');
-          isValid = codeHash === row.otp_code;
-          if (isValid) {
-            // Clear used OTP
-            await db.execute(
-              `UPDATE user_two_factor SET otp_code = NULL, otp_expires_at = NULL, updated_at = NOW() WHERE user_id = ?`,
-              [userId],
-            );
-          }
+    // Always try TOTP verification (works for any preferred method — allows TOTP as an alternative)
+    if (input.code.length === 6 && /^\d+$/.test(input.code)) {
+      const totp = createTOTP(row.secret, user.email);
+      const delta = totp.validate({ token: input.code, window: 1 });
+      isValid = delta !== null;
+    }
+
+    // Also try email/SMS OTP verification (works for any method — used by alternative OTP flow)
+    if (!isValid && row.otp_code && row.otp_expires_at) {
+      const now = new Date();
+      const expiresAt = new Date(row.otp_expires_at);
+      if (now <= expiresAt) {
+        const codeHash = crypto.createHash('sha256').update(input.code).digest('hex');
+        isValid = codeHash === row.otp_code;
+        if (isValid) {
+          // Clear used OTP
+          await db.execute(
+            `UPDATE user_two_factor SET otp_code = NULL, otp_expires_at = NULL, updated_at = NOW() WHERE user_id = ?`,
+            [userId],
+          );
         }
+      }
+    }
+
+    // Try matching a pending mobile_auth_challenges short_code
+    if (!isValid && input.code.length === 6 && /^\d+$/.test(input.code)) {
+      const challenge = await db.queryOne<{
+        id: string;
+        remember_me: number;
+        expires_at: string;
+      }>(
+        `SELECT id, remember_me, expires_at FROM mobile_auth_challenges
+         WHERE user_id = ? AND short_code = ? AND status = 'pending' AND expires_at > NOW()
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId, input.code],
+      );
+      if (challenge) {
+        isValid = true;
+        // Mark challenge as completed so the web profile QR screen detects it
+        await db.execute(
+          `UPDATE mobile_auth_challenges SET status = 'completed' WHERE id = ?`,
+          [challenge.id],
+        );
       }
     }
 
@@ -495,6 +512,55 @@ twoFactorRouter.post('/send-otp', async (req, res, next) => {
     res.json({
       success: true,
       message: method === 'email'
+        ? `Verification code sent to ${user.email}`
+        : 'Verification code sent to your phone',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/2fa/send-alt-otp ──────────────────────────────────
+// Send an alternative OTP via email (or SMS) during login, even when the
+// user's preferred method is TOTP. This lets users who don't have access
+// to the mobile app fall back to email verification.
+const SendAltOtpSchema = z.object({
+  temp_token: z.string().min(1),
+  method: z.enum(['email', 'sms']).default('email'),
+});
+
+twoFactorRouter.post('/send-alt-otp', async (req, res, next) => {
+  try {
+    const input = SendAltOtpSchema.parse(req.body);
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(input.temp_token, env.JWT_SECRET);
+    } catch {
+      throw badRequest('Invalid or expired temporary token. Please log in again.');
+    }
+
+    if (!decoded?.userId || decoded?.purpose !== '2fa') {
+      throw badRequest('Invalid temporary token.');
+    }
+
+    const userId = String(decoded.userId);
+
+    const row = await db.queryOne<TwoFactorRow>(
+      `SELECT preferred_method FROM user_two_factor WHERE user_id = ? AND is_enabled = 1`,
+      [userId],
+    );
+    if (!row) throw badRequest('Two-factor authentication is not enabled for this account.');
+
+    const user = await db.queryOne<User>('SELECT email, name, phone FROM users WHERE id = ?', [userId]);
+    if (!user) throw badRequest('User not found');
+
+    // Send OTP via the requested alternative method
+    await sendOtpByMethod(userId, input.method, user.email, (user as any).name, (user as any).phone);
+
+    res.json({
+      success: true,
+      message: input.method === 'email'
         ? `Verification code sent to ${user.email}`
         : 'Verification code sent to your phone',
     });
@@ -702,7 +768,8 @@ async function ensureMobileChallengeTable(): Promise<void> {
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
         challenge_secret VARCHAR(64) NOT NULL,
-        status ENUM('pending','completed','expired') DEFAULT 'pending',
+        status ENUM('pending','completed','expired','denied') DEFAULT 'pending',
+        source ENUM('qr','push') DEFAULT 'qr',
         remember_me TINYINT(1) DEFAULT 0,
         expires_at DATETIME NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -712,8 +779,87 @@ async function ensureMobileChallengeTable(): Promise<void> {
   } catch {
     // Table may already exist
   }
+  // Add source and denied status columns if table already existed without them
+  // MySQL 8.0 does not support ADD COLUMN IF NOT EXISTS, so check information_schema first
+  try {
+    const [cols] = await db.execute(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mobile_auth_challenges' AND COLUMN_NAME = 'source'`
+    ) as any;
+    if (!cols || (Array.isArray(cols) && cols.length === 0)) {
+      await db.execute(`ALTER TABLE mobile_auth_challenges ADD COLUMN source ENUM('qr','push') DEFAULT 'qr' AFTER status`);
+    }
+  } catch { /* source column already exists */ }
+  try {
+    await db.execute(`ALTER TABLE mobile_auth_challenges MODIFY COLUMN status ENUM('pending','completed','expired','denied') DEFAULT 'pending'`);
+  } catch { /* already has the enum */ }
+  // Add short_code column for human-friendly manual entry
+  try {
+    const [cols] = await db.execute(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mobile_auth_challenges' AND COLUMN_NAME = 'short_code'`
+    ) as any;
+    if (!cols || (Array.isArray(cols) && cols.length === 0)) {
+      await db.execute(`ALTER TABLE mobile_auth_challenges ADD COLUMN short_code VARCHAR(10) NULL AFTER challenge_secret`);
+    }
+  } catch { /* short_code column already exists */ }
 }
 ensureMobileChallengeTable().catch(() => {});
+
+/** Generate a 6-digit numeric code (e.g. "482916") for mobile app manual entry */
+function generateShortCode(): string {
+  const bytes = crypto.randomBytes(4);
+  const num = bytes.readUInt32BE(0) % 1000000;
+  return num.toString().padStart(6, '0');
+}
+
+/**
+ * Create a push-based auth challenge and send an FCM notification.
+ * Called by the login flow when the user's 2FA method is 'totp' and they have
+ * registered mobile devices. Returns the challenge_id or null if no devices.
+ */
+export async function createPushChallenge(
+  userId: string,
+  rememberMe: boolean,
+  userEmail: string,
+  userName?: string,
+): Promise<string | null> {
+  // Check if the user has any registered FCM devices
+  const devices = await db.query<{ id: number }>(
+    `SELECT id FROM fcm_tokens WHERE user_id = ? LIMIT 1`,
+    [userId],
+  );
+  if (devices.length === 0) return null;
+
+  // Expire any existing pending push challenges for this user
+  await db.execute(
+    `UPDATE mobile_auth_challenges SET status = 'expired' WHERE user_id = ? AND status = 'pending' AND source = 'push'`,
+    [userId],
+  );
+
+  // Create new push challenge
+  const challengeId = crypto.randomUUID();
+  const challengeSecret = crypto.randomBytes(32).toString('hex');
+  const shortCode = generateShortCode();
+
+  await db.execute(
+    `INSERT INTO mobile_auth_challenges (id, user_id, challenge_secret, short_code, status, source, remember_me, expires_at)
+     VALUES (?, ?, ?, ?, 'pending', 'push', ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))`,
+    [challengeId, userId, challengeSecret, shortCode, rememberMe ? 1 : 0],
+  );
+
+  // Send push notification to user's mobile devices
+  const displayName = userName || userEmail;
+  sendPushToUser(userId, {
+    title: 'Login Approval Required',
+    body: `Tap to approve sign-in for ${displayName}`,
+    data: {
+      type: 'login_approval',
+      challenge_id: challengeId,
+      user_email: userEmail,
+    },
+  }).catch(() => { /* push notification failed — non-blocking */ });
+
+  return challengeId;
+}
 
 // ─── POST /auth/2fa/mobile-challenge ──────────────────────────────
 // Mobile app creates a challenge after login returns requires_2fa + method: 'totp'
@@ -758,11 +904,12 @@ twoFactorRouter.post('/mobile-challenge', async (req, res, next) => {
     // Create new challenge
     const challengeId = crypto.randomUUID();
     const challengeSecret = crypto.randomBytes(32).toString('hex');
+    const shortCode = generateShortCode();
 
     await db.execute(
-      `INSERT INTO mobile_auth_challenges (id, user_id, challenge_secret, status, remember_me, expires_at)
-       VALUES (?, ?, ?, 'pending', ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))`,
-      [challengeId, userId, challengeSecret, decoded.rememberMe ? 1 : 0],
+      `INSERT INTO mobile_auth_challenges (id, user_id, challenge_secret, short_code, status, source, remember_me, expires_at)
+       VALUES (?, ?, ?, ?, 'pending', 'qr', ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE))`,
+      [challengeId, userId, challengeSecret, shortCode, decoded.rememberMe ? 1 : 0],
     );
 
     res.json({
@@ -789,9 +936,10 @@ twoFactorRouter.get('/mobile-qr', requireAuth, async (req: AuthRequest, res, nex
     const challenge = await db.queryOne<{
       id: string;
       challenge_secret: string;
+      short_code: string | null;
       expires_at: string;
     }>(
-      `SELECT id, challenge_secret, expires_at 
+      `SELECT id, challenge_secret, short_code, expires_at 
        FROM mobile_auth_challenges 
        WHERE user_id = ? AND status = 'pending' AND expires_at > NOW()
        ORDER BY created_at DESC LIMIT 1`,
@@ -823,6 +971,7 @@ twoFactorRouter.get('/mobile-qr', requireAuth, async (req: AuthRequest, res, nex
       data: {
         has_pending: true,
         challenge_id: challenge.id,
+        challenge_code: challenge.short_code || null,
         qr_code: qrCodeDataUrl,
         expires_at: challenge.expires_at,
       },
@@ -949,6 +1098,219 @@ twoFactorRouter.post('/mobile-verify', async (req, res, next) => {
       token,
       expiresIn: rememberMe ? '30d' : undefined,
       user: frontendUser,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// PUSH-TO-APPROVE 2FA (Mobile App One-Tap Login Approval)
+// ═══════════════════════════════════════════════════════════════════
+//
+// Flow:
+//   1. User logs in on web → backend detects method='totp' with registered
+//      mobile devices → creates a push challenge + sends FCM notification
+//   2. Mobile app receives push with type='login_approval', challenge_id
+//   3. Mobile app shows "Approve Login?" screen → user taps Approve
+//   4. Mobile app calls POST /auth/2fa/push-approve { challenge_id }
+//   5. Web polls POST /auth/2fa/push-status { temp_token, challenge_id }
+//      → returns JWT when challenge is completed
+//
+// This eliminates the need to type a 6-digit code or scan a QR code.
+// The user just taps "Approve" on their phone.
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── POST /auth/2fa/push-approve ──────────────────────────────────
+// Called by the mobile app (authenticated via JWT) to approve a login challenge.
+// The mobile app user must be the same user who created the challenge.
+const PushApproveSchema = z.object({
+  challenge_id: z.string().uuid(),
+  action: z.enum(['approve', 'deny']).default('approve'),
+});
+
+twoFactorRouter.post('/push-approve', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const { userId } = getAuth(req);
+    const input = PushApproveSchema.parse(req.body);
+
+    // Look up the challenge
+    const challenge = await db.queryOne<{
+      id: string;
+      user_id: string;
+      status: string;
+      source: string;
+      expires_at: string;
+    }>(
+      `SELECT id, user_id, status, source, expires_at FROM mobile_auth_challenges WHERE id = ?`,
+      [input.challenge_id],
+    );
+
+    if (!challenge) {
+      throw badRequest('Challenge not found.');
+    }
+
+    // Verify the challenge belongs to this user
+    if (challenge.user_id !== userId) {
+      throw badRequest('This login challenge does not belong to your account.');
+    }
+
+    // Verify it's a push challenge
+    if (challenge.source !== 'push') {
+      throw badRequest('This challenge cannot be approved via push. Use QR scan instead.');
+    }
+
+    // Verify it's still pending
+    if (challenge.status !== 'pending') {
+      throw badRequest(
+        challenge.status === 'completed'
+          ? 'This login has already been approved.'
+          : challenge.status === 'denied'
+          ? 'This login has already been denied.'
+          : 'This challenge has expired. The user must log in again.',
+      );
+    }
+
+    // Check expiry
+    const now = new Date();
+    const expiresAt = new Date(challenge.expires_at);
+    if (now > expiresAt) {
+      await db.execute(
+        `UPDATE mobile_auth_challenges SET status = 'expired' WHERE id = ?`,
+        [challenge.id],
+      );
+      throw badRequest('This challenge has expired. The user must log in again.');
+    }
+
+    // Apply the action
+    const newStatus = input.action === 'approve' ? 'completed' : 'denied';
+    await db.execute(
+      `UPDATE mobile_auth_challenges SET status = ? WHERE id = ?`,
+      [newStatus, challenge.id],
+    );
+
+    res.json({
+      success: true,
+      message: input.action === 'approve'
+        ? 'Login approved. The web session will be authenticated shortly.'
+        : 'Login denied. The web session will not be authenticated.',
+      data: {
+        challenge_id: challenge.id,
+        status: newStatus,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/2fa/push-status ───────────────────────────────────
+// Polled by the web frontend to check if a push challenge has been approved.
+// When approved, issues the full JWT and completes authentication.
+const PushStatusSchema = z.object({
+  temp_token: z.string().min(1),
+  challenge_id: z.string().uuid(),
+});
+
+twoFactorRouter.post('/push-status', async (req, res, next) => {
+  try {
+    const input = PushStatusSchema.parse(req.body);
+
+    // Verify the temporary token
+    let decoded: any;
+    try {
+      decoded = jwt.verify(input.temp_token, env.JWT_SECRET);
+    } catch {
+      throw badRequest('Session expired. Please log in again.');
+    }
+
+    if (!decoded?.userId || decoded?.purpose !== '2fa') {
+      throw badRequest('Invalid session token.');
+    }
+
+    const userId = String(decoded.userId);
+
+    // Look up the challenge
+    const challenge = await db.queryOne<{
+      id: string;
+      user_id: string;
+      status: string;
+      source: string;
+      remember_me: number;
+      expires_at: string;
+    }>(
+      `SELECT id, user_id, status, source, remember_me, expires_at FROM mobile_auth_challenges WHERE id = ? AND user_id = ?`,
+      [input.challenge_id, userId],
+    );
+
+    if (!challenge) {
+      return res.json({
+        success: true,
+        data: { status: 'not_found' },
+      });
+    }
+
+    // Check if expired (update DB if needed)
+    const now = new Date();
+    const expiresAt = new Date(challenge.expires_at);
+    if (challenge.status === 'pending' && now > expiresAt) {
+      await db.execute(
+        `UPDATE mobile_auth_challenges SET status = 'expired' WHERE id = ?`,
+        [challenge.id],
+      );
+      return res.json({
+        success: true,
+        data: { status: 'expired' },
+      });
+    }
+
+    // If denied
+    if (challenge.status === 'denied') {
+      return res.json({
+        success: true,
+        data: { status: 'denied' },
+      });
+    }
+
+    // If still pending
+    if (challenge.status === 'pending') {
+      return res.json({
+        success: true,
+        data: { status: 'pending' },
+      });
+    }
+
+    // ✅ Challenge completed — issue the real JWT
+    if (challenge.status === 'completed') {
+      const rememberMe = Boolean(challenge.remember_me || decoded.rememberMe);
+      const tokenExpiry = rememberMe ? '30d' : undefined;
+      const token = signAccessToken({ userId }, tokenExpiry);
+
+      // Set HTTP-only cookie
+      const cookieMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+      setAuthCookie(req, res, token, cookieMaxAge);
+
+      const frontendUser = await buildFrontendUser(userId);
+
+      return res.json({
+        success: true,
+        message: 'Login approved via mobile app.',
+        data: {
+          status: 'completed',
+          token,
+          user: frontendUser,
+        },
+        accessToken: token,
+        token,
+        expiresIn: rememberMe ? '30d' : undefined,
+        user: frontendUser,
+      });
+    }
+
+    // Fallback
+    res.json({
+      success: true,
+      data: { status: challenge.status },
     });
   } catch (err) {
     next(err);

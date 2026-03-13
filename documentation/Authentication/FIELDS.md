@@ -1,7 +1,7 @@
 # Authentication Module - Database Schema
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-06
+**Version:** 1.9.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -10,8 +10,10 @@
 | Metric | Value |
 |--------|-------|
 | **Core tables** | 2 (users, user_two_factor) |
-| **Supporting tables** | 4 (user_roles, roles, role_permissions, permissions) |
+| **Supporting tables** | 5 (user_roles, roles, role_permissions, permissions, user_pins) |
 | **Email tables** | 2 (credentials — SMTP config, email_log — send history) |
+| **Mobile auth tables** | 1 (mobile_auth_challenges — push-to-approve + QR auth challenges) |
+| **PIN login table** | 1 (user_pins — bcrypt-hashed PINs + rate limiting, v1.9.0) |
 | **Legacy tables** | 2 (teams, team_members — write-only during registration for credit scoping) |
 | **Password reset table** | 1 (sys_password_resets) |
 
@@ -31,6 +33,9 @@
 | phone | VARCHAR(50) | | Phone number |
 | avatarUrl | VARCHAR(500) | | Profile image URL |
 | passwordHash | VARCHAR(255) | NOT NULL | bcrypt hash (12 rounds) |
+| isActive | TINYINT(1) | NOT NULL, DEFAULT 1 | Whether account is active |
+| is_admin | TINYINT(1) | NOT NULL, DEFAULT 0 | **Direct admin flag.** `1` = administrator. Checked by `requireAdmin` middleware and all admin-gated operations. Source of truth for admin status (v1.6.0+). |
+| is_staff | TINYINT(1) | NOT NULL, DEFAULT 0 | **Direct staff flag.** `1` = staff member (developer, client manager, QA, deployer). Checked by `requireDeveloper` middleware. Source of truth for staff status (v1.6.0+). |
 | account_status | ENUM('active','suspended','demo_expired') | DEFAULT 'active' | Global account status |
 | createdAt | DATETIME | NOT NULL | Registration timestamp |
 | updatedAt | DATETIME | NOT NULL | Last modification |
@@ -47,7 +52,9 @@
 **Business Rules:**
 - Email must be unique (enforced at DB + app level)
 - Password hashed with bcrypt, 12 salt rounds
-- On registration, user is assigned `viewer` role via `user_roles` (legacy team/team_members records also created for credit balance scoping)
+- `is_admin` and `is_staff` are the **authoritative source** for admin/staff detection (v1.6.0+). All middleware (`requireAdmin`, `requireDeveloper`) and backend routes read these columns directly.
+- On registration, user is assigned `viewer` role via `user_roles` (legacy team/team_members records also created for credit balance scoping). `is_admin` and `is_staff` default to `0`.
+- On user create/update via admin UI, `is_admin` and `is_staff` are written directly to the users table. `user_roles` is synced for legacy compatibility.
 - account_status checked by statusCheck middleware on every authenticated request
 
 **Example Data:**
@@ -111,6 +118,45 @@ FROM user_two_factor;
 
 ---
 
+### 2.2b `user_pins` — PIN Quick Login (v1.9.0)
+
+**Purpose:** Stores bcrypt-hashed 4-digit PINs for quick re-authentication and rate-limiting state. One PIN per user.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| id | INT | PK, AUTO_INCREMENT | Row ID |
+| user_id | VARCHAR(36) | FK → users.id, UNIQUE, NOT NULL | One PIN per user. Uses `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` to match `users.id` collation. |
+| pin_hash | VARCHAR(255) | NOT NULL | bcrypt hash (10 rounds) of the 4-digit PIN |
+| failed_attempts | INT | DEFAULT 0 | Consecutive failed PIN login attempts. Resets to 0 on successful login or PIN update. |
+| locked_until | DATETIME | NULL | Lockout expiry timestamp. Set to `DATE_ADD(NOW(), INTERVAL 15 MINUTE)` when `failed_attempts` reaches 5. NULL when not locked. |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | Record creation |
+| updated_at | DATETIME | DEFAULT CURRENT_TIMESTAMP ON UPDATE | Last modification |
+
+**Indexes:** PRIMARY (id), UNIQUE (user_id)
+
+**Relationships:**
+- `user_pins.user_id → users.id` — ON DELETE CASCADE
+
+**Business Rules:**
+- PIN is hashed with bcrypt (10 salt rounds) — lower than password (12) because PINs are only 4 digits and rate-limited
+- 5 consecutive failed PIN attempts trigger a 15-minute lockout
+- Successful PIN login resets `failed_attempts` to 0 and `locked_until` to NULL
+- Setting a new PIN (UPSERT) also resets the rate-limit counter
+- `GET /auth/pin/check/:email` does NOT reveal whether an email exists (returns `has_pin: false` for unknown emails)
+- Table auto-created by `ensurePinTable()` on backend startup
+- Uses explicit `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` on `user_id` and table to match `users.id` collation (fixes MySQL 8.0 FK compatibility)
+
+**Example Data:**
+
+```sql
+SELECT user_id, failed_attempts, locked_until, created_at FROM user_pins;
+-- 'a1b2c3d4-...', 0, NULL, '2026-03-13 10:00:00'
+-- 'e5f6g7h8-...', 3, NULL, '2026-03-13 11:30:00'
+-- 'i9j0k1l2-...', 5, '2026-03-13 12:15:00', '2026-03-13 12:00:00'
+```
+
+---
+
 ### 2.3 `user_roles` — User-to-Role Assignment
 
 **Purpose:** Maps users to their assigned roles (RBAC).
@@ -123,8 +169,9 @@ FROM user_two_factor;
 
 **Business Rules:**
 - Users without a `user_roles` entry get fallback role `{ id: 0, name: 'Client', slug: 'client' }`
-- `is_admin` = role slug in (`admin`, `super_admin`) → wildcard `*` permission
-- `is_staff` = role slug in (`developer`, `client_manager`, `qa_specialist`, `deployer`) → wildcard `*` permission
+- ⚠️ **v1.6.0:** `is_admin` and `is_staff` are **no longer derived from role slugs**. They are read directly from the `users.is_admin` and `users.is_staff` columns. The `user_roles` table is now supplementary — used only for role display name and granular permission resolution.
+- Legacy rule (pre-v1.6.0): `is_admin` = role slug in (`admin`, `super_admin`); `is_staff` = role slug in (`developer`, `client_manager`, `qa_specialist`, `deployer`)
+- `user_roles` entries are still synced during user create/update for backward compatibility
 - Collation `utf8mb4_unicode_ci` used in queries for UUID matching
 
 **Example Query (from buildFrontendUser):**
@@ -265,15 +312,76 @@ WHERE rp.role_id = ?
 
 ---
 
+### 2.10 `mobile_auth_challenges` — Push-to-Approve & QR Auth Challenges (v1.7.0)
+
+**Purpose:** Stores temporary authentication challenges for mobile-initiated login flows. Supports both QR-scan authentication and push-to-approve 2FA. Created/managed by `twoFactor.ts`.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| id | VARCHAR(64) | PK | Challenge ID (crypto.randomBytes hex) |
+| user_id | VARCHAR(36) | FK → users.id, NOT NULL | User who must approve the challenge |
+| token | TEXT | NULL | Signed JWT or session data (used by QR flow) |
+| status | ENUM('pending','completed','expired','denied') | DEFAULT 'pending' | Challenge state. `denied` added in v1.7.0 for push-to-approve rejection. |
+| remember_me | TINYINT(1) | DEFAULT 0 | Whether the resulting JWT should use extended expiry (30 days) |
+| source | ENUM('qr','push') | DEFAULT 'qr' | (v1.7.0) Distinguishes QR-scan challenges from push-to-approve challenges |
+| short_code | VARCHAR(10) | NULL | (v1.8.0) 6-digit numeric code for manual entry (e.g., `482916`). Generated by `generateShortCode()` using `crypto.randomBytes()`. Displayed below QR code when scanning fails. Compatible with mobile app's 6-digit input field. |
+| created_at | DATETIME | DEFAULT CURRENT_TIMESTAMP | Creation timestamp; challenges expire 5 minutes after creation |
+
+**Indexes:** PRIMARY (id), INDEX (user_id)
+
+**Business Rules:**
+- Challenges expire after **5 minutes** from `created_at`
+- **QR challenges** (`source = 'qr'`): Created when user scans a QR code on the web login page from the mobile app. The mobile app then calls a separate endpoint to complete the QR auth flow.
+- **Push challenges** (`source = 'push'`): Created by `createPushChallenge()` during login when the user's 2FA method is TOTP and they have registered FCM devices. An FCM notification is sent to all devices.
+- Only `source = 'push'` challenges can be approved/denied via `POST /auth/2fa/push-approve`
+- Only the **owning user** can approve/deny (JWT userId must match `user_id`)
+- Status transitions:
+  - `pending` → `completed` (approved by user)
+  - `pending` → `denied` (denied by user)
+  - `pending` → `expired` (5-minute timeout; handled by checking `created_at`)
+- `token` column stores the pre-signed JWT for QR flow; not used for push challenges
+- The `remember_me` flag is carried through to the JWT issued when the challenge is completed
+- Table auto-created by `ensureMobileChallengeTable()` on backend startup
+- Auto-migration: if table exists without `source` column, `ALTER TABLE` adds it; if `status` ENUM doesn't include `denied`, it's extended; if `short_code` column is missing, `ALTER TABLE ADD COLUMN short_code VARCHAR(10) NULL` is run (v1.8.0)
+- `short_code` is generated by `generateShortCode()` on challenge creation (both push and QR sources). Uses 6-digit numeric format (e.g., `482916`) compatible with the mobile app's numeric entry field
+
+**Example Data:**
+
+```sql
+SELECT id, user_id, status, source, short_code, remember_me, created_at FROM mobile_auth_challenges;
+-- 'a1b2c3d4...', 'user-uuid-1', 'completed', 'push', '482916', 0, '2026-03-12 10:30:00'
+-- 'e5f6g7h8...', 'user-uuid-2', 'pending',   'qr',   '739205', 1, '2026-03-12 10:31:00'
+-- 'i9j0k1l2...', 'user-uuid-1', 'denied',    'push', '158463', 0, '2026-03-12 10:28:00'
+```
+
+**Creation SQL:**
+
+```sql
+CREATE TABLE IF NOT EXISTS mobile_auth_challenges (
+  id VARCHAR(64) PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  token TEXT,
+  status ENUM('pending','completed','expired','denied') DEFAULT 'pending',
+  remember_me TINYINT(1) DEFAULT 0,
+  source ENUM('qr','push') DEFAULT 'qr',
+  short_code VARCHAR(10) NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user_id (user_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+```
+
+---
+
 ## 3. Table Relationships
 
 ```
 users ──────────┬──── user_two_factor     (1:1 — multi-method 2FA config)
-                │
-                ├──── user_roles ──────── roles ──── role_permissions ──── permissions
+                │                ├──── mobile_auth_challenges (1:N — push/QR auth challenges, v1.7.0; short_code for manual entry, v1.8.0)
+                │                ├──── user_roles ──────── roles ──── role_permissions ──── permissions
                 │     (1:1)               (1:N)      (N:M)
-                │
-                ├──── team_members ─────── teams       ⚠️ LEGACY (credit scoping only)
+                │                ├──── user_pins               (1:1 — PIN quick login, v1.9.0)
+                │                ├──── team_members ─────── teams       ⚠️ LEGACY (credit scoping only)
                 │     (N:M)                (1:N)
                 │
                 └──── sys_password_resets  (1:N — reset tokens)
@@ -294,6 +402,9 @@ CREATE TABLE IF NOT EXISTS users (
   phone VARCHAR(50),
   avatarUrl VARCHAR(500),
   passwordHash VARCHAR(255) NOT NULL,
+  isActive TINYINT(1) NOT NULL DEFAULT 1,
+  is_admin TINYINT(1) NOT NULL DEFAULT 0,
+  is_staff TINYINT(1) NOT NULL DEFAULT 0,
   account_status ENUM('active','suspended','demo_expired') DEFAULT 'active',
   createdAt DATETIME NOT NULL,
   updatedAt DATETIME NOT NULL
@@ -369,6 +480,19 @@ CREATE TABLE IF NOT EXISTS email_log (
   error TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- PIN Quick Login (v1.9.0)
+-- Uses explicit utf8mb4_unicode_ci to match users.id collation (MySQL 8.0 FK compatibility)
+CREATE TABLE IF NOT EXISTS user_pins (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL UNIQUE,
+  pin_hash VARCHAR(255) NOT NULL,
+  failed_attempts INT DEFAULT 0,
+  locked_until DATETIME NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
 ---
@@ -408,3 +532,4 @@ The masquerade feature stores additional keys in `localStorage` alongside the st
 | 2 | 🟡 | user_roles | Collation mismatch requires `COLLATE utf8mb4_unicode_ci` in queries | Performance impact on JOINs; should normalize collations |
 | 3 | ✅ | users | `passwordHash` uses bcrypt 12 rounds | Correct and secure |
 | 4 | ✅ | user_two_factor | Backup codes stored as SHA-256 hashes | Correct — cannot reverse to plaintext |
+| 5 | ✅ | user_pins | PIN hashed with bcrypt 10 rounds + rate limiting | Correct — lower rounds than password offset by 5-attempt lockout |

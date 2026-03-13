@@ -29,10 +29,10 @@ interface ComponentAnalysis {
 // Frontend component mapping based on routes
 const COMPONENT_MAP: Record<string, string[]> = {
   '/dashboard': ['Dashboard.tsx', 'DashboardStats.tsx', 'RecentActivity.tsx'],
-  '/admin': ['AdminDashboard.tsx', 'AIOverview.tsx', 'ClientManager.tsx', 'AICredits.tsx', 'EnterpriseEndpoints.tsx'],
+  '/admin': ['AdminDashboard.tsx', 'AIOverview.tsx', 'ClientManager.tsx', 'AIPackages.tsx', 'EnterpriseEndpoints.tsx'],
   '/admin/ai-overview': ['AIOverview.tsx', 'StatCard.tsx', 'StatusBadge.tsx'],
   '/admin/client-manager': ['ClientManager.tsx', 'StatusBadge.tsx'],
-  '/admin/ai-credits': ['AICredits.tsx', 'Card.tsx'],
+  '/admin/packages': ['AIPackages.tsx', 'Card.tsx'],
   '/admin/enterprise-endpoints': ['EnterpriseEndpoints.tsx', 'StatusBadge.tsx'],
   '/assistants': ['Dashboard.tsx', 'KnowledgeHealthBadge.tsx'],
   '/contacts': ['Contacts.tsx', 'ContactDetails.tsx'],

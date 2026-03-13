@@ -384,4 +384,78 @@ export interface Task {
   association_notes?: string | null;
   backgroundColor?: string;
   date?: string;
+  // Local enhancement fields
+  priority?: 'urgent' | 'high' | 'normal' | 'low';
+  is_bookmarked?: number;
+  color_label?: string | null;
+  local_tags?: string[] | null;
+  kanban_order?: number;
+  view_count?: number;
+  last_viewed_at?: string | null;
+  // Local tracking (set by useTasks hook)
+  _local_id?: number;
+  _source_id?: number;
+  _source_name?: string;
+  _local_dirty?: number;
+  _last_synced_at?: string;
+}
+
+/* ── Bug (bug tracking system) ────────────────────────────── */
+export interface Bug {
+  id: number;
+  title: string;
+  description?: string | null;
+  current_behaviour?: string | null;
+  expected_behaviour?: string | null;
+  reporter_name: string;
+  software_id?: number | null;
+  software_name?: string | null;
+  status: 'open' | 'in-progress' | 'pending-qa' | 'resolved' | 'closed' | 'reopened';
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  workflow_phase: 'intake' | 'qa' | 'development';
+  assigned_to?: number | null;
+  assigned_to_name?: string | null;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  linked_task_id?: number | null;
+  converted_from_task?: number;
+  converted_to_task?: number | null;
+  resolution_notes?: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  // Computed fields from list query
+  comment_count?: number;
+  attachment_count?: number;
+  last_comment?: string | null;
+  // Populated on detail query
+  comments?: BugComment[];
+  attachments?: BugAttachment[];
+  linked_task?: { id: number; title: string; status: string; workflow_phase?: string; external_id?: string } | null;
+}
+
+export interface BugComment {
+  id: number;
+  bug_id: number;
+  author_name: string;
+  author_id?: string | null;
+  content: string;
+  is_internal: number;
+  comment_type: 'comment' | 'workflow_change' | 'status_change' | 'resolution';
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface BugAttachment {
+  id: number;
+  bug_id: number;
+  filename: string;
+  original_name: string;
+  mime_type?: string | null;
+  file_size?: number | null;
+  file_path: string;
+  uploaded_by?: string | null;
+  uploaded_by_id?: string | null;
+  created_at: string;
 }

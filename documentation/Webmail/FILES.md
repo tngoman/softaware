@@ -2,29 +2,29 @@
 
 ## Backend Files
 
-### `/var/opt/backend/src/services/webmailService.ts` (812 LOC)
-**Purpose**: Core IMAP/SMTP operations, account CRUD, credential encryption, domain settings
+### `/var/opt/backend/src/services/webmailService.ts` (942 LOC)
+**Purpose**: Core IMAP/SMTP operations, account CRUD, credential encryption, domain settings, signature storage
 **Used by**: `webmail.ts` route handlers
 
 | Section | Lines | Description |
 |---------|-------|-------------|
-| Imports & setup | 1–18 | imapflow, nodemailer, mailparser, db, cryptoUtils |
-| `MailboxAccount` interface | 21–43 | Full account type with decrypted passwords |
+| Imports & setup | 1–18 | imapflow, nodemailer/MailComposer, mailparser, db, cryptoUtils |
+| `MailboxAccount` interface | 21–43 | Full account type with decrypted passwords + signature |
 | `MailFolder` interface | 45–53 | IMAP folder with message counts |
 | `MailMessageHeader` interface | 55–66 | Envelope-level message data |
 | `MailMessage` interface | 68–76 | Full parsed message with HTML/text/attachments |
 | `MailAttachment` interface | 78–84 | Attachment metadata (filename, type, size, partId) |
 | `SendMailInput` interface | 82–93 | Send parameters including optional file attachments |
-| `ensureWebmailTable()` | 96–126 | CREATE TABLE IF NOT EXISTS with indexes |
-| `WebmailDomainSettings` interface | 130–137 | Domain IMAP/SMTP config shape |
-| `getWebmailSettings()` | 143–162 | Read `webmail_*` keys from `app_settings` |
-| `saveWebmailSettings()` | 164–182 | UPSERT `webmail_*` keys into `app_settings` |
-| `listMailboxes()` | 187–197 | SELECT accounts for user (excludes passwords) |
-| `getMailbox()` | 200–214 | SELECT single account + decrypt passwords |
-| `createMailbox()` | 216–260 | Pull domain config, encrypt password, INSERT |
-| `updateMailbox()` | 262–310 | Partial update with password re-encryption |
-| `deleteMailbox()` | 312–318 | DELETE by id + userId |
-| `setDefaultMailbox()` | 320–324 | Clear others, set new default |
+| `ensureWebmailTable()` | 98–136 | CREATE TABLE IF NOT EXISTS with signature column (TEXT NULL) + migration ALTER |
+| `WebmailDomainSettings` interface | 140–147 | Domain IMAP/SMTP config shape |
+| `getWebmailSettings()` | 153–172 | Read `webmail_*` keys from `app_settings` |
+| `saveWebmailSettings()` | 174–192 | UPSERT `webmail_*` keys into `app_settings` |
+| `listMailboxes()` | 197–208 | SELECT accounts for user (includes signature, excludes passwords) |
+| `getMailbox()` | 210–230 | SELECT single account + decrypt passwords |
+| `createMailbox()` | 232–270 | Pull domain config, encrypt password, INSERT with signature, uses `db.insert()` |
+| `updateMailbox()` | 272–320 | Partial update with password re-encryption, signature field support |
+| `deleteMailbox()` | 322–328 | DELETE by id + userId |
+| `setDefaultMailbox()` | 330–334 | Clear others, set new default |
 | `createImapClient()` | 328–338 | Factory for ImapFlow instances |
 | `testConnection()` | 342–393 | Test IMAP + SMTP independently, update DB status |
 | `listFolders()` | 397–449 | IMAP listTree → recursive walk with status counts |
@@ -35,10 +35,11 @@
 | `moveMessage()` | 660–678 | IMAP messageMove |
 | `flagMessage()` | 682–725 | Add/remove \Seen, \Flagged, \Answered flags |
 | `sendMail()` | 729–812 | SMTP send → MailComposer RFC822 build → IMAP append to Sent folder |
+| `getUnreadCount()` | 814–852 | Sum INBOX unseen count across all active user mailboxes (parallel IMAP STATUS) |
 
 ---
 
-### `/var/opt/backend/src/routes/webmail.ts` (413 LOC)
+### `/var/opt/backend/src/routes/webmail.ts` (437 LOC)
 **Purpose**: Express route handlers for all webmail API endpoints
 **Mount**: `/webmail` via `webmailRouter`
 
@@ -46,13 +47,14 @@
 |---------|-------|-------------|
 | Imports & setup | 1–50 | Express, Zod, auth, httpErrors, service imports |
 | Auth middleware | 52 | `requireAuth` applied to all routes |
-| Table initialization | 54–60 | Lazy `ensureWebmailTable()` on first request |
-| `GET /accounts` | 69–76 | List user's mailboxes |
-| `POST /accounts` | 78–98 | Add mailbox (CreateAccountSchema) |
-| `PUT /accounts/:id` | 100–120 | Update mailbox (UpdateAccountSchema) |
-| `DELETE /accounts/:id` | 122–134 | Remove mailbox |
-| `POST /accounts/:id/test` | 136–150 | Test IMAP/SMTP connection |
-| `POST /accounts/:id/default` | 152–163 | Set default account |
+| Table initialization | 54–67 | Lazy `ensureWebmailTable()` on first request (wrapped in try/catch) |
+| `GET /accounts` | 75–82 | List user's mailboxes |
+| `coerceBool` helper | 84–88 | Zod preprocessor: MySQL TINYINT (0/1) → boolean coercion |
+| `POST /accounts` | 91–114 | Add mailbox (CreateAccountSchema with signature, coerceBool) |
+| `PUT /accounts/:id` | 116–138 | Update mailbox (UpdateAccountSchema with coerceBool) |
+| `DELETE /accounts/:id` | 140–152 | Remove mailbox |
+| `POST /accounts/:id/test` | 154–168 | Test IMAP/SMTP connection |
+| `POST /accounts/:id/default` | 170–181 | Set default account |
 | `resolveAccount()` helper | 170–179 | Extract & validate account from query param |
 | `GET /folders` | 181–189 | List IMAP folders |
 | `GET /messages` | 200–214 | List messages (paginated) |
@@ -62,6 +64,7 @@
 | `POST /messages/flag` | 267–292 | Flag message (FlagSchema) |
 | `POST /send` | 298–340 | Send email (multer multipart, max 20 attachments) |
 | `GET /attachment` | 342–362 | Download attachment |
+| `GET /unread-count` | 364–374 | Unread INBOX count across all user accounts |
 | `GET /settings` | 368–375 | Get domain server config (requireAdmin) |
 | `PUT /settings` | 377–413 | Update domain server config (requireAdmin, WebmailSettingsSchema) |
 
@@ -93,25 +96,30 @@
 
 ---
 
-### `/var/opt/frontend/src/pages/admin/Webmail.tsx` (968 LOC)
+### `/var/opt/frontend/src/pages/admin/Webmail.tsx` (1047 LOC)
 **Purpose**: Full email client page — folder tree, message list, reading pane, compose modal
 
 | Section | Lines | Description |
 |---------|-------|-------------|
 | Imports | 1–42 | React, Heroicons, Swal, models, config |
 | Helper functions | 44–88 | `getFolderIcon()`, `formatDate()`, `formatFullDate()`, `formatSize()` |
-| `ComposeModal` component | 97–438 | Compose/reply/forward with rich text editor, attachments |
-| Main `Webmail` component | 445–968 | 3-column layout with all state and handlers |
+| `ComposeModal` component | 97–470 | Compose/reply/forward with rich text editor, attachments, signature |
+| Main `Webmail` component | 478–1047 | 3-column layout with all state and handlers |
 
 **ComposeModal features**:
 - Account selector (if multiple mailboxes)
+- `getSignatureHtml(acctId)` — wraps account signature in styled `<div class="email-signature">`
+- `buildInitialBody()` — initializes compose body with signature for new/reply/forward
+- Automatic signature append on compose, reply, forward
+- Account switcher swaps old signature div for new account’s signature
 - To / Cc / Bcc fields (Cc/Bcc toggled)
 - Rich text editor (contentEditable with toolbar: bold, italic, underline, lists, links)
 - File attachment via toolbar button + hidden `<input type="file" multiple>`
 - Drag-and-drop file attachment on entire modal
 - Attachment list with filename, size, remove button
 - Total size display + 25 MB limit warning
-- Reply/Reply-All/Forward auto-population
+- Reply/Reply-All/Forward auto-population with original body and attachments
+- Forward fetches original attachments via `/webmail/attachment` and includes them
 
 **Main Webmail features**:
 - Activity indicator bar (animated) during loading states
@@ -127,18 +135,21 @@
 
 ---
 
-### `/var/opt/frontend/src/pages/general/Profile.tsx` (1188 LOC, partial)
+### `/var/opt/frontend/src/pages/general/Profile.tsx` (2303 LOC, partial)
 **Purpose**: User profile with MailboxesTab for managing email accounts
-**Relevant section**: MailboxesTab — add/edit/delete mailboxes, test connection
+**Relevant section**: MailboxesTab — add/edit/delete mailboxes, test connection, signature editor
 
 | Feature | Description |
 |---------|-------------|
-| Add mailbox form | display_name, email_address, password, is_default toggle |
-| Mailbox list | Card per account showing email, status badge, last connected |
+| Add mailbox form | display_name, email_address, password, signature, is_default toggle |
+| Mailbox list | Card per account showing email, status badge, last connected, signature indicator |
 | Test button | Tests IMAP + SMTP, shows result toast, refreshes list |
-| Edit inline | Expand card to edit display name, email, password, is_default |
+| Edit inline | Expand card to edit display name, email, password, signature, is_default |
 | Delete | SweetAlert confirmation → delete account |
 | Set default | Toggle default account |
+| Signature editor | Dual-mode: ReactQuill WYSIWYG ("Visual") or raw HTML textarea with live preview ("HTML Source") |
+| Insert Template | Inserts corporate HTML table template pre-filled with user’s first_name, last_name, phone (from Zustand store), and mailbox email |
+| Zustand integration | `useAppStore()` for user profile data (name, email, phone) in signature template |
 
 ---
 
@@ -159,7 +170,7 @@
 ---
 
 ### `/var/opt/frontend/src/components/Layout/Layout.tsx` (partial)
-**Relevant**: Sidebar navigation — Webmail menu item in **Main** section (moved from Admin)
+**Relevant**: Sidebar navigation — Webmail menu item in **Main** section with dynamic unread count badge. Polls `GET /webmail/unread-count` every 2 minutes. Badge rendered as a red pill (white on active) next to the menu item name. Uses `badgeKey` field on `NavItem` interface for extensible badge support.
 
 ### `/var/opt/frontend/src/App.tsx` (partial)
 **Relevant**: Route `/admin/webmail` → `Webmail` component

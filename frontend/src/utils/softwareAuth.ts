@@ -1,6 +1,12 @@
 /**
  * Per-software authentication token management.
  *
+ * ⚠️  DEPRECATED (v2.1.0) — The backend no longer requires per-user
+ *    software tokens for task operations.  Task API calls now use
+ *    source-level API keys resolved server-side from `task_sources`.
+ *    This module is retained only for the legacy SoftwareManagement
+ *    auth flow and will be removed in a future release.
+ *
  * Tokens are stored in localStorage keyed by software ID so that
  * switching between software products uses the correct auth token.
  *

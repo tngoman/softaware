@@ -6,12 +6,112 @@ All routes are mounted under `/api/database` via:
 ```typescript
 apiRouter.use('/database', databaseManagerRouter);
 ```
-**Auth**: ⚠️ None — no `requireAuth` or permission middleware is applied.
+
+**Auth**: ✅ All routes protected by `requireAuth` + `requireDeveloper` middleware chain.
+```typescript
+// In databaseManager.ts:
+router.use(requireAuth, requireDeveloper);
+```
+
+**Allowed Roles**: `developer`, `admin`, `super_admin` (checked via `user_roles` JOIN `roles` table).
 
 ---
 
+## Connection Management Endpoints
+
+### `GET /api/database/connections`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: List all saved database connections (shared across all users).
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| — | — | — | No parameters |
+
+**Response** `200`:
+```json
+{
+  "success": true,
+  "connections": [
+    {
+      "id": "a1b2c3d4-...",
+      "name": "Production MySQL",
+      "host": "10.0.6.12",
+      "port": 3306,
+      "user": "app_user",
+      "password": "***",
+      "database": "myapp",
+      "type": "mysql",
+      "tunnel": {
+        "sshHost": "40.123.240.58",
+        "sshPort": 2288,
+        "sshUser": "SoftAware",
+        "sshPassword": null,
+        "sshKeyFile": "softaware_id_ed25519"
+      },
+      "createdBy": "user-uuid",
+      "createdAt": "2025-03-01T...",
+      "updatedAt": "2025-03-01T..."
+    }
+  ]
+}
+```
+
+**Flow**:
+1. Query `SELECT * FROM db_connections ORDER BY name ASC`
+2. Map flat DB rows to nested `Connection` shape (converts `ssh_host` → `tunnel.sshHost`, etc.)
+3. Return array
+
+---
+
+### `POST /api/database/connections`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Create or update a connection (upsert).
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `id` | Body | No | Connection UUID (if updating; auto-generated via `crypto.randomUUID()` if creating) |
+| `name` | Body | Yes | Connection display name |
+| `host` | Body | Yes | Database host |
+| `port` | Body | No | Database port (default 3306) |
+| `user` | Body | No | Database username |
+| `password` | Body | No | Database password |
+| `database` | Body | No | Default database name |
+| `type` | Body | Yes | `'mysql'` or `'mssql'` |
+| `tunnel` | Body | No | SSH tunnel config object |
+
+**Response** `200`:
+```json
+{ "success": true, "id": "a1b2c3d4-..." }
+```
+
+**Flow**:
+1. Validate `name`, `host`, and `type` required
+2. Extract `userId` from JWT (via `AuthRequest`)
+3. Generate UUID if no `id` provided
+4. `INSERT INTO db_connections ... ON DUPLICATE KEY UPDATE`
+5. Return connection ID
+
+---
+
+### `DELETE /api/database/connections/:id`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Delete a saved connection.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `id` | URL | Yes | Connection UUID |
+
+**Response** `200`:
+```json
+{ "success": true }
+```
+
+---
+
+## SSH Key Endpoint
+
 ### `GET /api/database/keys`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: List available SSH private key files for tunnel configuration.
 
 | Param | Location | Required | Description |
@@ -21,6 +121,7 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200`:
 ```json
 {
+  "success": true,
   "keys": [
     { "name": "softaware_id_ed25519", "hasPublicKey": true, "size": 399 }
   ]
@@ -33,12 +134,12 @@ apiRouter.use('/database', databaseManagerRouter);
 3. For each remaining file, check if `{name}.pub` exists
 4. Return file info array
 
-**Error behavior**: Returns `{ error: message }` with status 500.
-
 ---
 
+## Connection & Schema Endpoints
+
 ### `POST /api/database/connect`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Test database connection (optionally through SSH tunnel).
 
 | Param | Location | Required | Description |
@@ -52,12 +153,12 @@ apiRouter.use('/database', databaseManagerRouter);
 
 **Response** `200`:
 ```json
-{ "success": true }
+{ "success": true, "message": "Connected successfully" }
 ```
 
-**Error Response** `500`:
+**Error Response** `400`:
 ```json
-{ "error": "Connection refused" }
+{ "success": false, "error": "Connection refused" }
 ```
 
 **Flow**:
@@ -68,7 +169,7 @@ apiRouter.use('/database', databaseManagerRouter);
 ---
 
 ### `POST /api/database/databases`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: List all databases on the connected server.
 
 | Param | Location | Required | Description |
@@ -79,6 +180,7 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200`:
 ```json
 {
+  "success": true,
   "databases": ["information_schema", "mysql", "myapp_production", "test"]
 }
 ```
@@ -89,7 +191,7 @@ apiRouter.use('/database', databaseManagerRouter);
 ---
 
 ### `POST /api/database/tables`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: List tables and views in a specific database.
 
 | Param | Location | Required | Description |
@@ -101,9 +203,9 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200`:
 ```json
 {
+  "success": true,
   "tables": [
     { "name": "users", "type": "BASE TABLE", "rows": 1250, "engine": "InnoDB" },
-    { "name": "user_sessions", "type": "BASE TABLE", "rows": 8430, "engine": "InnoDB" },
     { "name": "active_users_view", "type": "VIEW", "rows": null, "engine": null }
   ]
 }
@@ -114,7 +216,7 @@ apiRouter.use('/database', databaseManagerRouter);
 ---
 
 ### `POST /api/database/describe`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Get column definitions for a table.
 
 | Param | Location | Required | Description |
@@ -127,10 +229,10 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL):
 ```json
 {
+  "success": true,
   "columns": [
     { "Field": "id", "Type": "int(11)", "Null": "NO", "Key": "PRI", "Default": null, "Extra": "auto_increment" },
-    { "Field": "email", "Type": "varchar(255)", "Null": "NO", "Key": "UNI", "Default": null, "Extra": "" },
-    { "Field": "created_at", "Type": "timestamp", "Null": "YES", "Key": "", "Default": "CURRENT_TIMESTAMP", "Extra": "" }
+    { "Field": "email", "Type": "varchar(255)", "Null": "NO", "Key": "UNI", "Default": null, "Extra": "" }
   ]
 }
 ```
@@ -138,19 +240,20 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MSSQL):
 ```json
 {
+  "success": true,
   "columns": [
-    { "COLUMN_NAME": "id", "DATA_TYPE": "int", "CHARACTER_MAXIMUM_LENGTH": null, "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "Key": "PRI" },
-    { "COLUMN_NAME": "email", "DATA_TYPE": "nvarchar", "CHARACTER_MAXIMUM_LENGTH": 255, "IS_NULLABLE": "NO", "COLUMN_DEFAULT": null, "Key": "" }
+    { "Field": "id", "Type": "int", "Null": "NO", "Key": "PRI", "Default": null },
+    { "Field": "email", "Type": "nvarchar(255)", "Null": "NO", "Key": "", "Default": null }
   ]
 }
 ```
 
-**MSSQL PK Detection**: Joins `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` (constraint_type='PRIMARY KEY') with `INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE` to identify primary key columns.
+**Note**: MSSQL response now normalizes column names to match MySQL (`Field`, `Type`, `Null`, `Key`, `Default`) via aliased SQL.
 
 ---
 
 ### `POST /api/database/indexes`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: List indexes on a table.
 
 | Param | Location | Required | Description |
@@ -163,9 +266,9 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL — one row per index-column combination):
 ```json
 {
+  "success": true,
   "indexes": [
-    { "Table": "users", "Non_unique": 0, "Key_name": "PRIMARY", "Column_name": "id", "Index_type": "BTREE" },
-    { "Table": "users", "Non_unique": 0, "Key_name": "idx_email", "Column_name": "email", "Index_type": "BTREE" }
+    { "Table": "users", "Non_unique": 0, "Key_name": "PRIMARY", "Column_name": "id", "Index_type": "BTREE" }
   ]
 }
 ```
@@ -173,18 +276,20 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MSSQL — aggregated by index):
 ```json
 {
+  "success": true,
   "indexes": [
-    { "index_name": "PK_users", "columns": "id", "is_unique": true, "type_desc": "CLUSTERED" },
-    { "index_name": "IX_users_email", "columns": "email, tenant_id", "is_unique": false, "type_desc": "NONCLUSTERED" }
+    { "index_name": "PK_users", "columns": "id", "is_unique": true, "index_type": "CLUSTERED" }
   ]
 }
 ```
 
 ---
 
+## Table Data & CRUD Endpoints
+
 ### `POST /api/database/table-data`
-**Auth**: None  
-**Purpose**: Fetch paginated rows from a table.
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Fetch paginated rows from a table with server-side sorting and filtering.
 
 | Param | Location | Required | Default | Description |
 |-------|----------|----------|---------|-------------|
@@ -193,14 +298,24 @@ apiRouter.use('/database', databaseManagerRouter);
 | `table` | Body | Yes | — | Target table |
 | `page` | Body | No | `1` | Page number (1-based) |
 | `pageSize` | Body | No | `100` | Rows per page (max 1000) |
+| `sortColumn` | Body | No | — | Column name to sort by |
+| `sortDirection` | Body | No | `'ASC'` | `'ASC'` or `'DESC'` |
+| `filters` | Body | No | `[]` | Array of filter objects (see below) |
 | `tunnel` | Body | No | — | SSH tunnel config |
+
+**Filter Object Shape**:
+```json
+{ "column": "email", "operator": "LIKE", "value": "example.com" }
+```
+
+**Supported Filter Operators**: `LIKE`, `=`, `!=`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT NULL`, `REGEXP` (MySQL only)
 
 **Response** `200`:
 ```json
 {
+  "success": true,
   "rows": [
-    { "id": 1, "name": "Alice", "email": "alice@example.com" },
-    { "id": 2, "name": "Bob", "email": "bob@example.com" }
+    { "id": 1, "name": "Alice", "email": "alice@example.com" }
   ],
   "columns": ["id", "name", "email"],
   "total": 1250,
@@ -209,15 +324,196 @@ apiRouter.use('/database', databaseManagerRouter);
 }
 ```
 
-**MySQL Query**: `SELECT * FROM \`table\` LIMIT pageSize OFFSET offset`  
-**MSSQL Query**: `SELECT * FROM [table] ORDER BY (SELECT NULL) OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY`
+**MySQL Query**: `SELECT * FROM \`table\` WHERE ... ORDER BY \`col\` ASC LIMIT ? OFFSET ?` (parameterized values)  
+**MSSQL Query**: `SELECT * FROM [table] WHERE ... ORDER BY [col] ASC OFFSET N ROWS FETCH NEXT M ROWS ONLY`
 
-**Note**: `pageSize` is capped at 1000 regardless of request value.
+**Note**: `pageSize` is capped at 1000 regardless of request value. Filters generate server-side WHERE clauses. MySQL uses parameterized queries for filter values; MSSQL uses string interpolation with quote escaping.
 
 ---
 
+### `POST /api/database/row-insert`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Insert a new row into a table.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | Yes | Target database |
+| `table` | Body | Yes | Target table |
+| `row` | Body | Yes | Key-value object of column→value pairs |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Request Example**:
+```json
+{
+  "...connection fields...",
+  "table": "users",
+  "row": { "name": "Alice", "email": "alice@example.com", "active": 1 }
+}
+```
+
+**Response** `200`:
+```json
+{ "success": true, "message": "Row inserted" }
+```
+
+**Flow**: Generates `INSERT INTO table (col1, col2) VALUES (?, ?)` with parameterized values. Empty strings are converted to `null`.
+
+---
+
+### `POST /api/database/row-update`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Update a row identified by primary key values.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | Yes | Target database |
+| `table` | Body | Yes | Target table |
+| `row` | Body | Yes | Key-value object of columns to update |
+| `where` | Body | Yes | Key-value object of primary key columns for WHERE clause |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Request Example**:
+```json
+{
+  "...connection fields...",
+  "table": "users",
+  "row": { "name": "Alice Updated", "email": "newalice@example.com" },
+  "where": { "id": 1 }
+}
+```
+
+**Response** `200`:
+```json
+{ "success": true, "message": "Row updated" }
+```
+
+**Flow**: Generates `UPDATE table SET col1=?, col2=? WHERE pk_col=? LIMIT 1` (MySQL) or `UPDATE TOP(1) [table] SET ... WHERE ...` (MSSQL). Null values in `where` generate `IS NULL` clauses.
+
+---
+
+### `POST /api/database/row-delete`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Delete a row identified by primary key values.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | Yes | Target database |
+| `table` | Body | Yes | Target table |
+| `where` | Body | Yes | Key-value object of primary key columns for WHERE clause |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Request Example**:
+```json
+{
+  "...connection fields...",
+  "table": "users",
+  "where": { "id": 1 }
+}
+```
+
+**Response** `200`:
+```json
+{ "success": true, "message": "Row deleted" }
+```
+
+**Flow**: Generates `DELETE FROM table WHERE pk_col=? LIMIT 1` (MySQL) or `DELETE TOP(1) FROM [table] WHERE ...` (MSSQL). Null values in `where` generate `IS NULL` clauses.
+
+---
+
+## Table Operations Endpoints
+
+### `POST /api/database/import-sql`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Execute a SQL file/dump by splitting statements and running them sequentially.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | No | Target database |
+| `sql` | Body | Yes | SQL content (multiple statements separated by `;\n`) |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Response** `200`:
+```json
+{
+  "success": true,
+  "message": "15 statement(s) executed",
+  "executed": 15,
+  "errors": [],
+  "totalStatements": 15
+}
+```
+
+**Response with partial errors**:
+```json
+{
+  "success": true,
+  "message": "12 statement(s) executed",
+  "executed": 12,
+  "errors": [
+    "Table 'foo' already exists — CREATE TABLE foo...",
+    "Unknown column 'bar' — ALTER TABLE baz ADD COLUMN bar..."
+  ],
+  "totalStatements": 15
+}
+```
+
+**Flow**:
+1. Split SQL by `;\n` (semicolon followed by newline)
+2. Filter empty lines and `--` comments
+3. Execute each statement sequentially
+4. Collect errors (max 20 returned) without stopping execution
+5. Return summary with executed count + error list
+
+---
+
+### `POST /api/database/truncate`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Truncate (empty) a table.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | Yes | Target database |
+| `table` | Body | Yes | Target table |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Response** `200`:
+```json
+{ "success": true, "message": "Table users truncated" }
+```
+
+**Flow**: Executes `TRUNCATE TABLE \`table\`` (MySQL) or `TRUNCATE TABLE [table]` (MSSQL) with identifier escaping.
+
+---
+
+### `POST /api/database/drop-table`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Drop (delete) a table permanently.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | Connection details |
+| `database` | Body | Yes | Target database |
+| `table` | Body | Yes | Target table |
+| `tunnel` | Body | No | SSH tunnel config |
+
+**Response** `200`:
+```json
+{ "success": true, "message": "Table users dropped" }
+```
+
+**Flow**: Executes `DROP TABLE \`table\`` (MySQL) or `DROP TABLE [table]` (MSSQL) with identifier escaping.
+
+---
+
+## Table Info Endpoints
+
 ### `POST /api/database/table-size`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Get table size statistics.
 
 | Param | Location | Required | Description |
@@ -230,14 +526,16 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL):
 ```json
 {
+  "success": true,
   "size": {
     "row_count": 1250,
     "data_kb": 256,
     "index_kb": 64,
     "total_kb": 320,
     "engine": "InnoDB",
-    "created": "2024-01-15 10:30:00",
-    "collation": "utf8mb4_general_ci"
+    "collation": "utf8mb4_general_ci",
+    "CREATE_TIME": "2024-01-15 10:30:00",
+    "UPDATE_TIME": "2025-03-01 14:00:00"
   }
 }
 ```
@@ -245,10 +543,11 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MSSQL):
 ```json
 {
+  "success": true,
   "size": {
     "row_count": 1250,
     "total_kb": 320,
-    "data_kb": 256
+    "used_kb": 256
   }
 }
 ```
@@ -256,7 +555,7 @@ apiRouter.use('/database', databaseManagerRouter);
 ---
 
 ### `POST /api/database/table-create-sql`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Get the CREATE TABLE DDL statement.
 
 | Param | Location | Required | Description |
@@ -269,21 +568,25 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL):
 ```json
 {
-  "sql": "CREATE TABLE `users` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `email` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `idx_email` (`email`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+  "success": true,
+  "sql": "CREATE TABLE `users` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  ...)"
 }
 ```
 
 **Response** `200` (MSSQL):
 ```json
 {
-  "sql": "(MSSQL CREATE TABLE scripting not yet supported)"
+  "success": true,
+  "sql": "-- CREATE TABLE DDL not supported for MSSQL in this version"
 }
 ```
 
 ---
 
+## Monitoring Endpoints
+
 ### `POST /api/database/processes`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: List active database processes/sessions.
 
 | Param | Location | Required | Description |
@@ -294,29 +597,20 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL):
 ```json
 {
+  "success": true,
   "processes": [
-    { "Id": 42, "User": "app_user", "Host": "10.0.0.5:52412", "db": "production", "Command": "Query", "Time": 0, "State": "executing", "Info": "SELECT * FROM orders WHERE status='pending'" },
-    { "Id": 43, "User": "root", "Host": "localhost", "db": null, "Command": "Sleep", "Time": 120, "State": "", "Info": null }
-  ]
-}
-```
-
-**Response** `200` (MSSQL):
-```json
-{
-  "processes": [
-    { "session_id": 55, "login_name": "sa", "status": "running", "command": "SELECT", "wait_type": null, "cpu_time": 156, "total_elapsed_time": 200, "reads": 1024, "writes": 0 }
+    { "Id": 42, "User": "app_user", "Host": "10.0.0.5:52412", "db": "production", "Command": "Query", "Time": 0, "State": "executing", "Info": "SELECT * FROM orders" }
   ]
 }
 ```
 
 **MySQL Query**: `SHOW FULL PROCESSLIST`  
-**MSSQL Query**: `SELECT ... FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id WHERE r.session_id > 50`
+**MSSQL Query**: `SELECT session_id AS Id, status, command, DB_NAME(database_id) AS [db], wait_type, total_elapsed_time AS Time FROM sys.dm_exec_requests WHERE session_id > 50`
 
 ---
 
 ### `POST /api/database/status`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Get server version and status variables.
 
 | Param | Location | Required | Description |
@@ -327,12 +621,14 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MySQL):
 ```json
 {
+  "success": true,
   "status": {
     "version": "8.0.35-0ubuntu0.22.04.1",
     "Uptime": "345600",
     "Threads_connected": "5",
     "Questions": "1234567",
     "Slow_queries": "12",
+    "Open_tables": "200",
     "Bytes_received": "987654321",
     "Bytes_sent": "1234567890"
   }
@@ -342,23 +638,22 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (MSSQL):
 ```json
 {
+  "success": true,
   "status": {
     "server_name": "SQLSERVER01",
-    "version": "Microsoft SQL Server 2019 (RTM-CU18)...",
-    "spid": "55",
+    "version": "Microsoft SQL Server 2019...",
+    "current_db": "master",
     "user_connections": "12"
   }
 }
 ```
 
-**Flow (MySQL)**:
-1. `SELECT VERSION() AS version` → store version
-2. `SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Threads_connected','Questions','Slow_queries','Bytes_received','Bytes_sent')` → merge into status object
-
 ---
 
+## Query & Export Endpoints
+
 ### `POST /api/database/query`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Execute arbitrary SQL and return results.
 
 | Param | Location | Required | Description |
@@ -371,44 +666,29 @@ apiRouter.use('/database', databaseManagerRouter);
 **Response** `200` (SELECT):
 ```json
 {
+  "success": true,
   "columns": ["id", "name", "email"],
-  "rows": [
-    { "id": 1, "name": "Alice", "email": "alice@example.com" }
-  ],
-  "executionTime": 42
+  "rows": [{ "id": 1, "name": "Alice", "email": "alice@example.com" }],
+  "rowCount": 1
 }
 ```
 
 **Response** `200` (DML):
 ```json
 {
+  "success": true,
   "columns": [],
   "rows": [],
   "affectedRows": 5,
   "insertId": 0,
-  "message": "Query executed: 5 rows affected",
-  "executionTime": 15
+  "message": "5 row(s) affected"
 }
 ```
-
-**Error Response** `500`:
-```json
-{
-  "error": "You have an error in your SQL syntax; check the manual..."
-}
-```
-
-**Flow**:
-1. Record start time
-2. Execute SQL via `withMySQL` or `withMSSQL`
-3. If result has `fields` or `columns` property → SELECT result → extract columns + rows
-4. Otherwise → DML result → extract `affectedRows`, `insertId`
-5. Calculate `executionTime = Date.now() - start`
 
 ---
 
 ### `POST /api/database/export-csv`
-**Auth**: None  
+**Auth**: requireAuth + requireDeveloper  
 **Purpose**: Execute SQL and return results as a downloadable CSV file.
 
 | Param | Location | Required | Description |
@@ -426,18 +706,17 @@ Content-Disposition: attachment; filename="export.csv"
 id,name,email
 1,Alice,alice@example.com
 2,"Bob, Jr.","bob@example.com"
-3,"She said ""hello""",carol@example.com
 ```
 
-**CSV escaping**: Fields containing commas, double-quotes, or newlines are wrapped in double-quotes. Internal double-quotes are doubled (`""` → `""`).
+**CSV escaping**: Fields containing commas, double-quotes, or newlines are wrapped in double-quotes. Internal double-quotes are doubled.
 
 ---
 
 ## Frontend Routes
 
-| Route Path | Component | Description |
-|------------|-----------|-------------|
-| `/database` | `DatabaseManager.tsx` | Full database administration interface |
+| Route Path | Component | Guard | Description |
+|------------|-----------|-------|-------------|
+| `/database` | `DatabaseManager.tsx` | `<DeveloperRoute>` | Full database administration interface |
 
 ---
 
@@ -446,12 +725,21 @@ id,name,email
 | Frontend Action | API Call | Trigger |
 |-----------------|----------|---------|
 | Component mount | `GET /database/keys` | `useEffect` on mount |
+| Load connections | `GET /database/connections` | `useEffect` on mount |
+| Save connection | `POST /database/connections` | Save button in ConnectionDialog |
+| Delete connection | `DELETE /database/connections/:id` | Delete button (with SweetAlert2 confirm) |
 | Connect to server | `POST /database/connect` | "Test Connection" button or connection click |
 | Load databases | `POST /database/databases` | After successful connect |
 | Load tables | `POST /database/tables` | After successful connect + on database switch |
 | Expand table columns | `POST /database/describe` | Click table expand arrow in sidebar |
-| Browse table data | `POST /database/table-data` | Click browse icon or Browse tab |
-| Load table info | `POST /database/table-size` + `/indexes` + `/table-create-sql` | Click info icon (parallel fetch) |
+| Browse table data | `POST /database/table-data` | Click browse icon or Browse tab (with sort/filter params) |
+| Insert row | `POST /database/row-insert` | New row form submit in TableBrowser |
+| Update row | `POST /database/row-update` | Inline edit save in TableBrowser |
+| Delete row | `POST /database/row-delete` | Delete button in TableBrowser (with confirm) |
+| Import SQL | `POST /database/import-sql` | Import tab — file upload, paste, or execute button |
+| Truncate table | `POST /database/truncate` | Truncate button (sidebar hover or Info tab, with SweetAlert2 confirm) |
+| Drop table | `POST /database/drop-table` | Drop button (sidebar hover or Info tab, with SweetAlert2 confirm) |
+| Load table info | `POST /table-size` + `/indexes` + `/table-create-sql` | Click info icon (parallel fetch) |
 | Execute SQL | `POST /database/query` | Ctrl+Enter or Execute button |
 | View processes | `POST /database/processes` | Click Processes tab or toolbar button |
 | View server status | `POST /database/status` | Click Server tab or toolbar button |

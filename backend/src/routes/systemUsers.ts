@@ -13,7 +13,6 @@ export const systemUsersRouter = Router();
 /** Map a DB user row into the frontend shape */
 function mapUser(u: any, roles?: any[]): any {
   const nameParts = (u.name || '').split(' ');
-  const roleSlugs = (roles || []).map((r: any) => r.slug);
   return {
     id: u.id,
     username: u.email,
@@ -23,8 +22,9 @@ function mapUser(u: any, roles?: any[]): any {
     name: u.name || null,
     phone: u.phone || null,
     avatar: u.avatarUrl || null,
-    is_admin: roleSlugs.includes('admin') || roleSlugs.includes('super_admin'),
-    is_staff: roleSlugs.some((s: string) => ['developer', 'client_manager', 'qa_specialist', 'deployer'].includes(s)),
+    contact_id: u.contact_id || null,
+    is_admin: !!u.is_admin,
+    is_staff: !!u.is_staff,
     is_active: !!u.isActive,
     roles: roles || [],
     created_at: u.createdAt,
@@ -38,7 +38,7 @@ function mapUser(u: any, roles?: any[]): any {
 systemUsersRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const users = await db.query<any>(
-      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
     );
 
     const result = [];
@@ -65,7 +65,7 @@ systemUsersRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
   try {
     const { id } = req.params;
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
     if (!u) throw notFound('User not found');
@@ -88,11 +88,16 @@ systemUsersRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
  */
 systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
-    const { email, password, name, phone, is_admin, is_staff } = req.body;
+    const { email, password, name, phone, is_admin, is_staff, contact_id } = req.body;
     if (!email || !password) throw badRequest('email and password are required');
+    if (!contact_id) throw badRequest('A contact must be selected when creating a user');
 
     const existing = await db.queryOne<any>('SELECT id FROM users WHERE email = ?', [email]);
     if (existing) throw badRequest('Email already registered');
+
+    // Verify contact exists
+    const contactExists = await db.queryOne<any>('SELECT id FROM contacts WHERE id = ? AND active = 1', [contact_id]);
+    if (!contactExists) throw badRequest('Selected contact does not exist');
 
     const passwordHash = await bcrypt.hash(password, 12);
     const { generateId, toMySQLDate } = await import('../db/mysql.js');
@@ -100,11 +105,11 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
     const now = toMySQLDate(new Date());
 
     await db.execute(
-      'INSERT INTO users (id, email, name, phone, passwordHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [userId, email, name || null, phone || null, passwordHash, now, now]
+      'INSERT INTO users (id, email, name, phone, passwordHash, contact_id, is_admin, is_staff, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [userId, email, name || null, phone || null, passwordHash, contact_id, is_admin ? 1 : 0, is_staff ? 1 : 0, now, now]
     );
 
-    // Assign role via user_roles
+    // Assign role via user_roles (if roles table still has entries)
     const roleSlug = is_admin ? 'admin' : is_staff ? 'developer' : 'viewer';
     const role = await db.queryOne<any>('SELECT id FROM roles WHERE slug = ?', [roleSlug]);
     if (role) {
@@ -115,7 +120,7 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
     }
 
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [userId]
     );
 
@@ -137,7 +142,7 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
 systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
-    const { email, password, name, phone, is_admin, is_staff, is_active } = req.body;
+    const { email, password, name, phone, is_admin, is_staff, is_active, contact_id } = req.body;
 
     const u = await db.queryOne<any>('SELECT id FROM users WHERE id = ?', [id]);
     if (!u) throw notFound('User not found');
@@ -152,6 +157,9 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
     if (name !== undefined) { updates.push('name = ?'); params.push(name); }
     if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
     if (is_active !== undefined) { updates.push('isActive = ?'); params.push(is_active ? 1 : 0); }
+    if (contact_id !== undefined) { updates.push('contact_id = ?'); params.push(contact_id || null); }
+    if (is_admin !== undefined) { updates.push('is_admin = ?'); params.push(is_admin ? 1 : 0); }
+    if (is_staff !== undefined) { updates.push('is_staff = ?'); params.push(is_staff ? 1 : 0); }
     if (password) {
       const hash = await bcrypt.hash(password, 12);
       updates.push('passwordHash = ?'); params.push(hash);
@@ -163,18 +171,18 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
       await db.execute(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
     }
 
+    // Also sync role in user_roles if type changed (for legacy compatibility)
     if (is_admin !== undefined || is_staff !== undefined) {
       const roleSlug = is_admin ? 'admin' : is_staff ? 'developer' : 'viewer';
       const role = await db.queryOne<any>('SELECT id FROM roles WHERE slug = ?', [roleSlug]);
       if (role) {
-        // Upsert: delete old role, insert new
         await db.execute('DELETE FROM user_roles WHERE user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci', [id]);
         await db.execute('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [id, role.id]);
       }
     }
 
     const updated = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
     const roles = await db.query<any>(
@@ -204,7 +212,7 @@ systemUsersRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Resp
     if (!u) throw notFound('User not found');
 
     // Remove all foreign-key references, then roles, then user
-    const fkCleanup = [
+    const fkDeletes = [
       `DELETE FROM user_roles WHERE user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
       `DELETE FROM team_members WHERE userId = ?`,
       `DELETE FROM fcm_tokens WHERE user_id = ?`,
@@ -219,13 +227,28 @@ systemUsersRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Resp
       `DELETE FROM widget_clients WHERE user_id = ?`,
       `DELETE FROM generated_sites WHERE user_id = ?`,
       `DELETE FROM notifications WHERE user_id = ?`,
+      `DELETE FROM calendar_event_attendees WHERE user_id = ?`,
+      `DELETE FROM calendar_events WHERE user_id = ?`,
+      `DELETE FROM scheduled_call_participants WHERE user_id = ?`,
+      `DELETE FROM scheduled_calls WHERE created_by = ?`,
     ];
-    for (const sql of fkCleanup) {
+    for (const sql of fkDeletes) {
       try { await db.execute(sql, [id]); } catch { /* table may not exist — skip */ }
     }
-    // Nullify ownership columns instead of deleting the rows
-    try { await db.execute(`UPDATE teams SET createdByUserId = NULL WHERE createdByUserId = ?`, [id]); } catch { /* skip */ }
-    try { await db.execute(`UPDATE \`groups\` SET created_by = NULL WHERE created_by = ?`, [id]); } catch { /* skip */ }
+    // Nullify nullable ownership columns
+    const fkNullify = [
+      `UPDATE \`groups\` SET created_by = NULL WHERE created_by = ?`,
+      `UPDATE case_activity SET user_id = NULL WHERE user_id = ?`,
+      `UPDATE case_comments SET user_id = NULL WHERE user_id = ?`,
+      `UPDATE cases SET reported_by = NULL WHERE reported_by = ?`,
+      `UPDATE cases SET assigned_to = NULL WHERE assigned_to = ?`,
+      `UPDATE cases SET resolved_by = NULL WHERE resolved_by = ?`,
+    ];
+    for (const sql of fkNullify) {
+      try { await db.execute(sql, [id]); } catch { /* skip */ }
+    }
+    // Reassign teams to the requesting admin (column is NOT NULL)
+    try { await db.execute(`UPDATE teams SET createdByUserId = ? WHERE createdByUserId = ?`, [userId, id]); } catch { /* skip */ }
 
     await db.execute('DELETE FROM users WHERE id = ?', [id]);
 

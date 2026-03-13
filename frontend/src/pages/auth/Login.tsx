@@ -24,6 +24,12 @@ const Login: React.FC = () => {
   const [twoFaVerifying, setTwoFaVerifying] = useState(false);
   const [twoFaResending, setTwoFaResending] = useState(false);
 
+  // Push-to-approve state
+  const [challengeId, setChallengeId] = useState('');
+  const [pushStatus, setPushStatus] = useState<'' | 'waiting' | 'denied' | 'expired'>('');
+  const [showManualCode, setShowManualCode] = useState(false);
+  const [sendingAltOtp, setSendingAltOtp] = useState(false);
+
   // Redirect if already authenticated
   useEffect(() => {
     if (isAuthenticated) {
@@ -110,6 +116,9 @@ const Login: React.FC = () => {
           setTwoFaRequired(true);
           setTwoFaMethod((response.data.two_factor_method as 'totp' | 'email' | 'sms') || 'totp');
           setTwoFaTempToken(response.data.temp_token || '');
+          setChallengeId(response.data.challenge_id || '');
+          setPushStatus(response.data.challenge_id ? 'waiting' : '');
+          setShowManualCode(false);
           setTwoFaCode('');
           setLoading(false);
           return;
@@ -195,6 +204,77 @@ const Login: React.FC = () => {
     }
   };
 
+  // Switch to an alternative OTP method (email or sms)
+  const handleSendAltOtp = async (method: 'email' | 'sms') => {
+    setSendingAltOtp(true);
+    try {
+      await AuthModel.sendAltOtp(twoFaTempToken, method);
+      setTwoFaMethod(method);
+      setShowManualCode(true);
+      setTwoFaCode('');
+      notify.success(method === 'email'
+        ? 'A verification code has been sent to your email.'
+        : 'A verification code has been sent to your phone.');
+    } catch (err: any) {
+      notify.error(err.response?.data?.message || `Failed to send ${method} verification code.`);
+    } finally {
+      setSendingAltOtp(false);
+    }
+  };
+
+  // ── Push-to-approve polling ──────────────────────────────────
+  useEffect(() => {
+    if (!twoFaRequired || !challengeId || !twoFaTempToken || showManualCode) return;
+    if (pushStatus === 'denied' || pushStatus === 'expired') return;
+
+    let cancelled = false;
+
+    const poll = async () => {
+      while (!cancelled) {
+        await new Promise(r => setTimeout(r, 3000));
+        if (cancelled) break;
+        try {
+          const result = await AuthModel.pollPushStatus(twoFaTempToken, challengeId);
+          if (cancelled) break;
+
+          if (result.status === 'completed' && result.token && result.user) {
+            AuthModel.storeAuth(result.token, result.user);
+            try {
+              const perms = await AuthModel.getUserPermissions();
+              result.user.permissions = perms;
+            } catch { result.user.permissions = []; }
+            AuthModel.storeAuth(result.token, result.user);
+            setUser(result.user);
+            setIsAuthenticated(true);
+            await new Promise(r => setTimeout(r, 100));
+            navigate('/dashboard');
+            break;
+          } else if (result.status === 'denied') {
+            setPushStatus('denied');
+            break;
+          } else if (result.status === 'expired' || result.status === 'not_found') {
+            setPushStatus('expired');
+            break;
+          }
+        } catch (err) {
+          console.warn('[Push] Poll error:', err);
+        }
+      }
+    };
+
+    poll();
+    return () => { cancelled = true; };
+  }, [twoFaRequired, challengeId, twoFaTempToken, showManualCode, pushStatus, navigate, setUser, setIsAuthenticated]);
+
+  // Helper to reset back to the login form
+  const resetToLogin = () => {
+    setTwoFaRequired(false);
+    setTwoFaCode('');
+    setChallengeId('');
+    setPushStatus('');
+    setShowManualCode(false);
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4 py-12">
       <div className="w-full max-w-md space-y-6">
@@ -226,51 +306,181 @@ const Login: React.FC = () => {
           <div className="px-8 py-6">
             {twoFaRequired ? (
               <div className="space-y-5">
-                <div className="text-center">
-                  <h2 className="text-lg font-bold text-gray-900 mb-1">Two-Factor Authentication</h2>
-                  <p className="text-sm text-gray-500">
-                    {twoFaMethod === 'totp' && 'Enter the code from your authenticator app.'}
-                    {twoFaMethod === 'email' && 'A verification code has been sent to your email.'}
-                    {twoFaMethod === 'sms' && 'A verification code has been sent to your phone.'}
-                  </p>
-                </div>
-                <form onSubmit={handle2FAVerify} className="space-y-4">
-                  <div>
-                    <label htmlFor="twofa-code" className="block text-sm font-medium text-gray-700 mb-1.5">
-                      Verification Code
-                    </label>
-                    <input
-                      id="twofa-code"
-                      type="text"
-                      maxLength={8}
-                      value={twoFaCode}
-                      onChange={(e) => setTwoFaCode(e.target.value.replace(/\s/g, ''))}
-                      className="w-full px-4 py-3 text-center text-lg font-mono tracking-widest border border-slate-200 rounded-xl focus:ring-2 focus:ring-picton-blue focus:border-transparent transition-all"
-                      placeholder="000000"
-                      autoFocus
-                      autoComplete="one-time-code"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={twoFaVerifying || twoFaCode.length < 6}
-                    className="w-full flex justify-center items-center px-4 py-2.5 border border-transparent rounded-xl shadow-sm text-base font-medium text-white bg-picton-blue hover:bg-picton-blue/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-picton-blue disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {twoFaVerifying ? 'Verifying...' : 'Verify'}
-                  </button>
-                </form>
-                {(twoFaMethod === 'email' || twoFaMethod === 'sms') && (
-                  <div className="text-center">
-                    <button onClick={handleResendOtp} disabled={twoFaResending} className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium disabled:opacity-50">
-                      {twoFaResending ? 'Sending...' : 'Resend verification code'}
-                    </button>
-                  </div>
+                {/* ── Push-to-approve waiting screen ── */}
+                {challengeId && twoFaMethod === 'totp' && !showManualCode ? (
+                  <>
+                    <div className="text-center">
+                      <h2 className="text-lg font-bold text-gray-900 mb-1">Approve Sign-In</h2>
+                      <p className="text-sm text-gray-500">
+                        A notification has been sent to your SoftAware mobile app.
+                      </p>
+                    </div>
+
+                    {pushStatus === 'denied' ? (
+                      <div className="text-center space-y-4">
+                        <div className="flex justify-center">
+                          <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center">
+                            <svg className="h-8 w-8 text-red-500" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </div>
+                        </div>
+                        <p className="text-sm text-red-600 font-medium">Sign-in was denied from your mobile app.</p>
+                        <button onClick={resetToLogin} className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium">
+                          Try Again
+                        </button>
+                      </div>
+                    ) : pushStatus === 'expired' ? (
+                      <div className="text-center space-y-4">
+                        <div className="flex justify-center">
+                          <div className="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center">
+                            <svg className="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </div>
+                        </div>
+                        <p className="text-sm text-amber-600 font-medium">The approval request has expired.</p>
+                        <button onClick={resetToLogin} className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium">
+                          Try Again
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-center space-y-4">
+                        <div className="flex justify-center">
+                          <div className="animate-pulse">
+                            <div className="w-16 h-16 rounded-full bg-picton-blue/10 flex items-center justify-center">
+                              <svg className="h-8 w-8 text-picton-blue" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
+                              </svg>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-500">Open the app and tap <strong>"Approve"</strong> to sign in.</p>
+                        <p className="text-xs text-gray-400 animate-pulse">Waiting for approval…</p>
+                      </div>
+                    )}
+
+                    {/* Alternative authentication fallback links */}
+                    {pushStatus !== 'denied' && pushStatus !== 'expired' && (
+                      <div className="border-t border-slate-200 pt-4 space-y-2 text-center">
+                        <p className="text-xs text-gray-400 mb-2">Or use an alternative method:</p>
+                        <button
+                          onClick={() => handleSendAltOtp('email')}
+                          disabled={sendingAltOtp}
+                          className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium transition-colors disabled:opacity-50 block w-full"
+                        >
+                          {sendingAltOtp ? 'Sending...' : '📧 Email me a code'}
+                        </button>
+                        <button
+                          onClick={() => handleSendAltOtp('sms')}
+                          disabled={sendingAltOtp}
+                          className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium transition-colors disabled:opacity-50 block w-full"
+                        >
+                          {sendingAltOtp ? 'Sending...' : '📱 Text me a code'}
+                        </button>
+                        <button
+                          onClick={() => setShowManualCode(true)}
+                          className="text-sm text-gray-500 hover:text-picton-blue font-medium transition-colors block w-full"
+                        >
+                          🔑 Enter backup code
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="text-center">
+                      <button onClick={resetToLogin} className="text-sm text-gray-500 hover:text-gray-700">
+                        ← Back to Sign In
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  /* ── Manual code entry (email / sms / totp fallback) ── */
+                  <>
+                    <div className="text-center">
+                      <h2 className="text-lg font-bold text-gray-900 mb-1">Two-Factor Authentication</h2>
+                      <p className="text-sm text-gray-500">
+                        {twoFaMethod === 'totp' && 'Enter the code from your authenticator app or a backup code.'}
+                        {twoFaMethod === 'email' && 'A verification code has been sent to your email.'}
+                        {twoFaMethod === 'sms' && 'A verification code has been sent to your phone.'}
+                      </p>
+                    </div>
+                    <form onSubmit={handle2FAVerify} className="space-y-4">
+                      <div>
+                        <label htmlFor="twofa-code" className="block text-sm font-medium text-gray-700 mb-1.5">
+                          Verification Code
+                        </label>
+                        <input
+                          id="twofa-code"
+                          type="text"
+                          maxLength={8}
+                          value={twoFaCode}
+                          onChange={(e) => setTwoFaCode(e.target.value.replace(/\s/g, ''))}
+                          className="w-full px-4 py-3 text-center text-lg font-mono tracking-widest border border-slate-200 rounded-xl focus:ring-2 focus:ring-picton-blue focus:border-transparent transition-all"
+                          placeholder="000000"
+                          autoFocus
+                          autoComplete="one-time-code"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={twoFaVerifying || twoFaCode.length < 6}
+                        className="w-full flex justify-center items-center px-4 py-2.5 border border-transparent rounded-xl shadow-sm text-base font-medium text-white bg-picton-blue hover:bg-picton-blue/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-picton-blue disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {twoFaVerifying ? 'Verifying...' : 'Verify'}
+                      </button>
+                    </form>
+                    {(twoFaMethod === 'email' || twoFaMethod === 'sms') && (
+                      <div className="text-center">
+                        <button onClick={handleResendOtp} disabled={twoFaResending} className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium disabled:opacity-50">
+                          {twoFaResending ? 'Sending...' : 'Resend verification code'}
+                        </button>
+                      </div>
+                    )}
+                    {/* Alternative methods — show the other 2 methods */}
+                    <div className="border-t border-slate-200 pt-3 space-y-2 text-center">
+                      <p className="text-xs text-gray-400 mb-1">Or use an alternative method:</p>
+                      {twoFaMethod !== 'email' && (
+                        <button
+                          onClick={() => handleSendAltOtp('email')}
+                          disabled={sendingAltOtp}
+                          className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium disabled:opacity-50 block w-full"
+                        >
+                          {sendingAltOtp ? 'Sending...' : '📧 Email me a code'}
+                        </button>
+                      )}
+                      {twoFaMethod !== 'sms' && (
+                        <button
+                          onClick={() => handleSendAltOtp('sms')}
+                          disabled={sendingAltOtp}
+                          className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium disabled:opacity-50 block w-full"
+                        >
+                          {sendingAltOtp ? 'Sending...' : '📱 Text me a code'}
+                        </button>
+                      )}
+                      {twoFaMethod !== 'totp' && (
+                        <button
+                          onClick={() => { setTwoFaMethod('totp'); setTwoFaCode(''); }}
+                          className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium block w-full"
+                        >
+                          🔐 Use authenticator app
+                        </button>
+                      )}
+                    </div>
+                    {/* Link back to push screen if challenge exists */}
+                    {challengeId && twoFaMethod === 'totp' && (
+                      <div className="text-center">
+                        <button onClick={() => { setShowManualCode(false); setPushStatus('waiting'); }} className="text-sm text-picton-blue hover:text-picton-blue/80 font-medium">
+                          ← Back to push approval
+                        </button>
+                      </div>
+                    )}
+                    <div className="text-center">
+                      <button onClick={resetToLogin} className="text-sm text-gray-500 hover:text-gray-700">
+                        ← Back to Sign In
+                      </button>
+                    </div>
+                  </>
                 )}
-                <div className="text-center">
-                  <button onClick={() => { setTwoFaRequired(false); setTwoFaCode(''); }} className="text-sm text-gray-500 hover:text-gray-700">
-                    ← Back to Sign In
-                  </button>
-                </div>
               </div>
             ) : (
             <form onSubmit={handleSubmit} className="space-y-5">

@@ -11,7 +11,7 @@ Authenticates via **API key** — no user login or session required.
 | Environment | URL |
 |---|---|
 | Local (ServBay) | `http://silulumanzi.local/portal/api/tasks-api` |
-| Production | `https://<your-domain>/portal/api/tasks-api` |
+| Production | `https://portal.silulumanzi.com/portal/api/tasks-api` |
 
 ---
 
@@ -325,6 +325,21 @@ Create and/or update multiple tasks in a single request. Each task in the array 
 
 ## Attachments (files)
 
+Attachment files are stored on the **production** server (`portal.silulumanzi.com`) in the `/uploads/development/` directory. This directory is served directly by Apache — **no authentication required** — so `download_url` values can be used directly in `<img src>`, `<a href>`, or any browser context.
+
+When running locally, the API transparently redirects download requests to the production static path so that clients always get the file regardless of which environment they target.
+
+### How file serving works
+
+| Scenario | `download_url` points to | Download endpoint behaviour |
+|---|---|---|
+| File exists on local disk | `http://{host}/uploads/development/{file}` | Served directly with correct `Content-Type` |
+| File does **not** exist locally | `https://portal.silulumanzi.com/uploads/development/{file}` | **302 redirect** to production static path |
+
+> **Tip for clients:** Always use the `download_url` field from the list response. It points directly to the static file path (no API key or session needed), so it works in `<img>` tags, browser tabs, and programmatic downloads alike.
+
+---
+
 ### List attachments for a task
 
 ```
@@ -346,17 +361,31 @@ curl -s "http://silulumanzi.local/portal/api/tasks-api/132/attachments" \
         {
             "attachment_id": 141,
             "task_id": 132,
+            "comment_id": null,
+            "uploaded_by": 1,
             "uploaded_by_name": "External Support",
             "file_name": "CAPEX FEATURES.docx",
             "file_path": "task_132_1769417621_69772b9525928.docx",
             "file_size": 29309,
             "file_type": "docx",
             "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "uploaded_at": "2026-01-26 10:53:41"
+            "is_public": 1,
+            "uploaded_at": "2026-01-26 10:53:41",
+            "is_from_ticket": 0,
+            "download_url": "https://portal.silulumanzi.com/uploads/development/task_132_1769417621_69772b9525928.docx"
         }
     ]
 }
 ```
+
+**Key fields:**
+
+| Field | Description |
+|---|---|
+| `file_name` | Original filename as uploaded by the user |
+| `file_path` | Secure server-side filename — used in download/delete URLs |
+| `download_url` | **Ready-to-use URL** pointing to the static file path (`/uploads/development/`). No API key or session required — safe for `<img src>`, `<a href>`, and direct browser access. Points to local server if the file exists on disk, otherwise to production. |
+| `is_from_ticket` | `1` if the attachment was originally uploaded via a helpdesk ticket that was converted to a task |
 
 ---
 
@@ -394,6 +423,8 @@ curl -s -X POST "http://silulumanzi.local/portal/api/tasks-api/132/attachments" 
 }
 ```
 
+> The uploaded file is saved to `uploads/development/` on whichever server received the request.
+
 ---
 
 ### Download an attachment
@@ -402,15 +433,25 @@ curl -s -X POST "http://silulumanzi.local/portal/api/tasks-api/132/attachments" 
 GET /api/tasks-api/attachments/{filename}
 ```
 
-Returns the raw file content with appropriate `Content-Type` headers. The `{filename}` is the `file_path` value from the list/upload response (e.g. `task_132_1769417621_69772b9525928.docx`).
+The `{filename}` is the `file_path` value from the list or upload response (e.g. `task_132_1769417621_69772b9525928.docx`).
 
-Add `?download=1` to force the browser to download rather than display inline.
+- If the file exists locally → returns the raw file with `Content-Type` / `Content-Disposition` headers.
+- If the file does not exist locally → responds with **302 redirect** to the production static path (`https://portal.silulumanzi.com/uploads/development/{filename}`).
+
+Add `?download=1` to force download instead of inline display.
 
 ```bash
-curl -s -o document.pdf \
+# Basic download — follows redirect automatically
+curl -sL -o document.docx \
   "http://silulumanzi.local/portal/api/tasks-api/attachments/task_132_1769417621_69772b9525928.docx" \
   -H "X-API-Key: silulumanzi-tasks-dev-key"
+
+# Or use the download_url from the list response directly (no auth needed)
+curl -sL -o screenshot.png \
+  "https://portal.silulumanzi.com/uploads/development/task_132_1768561387_696a1aeb54146.png"
 ```
+
+> **Note:** When using `curl` locally, add the `-L` flag to follow the 302 redirect to production.
 
 ---
 
@@ -420,13 +461,15 @@ curl -s -o document.pdf \
 DELETE /api/tasks-api/attachments/{filename}
 ```
 
-Removes the file from disk and the database record.
+Removes the database record and deletes the file from local disk (if it exists there).
 
 ```bash
 curl -s -X DELETE \
   "http://silulumanzi.local/portal/api/tasks-api/attachments/task_132_1769417621_69772b9525928.docx" \
   -H "X-API-Key: silulumanzi-tasks-dev-key"
 ```
+
+> **Important:** This only deletes the file on the server that receives the request. If a file was uploaded on production, deleting it from the local dev API removes the database record but the file still exists on the production disk (and vice versa).
 
 ---
 
@@ -591,17 +634,243 @@ GET /api/tasks-api/{id}/parent
 
 ---
 
-## Time, billing & statistics
+## Task hours
 
-### Update time
+Every task has several time-related fields. Understanding how they interact is key to working with hours correctly.
+
+### Fields overview
+
+| DB column | Response alias | Format | Description |
+|---|---|---|---|
+| `task_hours` | `hours` | `HH:MM` string | **Recorded hours** — the billable/logged time on the task. This is the primary hours field. |
+| `task_estimated_hours` | `estimated_hours` | Decimal float | **Estimate** set when creating the task (e.g. `2.5` = 2 h 30 min). |
+| `task_actual_start_time` | `actual_start` | `YYYY-MM-DD HH:MM:SS` | Timestamp recorded when the task is **started** (`POST /{id}/start`). |
+| `task_actual_end_time` | `actual_end` | `YYYY-MM-DD HH:MM:SS` | Timestamp recorded when the task is **completed** (`POST /{id}/complete`). |
+| `task_start` | `start` | `YYYY-MM-DD HH:MM:SS` | Calendar/scheduled start (used for ordering and display, not for hour calculations). |
+| `task_end` | `end` | `YYYY-MM-DD HH:MM:SS` | Calendar/scheduled end. |
+
+### How hours get set
+
+There are **four** ways `task_hours` can be written:
+
+1. **Manual set** — Send `hours` (or `task_hours`) in a `PUT /{id}`, `POST` (create), or `PUT /{id}/hours` request. The value you send is stored as-is.
+2. **Auto-calculated on create/update** — If you provide both `actual_start` and `actual_end` in a create or update call, the server calculates `HH:MM` from the difference and overwrites `task_hours`.
+3. **Auto-calculated on complete** — When you call `POST /{id}/complete`, the server computes elapsed time from `actual_start` → now and writes it to `task_hours`.
+4. **Incremental add** — `POST /{id}/hours/add` adds (or subtracts) a delta to the current `task_hours` value without replacing it.
+
+> **Important:** `task_hours` is a **string** in `HH:MM` format (e.g. `"08:30"`, `"120:00"`). It supports values > 24 hours. The hours endpoints also accept decimal input (e.g. `2.5`) and convert it automatically.
+
+---
+
+### Get hours for a task
+
+```
+GET /api/tasks-api/{id}/hours
+```
+
+Returns a detailed breakdown of all time fields plus a live elapsed calculation.
+
+**Response:**
+
+```json
+{
+    "status": 1,
+    "message": "Success",
+    "data": {
+        "task_id": 132,
+        "hours": "08:30",
+        "hours_decimal": 8.5,
+        "estimated_hours": 10,
+        "actual_start": "2026-03-10 09:00:00",
+        "actual_end": "2026-03-10 17:30:00",
+        "elapsed": "08:30",
+        "elapsed_decimal": 8.5,
+        "status": "completed"
+    }
+}
+```
+
+| Field | Description |
+|---|---|
+| `hours` | Current recorded hours (`HH:MM`) |
+| `hours_decimal` | Same value as a decimal (e.g. `8.5`) |
+| `estimated_hours` | The original estimate |
+| `elapsed` | Wall-clock time from `actual_start` to `actual_end` (or to **now** if still in-progress). `null` if never started. |
+| `elapsed_decimal` | Elapsed as a decimal |
+
+**Example:**
+
+```bash
+curl -s "http://silulumanzi.local/portal/api/tasks-api/132/hours" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key"
+```
+
+---
+
+### Set hours on a task (overwrite)
+
+```
+PUT /api/tasks-api/{id}/hours
+```
+
+Directly set `task_hours` and/or `task_estimated_hours`. Overwrites the current value.
+
+**Body — accepts any combination:**
+
+```json
+{ "hours": "12:30" }
+```
+
+```json
+{ "hours": 12.5 }
+```
+
+```json
+{ "estimated_hours": 8 }
+```
+
+```json
+{ "hours": "04:00", "estimated_hours": 6 }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `hours` | `HH:MM` string **or** decimal | Sets `task_hours`. Decimal values are converted (`2.5` → `"02:30"`). |
+| `estimated_hours` | Decimal float | Sets `task_estimated_hours`. |
+
+At least one field is required.
+
+**Response:**
+
+```json
+{
+    "status": 1,
+    "message": "Hours updated",
+    "data": {
+        "id": 132,
+        "hours": "12:30",
+        "estimated_hours": 8,
+        ...
+    }
+}
+```
+
+**Examples:**
+
+```bash
+# Set to exactly 4 hours 15 minutes
+curl -s -X PUT "http://silulumanzi.local/portal/api/tasks-api/132/hours" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": "04:15"}'
+
+# Set using decimal (2.5 hours = 02:30)
+curl -s -X PUT "http://silulumanzi.local/portal/api/tasks-api/132/hours" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": 2.5}'
+
+# Set both hours and estimate
+curl -s -X PUT "http://silulumanzi.local/portal/api/tasks-api/132/hours" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": "08:00", "estimated_hours": 10}'
+
+# Reset hours to zero
+curl -s -X PUT "http://silulumanzi.local/portal/api/tasks-api/132/hours" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": 0}'
+```
+
+---
+
+### Add hours to a task (increment)
+
+```
+POST /api/tasks-api/{id}/hours/add
+```
+
+Adds a time delta to the existing `task_hours`. Use negative values to subtract.
+
+**Body:**
+
+```json
+{ "hours": "02:30" }
+```
+
+```json
+{ "hours": 2.5 }
+```
+
+```json
+{ "hours": -1.5 }
+```
+
+The result is floored at `00:00` — hours can never go negative.
+
+**Response:**
+
+```json
+{
+    "status": 1,
+    "message": "Hours added",
+    "data": {
+        "previous_hours": "08:00",
+        "added": "02:30",
+        "new_hours": "10:30",
+        "task": { ... }
+    }
+}
+```
+
+**Examples:**
+
+```bash
+# Add 2 hours 30 minutes
+curl -s -X POST "http://silulumanzi.local/portal/api/tasks-api/132/hours/add" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": "02:30"}'
+
+# Add 1.5 hours using decimal
+curl -s -X POST "http://silulumanzi.local/portal/api/tasks-api/132/hours/add" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": 1.5}'
+
+# Subtract 45 minutes
+curl -s -X POST "http://silulumanzi.local/portal/api/tasks-api/132/hours/add" \
+  -H "X-API-Key: silulumanzi-tasks-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{"hours": -0.75}'
+```
+
+---
+
+### Update time (legacy)
 
 ```
 PUT /api/tasks-api/time
 ```
 
-Delegates to the Dev model's `update_time()`. Send the same `$_POST` fields expected by the model.
+Re-calculates `task_hours` from `start` and `end` datetimes. This is the original calendar-drag endpoint — prefer the endpoints above for direct hour manipulation.
+
+**Body:**
+
+```json
+{
+    "id": 132,
+    "start": "2026-03-10 09:00:00",
+    "end": "2026-03-10 17:00:00"
+}
+```
+
+The server computes the difference and writes it to `task_hours` (in `HH.MM` format for this legacy endpoint).
 
 ---
+
+## Billing & statistics
 
 ### Bill tasks
 
@@ -722,6 +991,8 @@ Fields accepted on create/update (use either the `task_*` name or the short alia
 | `task_created_by_name` | `created_by_name` | string | No | `"API"` | Who created the task |
 | `task_approval_required` | `approval_required` | int | No | `0` | `1` = needs approval |
 | `task_direction` | — | int | No | `null` | `1` = IT Support Tasks |
+| `workflow_phase` | — | string | No | `null` | Workflow phase (e.g. `intake`, `development`, `verification`, `completed`) |
+| `module_id` | — | int | No | `null` | Module identifier for workflow assignment |
 | `user_id` | — | int | No | `0` | Assigned portal user ID |
 | `user_name` | — | string | No | `"API"` | Display name for audit trail |
 
@@ -788,11 +1059,12 @@ SELECT key_name, last_used_at, is_active FROM tb_api_keys ORDER BY last_used_at 
 | File | Purpose |
 |---|---|
 | `portal/app/Core/ApiKeyController.php` | Base controller — validates `X-API-Key`, provides `sendSuccess`/`sendError` helpers |
-| `portal/app/Controllers/ApiTasks.php` | Task CRUD + sync endpoints |
+| `portal/app/Controllers/ApiTasks.php` | Task CRUD + sync + attachment/comment endpoints |
 | `portal/app/Core/ApiRouter.php` | Routes registered under `tasks-api` resource |
-| `portal/app/Controllers/ApiDevelopment.php` | **Unchanged** — existing session-based task management |
-| `portal/app/Models/Dev.php` | **Unchanged** — shared model used by both controllers |
+| `portal/app/Controllers/ApiDevelopment.php` | Existing session-based task management (attachment list/download also updated with `download_url` and production redirect) |
+| `portal/app/Models/Dev.php` | Shared model used by both controllers (includes `workflow_phase` and `module_id` in INSERT/UPDATE) |
 | `database/migrations/2026_03_09_create_api_keys_table.sql` | Migration for `tb_api_keys` |
+| `uploads/development/` | Static file storage — served directly by Apache (no auth). Production files live on `portal.silulumanzi.com`, local dev redirects there |
 
 The new API deliberately **does not** extend `ApiController` and never touches PHP sessions. This means:
 

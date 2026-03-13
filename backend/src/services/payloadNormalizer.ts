@@ -10,11 +10,18 @@
 // Inbound Normalization (Provider → Standard Format)
 // ---------------------------------------------------------------------------
 
+export interface VisitorLocation {
+  latitude: number;
+  longitude: number;
+  accuracy?: number;            // GPS accuracy in meters
+}
+
 export interface NormalizedInbound {
   text: string;                 // The user's message
   sender_id?: string;           // Phone number, user ID, email, etc.
   channel: string;              // 'whatsapp', 'slack', 'sms', etc.
   timestamp?: string;
+  location?: VisitorLocation;   // GPS coordinates (when user grants permission)
   metadata?: Record<string, any>; // Provider-specific extras
 }
 
@@ -130,11 +137,23 @@ function normalizeEmail(payload: any): NormalizedInbound {
  * Payload: { message, phone_number, channel, history?, ... }
  */
 function normalizeCustomRest(payload: any): NormalizedInbound {
+  // Extract visitor GPS location from metadata.location or top-level location
+  const rawLoc = payload.metadata?.location || payload.location;
+  let location: VisitorLocation | undefined;
+  if (rawLoc && typeof rawLoc.latitude === 'number' && typeof rawLoc.longitude === 'number') {
+    location = {
+      latitude: rawLoc.latitude,
+      longitude: rawLoc.longitude,
+      accuracy: typeof rawLoc.accuracy === 'number' ? rawLoc.accuracy : undefined,
+    };
+  }
+
   return {
     text: payload.message || payload.text || '',
     sender_id: payload.phone_number || payload.user_id || payload.from,
     channel: payload.channel || 'web',
     timestamp: payload.timestamp,
+    location,
     metadata: {
       history: payload.history,
       raw: payload

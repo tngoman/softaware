@@ -21,15 +21,15 @@ import { filesRouter } from './routes/files.js';
 import { glmRouter } from './routes/glm.js';
 import { aiRouter } from './routes/ai.js';
 import { apiKeysRouter } from './routes/apiKeys.js';
-import { creditsRouter } from './routes/credits.js';
 import { aiConfigRouter } from './routes/aiConfig.js';
-import { adminCreditsRouter } from './routes/adminCredits.js';
 import { adminConfigRouter } from './routes/adminConfig.js';
 import { adminDashboardRouter } from './routes/adminDashboard.js';
+import { adminAIOverviewRouter } from './routes/adminAIOverview.js';
+import { adminPackagesRouter } from './routes/adminPackages.js';
+import { packagesRouter } from './routes/packages.js';
 import { codeImplementationRouter } from './routes/codeImplementation.js';
 import { codeWriterRouter } from './routes/codeWriter.js';
 import { gitRouter } from './routes/git.js';
-import { chatRouter } from './routes/chat.js';
 import { assistantsRouter } from './routes/assistants.js';
 import assistantIngestRouter from './routes/assistantIngest.js';
 import { dashboardRouter } from './routes/dashboard.js';
@@ -69,11 +69,14 @@ import { permissionsRouter } from './routes/systemPermissions.js';
 import { credentialsRouter } from './routes/systemCredentials.js';
 import { softawareTasksRouter } from './routes/softawareTasks.js';
 import { localTasksRouter } from './routes/localTasks.js';
+import { bugsRouter } from './routes/bugs.js';
 import databaseManagerRouter from './routes/databaseManager.js';
 import { twoFactorRouter } from './routes/twoFactor.js';
 import { fcmTokensRouter } from './routes/fcmTokens.js';
 import enterpriseWebhookRouter from './routes/enterpriseWebhook.js';
 import { adminEnterpriseEndpointsRouter } from './routes/adminEnterpriseEndpoints.js';
+import clientApiGatewayRouter from './routes/clientApiGateway.js';
+import { adminClientApiConfigsRouter } from './routes/adminClientApiConfigs.js';
 import { casesRouter } from './routes/cases.js';
 import { adminCasesRouter } from './routes/adminCases.js';
 import { emailRouter } from './routes/email.js';
@@ -85,9 +88,11 @@ import { teamChatRouter } from './routes/teamChat.js';
 import { staffChatRouter } from './routes/staffChat.js';
 import { webmailRouter } from './routes/webmail.js';
 import { planningRouter } from './routes/planning.js';
+import { adminAuditLogRouter } from './routes/adminAuditLog.js';
 import { startHealthMonitoring } from './services/healthMonitor.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { apiErrorTracker } from './middleware/apiErrorTracker.js';
+import { auditLogger } from './middleware/auditLogger.js';
 
 export function createApp() {
   const app = express();
@@ -107,7 +112,7 @@ export function createApp() {
     } else {
       res.setHeader('Access-Control-Allow-Origin', '*');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Software-Token');
 
     if (req.method === 'OPTIONS') {
@@ -117,7 +122,7 @@ export function createApp() {
   });
 
   app.use(cookieParser());
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '20mb' }));  // increased for base64 image attachments
   app.use(morgan('dev'));
 
   // Track API errors for health monitoring (must be before routes)
@@ -153,13 +158,16 @@ export function createApp() {
   apiRouter.use('/vault', vaultRouter);
   apiRouter.use('/activation', activationRouter);
   apiRouter.use('/sync', syncRouter);
-  apiRouter.use('/admin', adminRouter);
-  apiRouter.use('/admin/credits', adminCreditsRouter);
-  apiRouter.use('/admin/config', adminConfigRouter);
-  apiRouter.use('/admin/dashboard', adminDashboardRouter);
-  apiRouter.use('/admin/clients', adminClientManagerRouter);
-  apiRouter.use('/admin/enterprise-endpoints', adminEnterpriseEndpointsRouter);
-  apiRouter.use('/admin/cases', adminCasesRouter);
+  apiRouter.use('/admin', auditLogger as any, adminRouter);
+  apiRouter.use('/admin/audit-log', adminAuditLogRouter);
+  apiRouter.use('/admin/config', auditLogger as any, adminConfigRouter);
+  apiRouter.use('/admin/dashboard', auditLogger as any, adminDashboardRouter);
+  apiRouter.use('/admin/ai-overview', auditLogger as any, adminAIOverviewRouter);
+  apiRouter.use('/admin/packages', auditLogger as any, adminPackagesRouter);
+  apiRouter.use('/admin/clients', auditLogger as any, adminClientManagerRouter);
+  apiRouter.use('/admin/enterprise-endpoints', auditLogger as any, adminEnterpriseEndpointsRouter);
+  apiRouter.use('/admin/client-api-configs', auditLogger as any, adminClientApiConfigsRouter);
+  apiRouter.use('/admin/cases', auditLogger as any, adminCasesRouter);
   apiRouter.use('/subscriptions', subscriptionRouter);
   apiRouter.use('/cases', casesRouter);
   apiRouter.use('/mcp', mcpRouter);
@@ -167,7 +175,7 @@ export function createApp() {
   apiRouter.use('/ai', aiRouter);
   apiRouter.use('/glm', glmRouter);
   apiRouter.use('/api-keys', apiKeysRouter);
-  apiRouter.use('/credits', creditsRouter);
+  apiRouter.use('/packages', packagesRouter);
   apiRouter.use('/ai-config', aiConfigRouter);
   apiRouter.use('/code-implementation', codeImplementationRouter);
   apiRouter.use('/code/git', gitRouter);
@@ -176,8 +184,8 @@ export function createApp() {
   apiRouter.use('/assistants', checkAssistantStatus, assistantsRouter);
   apiRouter.use('/assistants/:assistantId/ingest', checkAssistantStatus, assistantIngestRouter);
   apiRouter.use('/dashboard', dashboardRouter);
-  apiRouter.use('/silulumanzi', chatRouter);
   apiRouter.use('/v1/webhook', enterpriseWebhookRouter); // Dynamic enterprise endpoints
+  apiRouter.use('/v1/client-api', clientApiGatewayRouter); // Standardized client API proxy gateway
   apiRouter.use('/v1/mobile', mobileIntentRouter);       // Mobile AI assistant
   apiRouter.use('/v1/mobile/my-assistant', myAssistantRouter);    // Unified assistant CRUD (staff + clients)
   apiRouter.use('/v1/mobile/staff-assistant', staffAssistantRouter); // Legacy staff-only (deprecated)
@@ -195,6 +203,9 @@ export function createApp() {
 
   // ── Local tasks (synced from external sources) ────────────
   apiRouter.use('/local-tasks', localTasksRouter);
+
+  // ── Bugs tracking ─────────────────────────────────────────
+  apiRouter.use('/bugs', bugsRouter);
 
   // ── Updates system ────────────────────────────────────────────
   apiRouter.use('/updates/software', updSoftwareRouter);
@@ -220,18 +231,18 @@ export function createApp() {
   apiRouter.use('/financial-reports', financialReportsRouter);
   apiRouter.use('/expense-categories', expenseCategoriesRouter);
   apiRouter.use('/reports', reportsRouter);
-  apiRouter.use('/settings', settingsRouter);
+  apiRouter.use('/settings', auditLogger as any, settingsRouter);
   apiRouter.use('/vat-reports', vatReportsRouter);
-  apiRouter.use('/users', systemUsersRouter);
-  apiRouter.use('/roles', rolesRouter);
-  apiRouter.use('/permissions', permissionsRouter);
-  apiRouter.use('/credentials', credentialsRouter);
+  apiRouter.use('/users', auditLogger as any, systemUsersRouter);
+  apiRouter.use('/roles', auditLogger as any, rolesRouter);
+  apiRouter.use('/permissions', auditLogger as any, permissionsRouter);
+  apiRouter.use('/credentials', auditLogger as any, credentialsRouter);
   apiRouter.use('/team-chats', teamChatRouter);
   apiRouter.use('/staff-chat', staffChatRouter);
-  apiRouter.use('/database', databaseManagerRouter);
+  apiRouter.use('/database', auditLogger as any, databaseManagerRouter);
   apiRouter.use('/fcm-tokens', fcmTokensRouter);
-  apiRouter.use('/email', emailRouter);
-  apiRouter.use('/sms', smsRouter);
+  apiRouter.use('/email', auditLogger as any, emailRouter);
+  apiRouter.use('/sms', auditLogger as any, smsRouter);
   apiRouter.use('/webmail', webmailRouter);
   apiRouter.use('/planning', planningRouter);
 

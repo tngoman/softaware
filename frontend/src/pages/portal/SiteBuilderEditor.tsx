@@ -62,6 +62,11 @@ const SiteBuilderEditor: React.FC = () => {
   // Saved site ID (after first save)
   const [savedSiteId, setSavedSiteId] = useState<string | null>(siteId || null);
 
+  // Save state
+  const [saving, setSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(!isEdit);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+
   const getHeaders = (): Record<string, string> => {
     const token = localStorage.getItem('jwt_token');
     return token
@@ -119,9 +124,79 @@ const SiteBuilderEditor: React.FC = () => {
         if (s.widget_client_id) {
           setSelectedAssistantId(s.widget_client_id);
         }
+        // Just loaded — no unsaved changes
+        setTimeout(() => setHasUnsavedChanges(false), 0);
       }
     } catch (err) {
       console.error('Failed to load site:', err);
+    }
+  };
+
+  // ─── Track unsaved changes ────────────────────────────────────
+  useEffect(() => {
+    if (isEdit) setHasUnsavedChanges(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [businessName, tagline, aboutText, services, logoUrl, heroImageUrl, selectedAssistantId]);
+
+  // ─── Save / Create Site (no generation) ───────────────────────
+  const handleSave = async () => {
+    if (!businessName.trim()) {
+      Swal.fire({ icon: 'warning', title: 'Required', text: 'Please enter a business name.' });
+      return;
+    }
+
+    setSaving(true);
+    try {
+      let currentSiteId = savedSiteId;
+      if (!currentSiteId) {
+        // Create new site
+        const createRes = await fetch(`${apiBase}/v1/sites`, {
+          method: 'POST',
+          headers: getHeaders(),
+          body: JSON.stringify({
+            businessName, tagline, aboutUs: aboutText, services,
+            logoUrl, heroImageUrl,
+            widgetClientId: selectedAssistantId || undefined,
+          }),
+        });
+        const createData = await createRes.json();
+        if (!createRes.ok) throw new Error(createData.error || 'Failed to save site');
+        currentSiteId = createData.site?.id?.toString();
+        if (currentSiteId) {
+          setSavedSiteId(currentSiteId);
+          // Update URL to edit mode without full reload
+          window.history.replaceState(null, '', `/portal/sites/${currentSiteId}/edit`);
+        }
+      } else {
+        // Update existing site
+        const updateRes = await fetch(`${apiBase}/v1/sites/${currentSiteId}`, {
+          method: 'PUT',
+          headers: getHeaders(),
+          body: JSON.stringify({
+            businessName, tagline, aboutUs: aboutText, services,
+            logoUrl, heroImageUrl,
+            widgetClientId: selectedAssistantId || undefined,
+          }),
+        });
+        const updateData = await updateRes.json();
+        if (!updateRes.ok) throw new Error(updateData.error || 'Failed to update site');
+      }
+
+      setHasUnsavedChanges(false);
+      setLastSavedAt(new Date().toLocaleTimeString());
+      Swal.fire({
+        icon: 'success',
+        title: 'Saved',
+        text: 'Your changes have been saved.',
+        timer: 1500,
+        showConfirmButton: false,
+        toast: true,
+        position: 'top-end',
+      });
+    } catch (err: any) {
+      Swal.fire({ icon: 'error', title: 'Save Failed', text: err.message || 'Could not save site.' });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -194,6 +269,9 @@ const SiteBuilderEditor: React.FC = () => {
           body: JSON.stringify({ businessName, tagline, aboutUs: aboutText, services, logoUrl, heroImageUrl, widgetClientId: selectedAssistantId || undefined }),
         });
       }
+
+      setHasUnsavedChanges(false);
+      setLastSavedAt(new Date().toLocaleTimeString());
 
       // ── Step 2: Start async AI generation ──
       const res = await fetch(`${apiBase}/v1/sites/generate-ai`, {
@@ -515,27 +593,65 @@ const SiteBuilderEditor: React.FC = () => {
           )}
         </div>
 
-        {/* Generate Button */}
-        <button
-          onClick={() => handleGenerate()}
-          disabled={generating}
-          className="w-full flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold text-white bg-gradient-to-r from-violet-600 to-picton-blue hover:from-violet-700 hover:to-picton-blue/90 rounded-xl transition-all shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {generating ? (
-            <>
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              AI is generating — you'll be notified when ready…
-            </>
-          ) : (
-            <>
-              <SparklesIcon className="h-5 w-5" />
-              {generatedHtml ? 'Regenerate with AI' : 'Generate with AI'}
-            </>
-          )}
-        </button>
+        {/* Unsaved changes indicator */}
+        {hasUnsavedChanges && savedSiteId && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+            <div className="w-2 h-2 rounded-full bg-amber-400" />
+            <span className="text-xs text-amber-700 font-medium">You have unsaved changes</span>
+            {lastSavedAt && (
+              <span className="text-xs text-amber-500 ml-auto">Last saved at {lastSavedAt}</span>
+            )}
+          </div>
+        )}
+
+        {/* Save & Generate Buttons */}
+        <div className="flex flex-col sm:flex-row items-stretch gap-3">
+          <button
+            onClick={handleSave}
+            disabled={saving || generating}
+            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-all shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {saving ? (
+              <>
+                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Saving…
+              </>
+            ) : (
+              <>
+                <CheckCircleIcon className="h-5 w-5" />
+                {savedSiteId ? 'Save Changes' : 'Save Draft'}
+              </>
+            )}
+          </button>
+          <button
+            onClick={() => handleGenerate()}
+            disabled={generating || saving}
+            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold text-white bg-gradient-to-r from-violet-600 to-picton-blue hover:from-violet-700 hover:to-picton-blue/90 rounded-xl transition-all shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {generating ? (
+              <>
+                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                AI is generating…
+              </>
+            ) : (
+              <>
+                <SparklesIcon className="h-5 w-5" />
+                {generatedHtml ? 'Regenerate with AI' : 'Generate with AI'}
+              </>
+            )}
+          </button>
+        </div>
+        {!savedSiteId && (
+          <p className="text-xs text-gray-400 text-center -mt-2">
+            Save your draft first, then generate when you're ready.
+          </p>
+        )}
       </div>
 
       {/* Generated Result */}

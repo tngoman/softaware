@@ -3,10 +3,9 @@ import { AuthRequest } from './auth.js';
 import { db } from '../db/mysql.js';
 
 /**
- * Middleware to require admin role
- * 
- * Checks if the authenticated user has an admin or super_admin role
- * via the user_roles + roles tables.
+ * Middleware to require admin access.
+ *
+ * Checks the `is_admin` column on the users table directly.
  * Must be used after requireAuth middleware.
  */
 export async function requireAdmin(
@@ -25,20 +24,16 @@ export async function requireAdmin(
       return;
     }
 
-    // Check if user has admin or super_admin role via user_roles
-    const adminRole = await db.queryOne<{ slug: string }>(
-      `SELECT r.slug FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-         AND r.slug IN ('admin', 'super_admin')
-       LIMIT 1`,
+    // Check the is_admin flag directly on the users table
+    const row = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
       [userId]
     );
 
-    if (!adminRole) {
+    if (!row || !row.is_admin) {
       res.status(403).json({
         success: false,
-        error: 'Admin access required',
+        error: 'Administrator access required. You do not have permission to perform this action.',
       });
       return;
     }

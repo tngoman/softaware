@@ -11,9 +11,12 @@ import {
   CloudArrowUpIcon,
   LinkIcon,
   PencilIcon,
+  ShieldCheckIcon,
+  EyeSlashIcon,
 } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import Swal from 'sweetalert2';
+import { useAppStore } from '../../store';
 
 interface IngestSource {
   type: 'url' | 'file' | 'text';
@@ -105,9 +108,42 @@ const CreateAssistant: React.FC = () => {
   const [activeInputTab, setActiveInputTab] = useState<'url' | 'text' | 'file'>('url');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Telemetry consent state
+  const { user } = useAppStore();
+  const [showTelemetryModal, setShowTelemetryModal] = useState(false);
+  const [telemetryConsent, setTelemetryConsent] = useState<{
+    accepted: boolean;
+    optedOut: boolean;
+    assistantCount: number;
+    loaded: boolean;
+  }>({ accepted: false, optedOut: false, assistantCount: 0, loaded: false });
+  const [telemetryOptOut, setTelemetryOptOut] = useState(false);
+  const isPaidUser = !!(user?.is_admin || user?.is_staff);
+
   useEffect(() => {
     if (isEdit) loadAssistant();
   }, [assistantId]);
+
+  // Check telemetry consent on mount (only for new assistants)
+  useEffect(() => {
+    if (!isEdit) {
+      api.get('/assistants/telemetry-consent')
+        .then(res => {
+          const data = res.data;
+          setTelemetryConsent({
+            accepted: data.consent?.accepted || false,
+            optedOut: data.consent?.optedOut || false,
+            assistantCount: data.assistantCount || 0,
+            loaded: true,
+          });
+          setTelemetryOptOut(data.consent?.optedOut || false);
+        })
+        .catch(() => {
+          // If the endpoint fails, allow creation anyway
+          setTelemetryConsent({ accepted: true, optedOut: false, assistantCount: 0, loaded: true });
+        });
+    }
+  }, [isEdit]);
 
   const loadAssistant = async () => {
     try {
@@ -209,7 +245,36 @@ const CreateAssistant: React.FC = () => {
   // Incremental save on "Next" button
   const handleNext = async () => {
     if (!canProceed()) return;
-    
+
+    // If this is step 0 (first create) and user hasn't accepted telemetry terms yet, show modal
+    if (step === 0 && !isEdit && !createdAssistantId && !telemetryConsent.accepted) {
+      setShowTelemetryModal(true);
+      return;
+    }
+
+    await proceedWithSave();
+  };
+
+  // Accept telemetry terms and continue with assistant creation
+  const handleAcceptTelemetry = async () => {
+    try {
+      await api.post('/assistants/telemetry-consent', {
+        accepted: true,
+        optOut: telemetryOptOut,
+      });
+      setTelemetryConsent(prev => ({ ...prev, accepted: true, optedOut: telemetryOptOut }));
+      setShowTelemetryModal(false);
+      // Now proceed with the actual save
+      await proceedWithSave();
+    } catch (err) {
+      console.error('Failed to save telemetry consent:', err);
+      // Allow creation even if consent save fails
+      setShowTelemetryModal(false);
+      await proceedWithSave();
+    }
+  };
+
+  const proceedWithSave = async () => {
     setSaving(true);
     try {
       const currentAssistantId = assistantId || createdAssistantId;
@@ -1186,6 +1251,92 @@ const CreateAssistant: React.FC = () => {
           </button>
         )}
       </div>
+
+      {/* ── Telemetry Consent Modal ── */}
+      {showTelemetryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-slate-200 max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center gap-3 p-5 border-b border-slate-100">
+              <div className="w-10 h-10 rounded-xl bg-picton-blue/10 flex items-center justify-center">
+                <ShieldCheckIcon className="h-5 w-5 text-picton-blue" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-base font-semibold text-gray-900">Data Processing &amp; AI Telemetry</h3>
+                <p className="text-xs text-gray-400">Please review before creating your first assistant</p>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="p-5 space-y-4 overflow-y-auto flex-1">
+              <p className="text-sm text-gray-700 leading-relaxed">
+                By utilizing the Soft Aware AI assistants, you acknowledge and agree that we collect and analyze
+                interactions between your end-users and the AI. This data is logged exclusively for the purposes of
+                identifying system errors, improving routing accuracy, and enhancing the overall capability of the
+                Soft Aware platform.
+              </p>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <h4 className="text-sm font-semibold text-blue-900 mb-2">
+                  Data Anonymization &amp; Privacy (POPIA Compliance)
+                </h4>
+                <p className="text-sm text-blue-800 leading-relaxed">
+                  Prior to storage, all chat interactions are processed through an automated sanitization protocol
+                  designed to irreversibly strip Personally Identifiable Information (PII), including but not limited
+                  to names, email addresses, phone numbers, and identification numbers. We do not sell, share, or
+                  monetize this telemetry data with third parties. Your proprietary operational data remains secure
+                  and isolated.
+                </p>
+              </div>
+
+              {/* Opt-out toggle — only for paid tier users */}
+              {isPaidUser && (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <div className="relative flex items-center mt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={telemetryOptOut}
+                        onChange={(e) => setTelemetryOptOut(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-gray-300 peer-checked:bg-amber-500 rounded-full transition-colors" />
+                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <EyeSlashIcon className="h-4 w-4 text-gray-500" />
+                        <span className="text-sm font-medium text-gray-900">Opt out of data logging</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        As a paid-tier user, you may opt out of having anonymized chat data logged.
+                        This will not affect your assistant's functionality.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between p-5 border-t border-slate-100">
+              <button
+                onClick={() => setShowTelemetryModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAcceptTelemetry}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all"
+              >
+                <ShieldCheckIcon className="h-4 w-4" />
+                I Accept — Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

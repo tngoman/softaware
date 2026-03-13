@@ -1,577 +1,867 @@
 # Tasks Module — API Routes
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-03-03
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-10
 
 ---
 
 ## 1. Overview
 
-| Metric | Value |
-|--------|-------|
-| **Total endpoints** | 9 |
-| **Base URL** | `https://api.softaware.net.za` |
-| **Router mount** | `/api/softaware/tasks` |
-| **Default auth** | `requireAuth` (JWT) on all endpoints |
-| **External auth** | `X-Software-Token` header forwarded as `Authorization: Bearer` to external API |
+| Router | Mount Point | File | Endpoints | Purpose |
+|--------|-------------|------|-----------|---------|
+| Proxy | `/api/softaware/tasks` | `softawareTasks.ts` | 33 | Write path — proxy to external APIs |
+| Local | `/api/local-tasks` | `localTasks.ts` | 30 | Read path — local DB CRUD, sync, enhancements, sync toggle |
+| AI Assistant | Tool dispatch | `mobileActionExecutor.ts` | 22 | AI voice/text — full task lifecycle via tool handlers |
 
-**Important:** All task endpoints are **proxies**. The backend does not store tasks in its own database — it forwards requests to external software product APIs. The `apiUrl` parameter tells the backend which external API to proxy to.
+**Base URL:** `https://mcp.softaware.net.za`
 
----
+**Authentication:** Both routers use Firebase JWT in the `Authorization: Bearer <token>` header. The `requireAuth` middleware is technically a no-op (pass-through) on both routers — source-level API keys handle external auth.
 
-## 2. Endpoint Directory
-
-| # | Method | Path | Auth | Purpose |
-|---|--------|------|------|---------|
-| 1 | GET | /api/softaware/tasks | JWT + SW Token | List tasks from external API |
-| 2 | POST | /api/softaware/tasks | JWT + SW Token | Create task on external API |
-| 3 | PUT | /api/softaware/tasks | JWT + SW Token | Update task on external API |
-| 4 | DELETE | /api/softaware/tasks/:id | JWT + SW Token | Delete task on external API |
-| 5 | POST | /api/softaware/tasks/reorder | JWT + SW Token | Reorder tasks on external API |
-| 6 | GET | /api/softaware/tasks/:id/comments | JWT + SW Token | List comments from external API |
-| 7 | POST | /api/softaware/tasks/:id/comments/with-attachment | JWT + SW Token | Create comment + upload drawing attachment |
-| 8 | POST | /api/softaware/tasks/:id/comments | JWT + SW Token | Post comment to external API |
-| 9 | POST | /api/softaware/tasks/authenticate | JWT | Authenticate against external software API |
+**Response Format:**
+- **Local router:** `{ status: 1|0, message: string, data?: ... }`
+- **Proxy router:** Passes through the external API's response shape, or `{ success: false, error: string }` on error.
 
 ---
 
-## 3. Common Parameters
+## 2. Proxy Router — `/api/softaware/tasks`
 
-### 3.1 Authentication Headers
+All endpoints resolve the external API source via `resolveTaskSource(req)`, which looks up `task_sources` by `software_id` (from query/body) or `apiUrl` (from query). Returns `{ baseUrl, apiKey }` used by `proxyToExternal()`.
 
-Every request requires **two** authentication mechanisms:
+### 2.1 Task CRUD
 
-| Header | Source | Purpose |
-|--------|--------|---------|
-| `Authorization: Bearer {jwt}` | `localStorage.jwt_token` (added by Axios interceptor) | Internal platform authentication |
-| `X-Software-Token: {token}` | `localStorage.software_token_{softwareId}` (added by `softwareAuthHeaders()`) | External software API authentication |
+#### `GET /` — List tasks
 
-### 3.2 apiUrl Parameter
+Proxy to external `GET {baseUrl}/api/tasks-api?page=&limit=`.
 
-All proxy endpoints require `apiUrl` — the base URL of the external software API to proxy to.
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `limit` | number | 1000 | Page size |
+| `software_id` | number | — | Used to resolve the source |
+| `apiUrl` | string | — | Alternative source resolution |
 
-| Delivery | Used By |
-|----------|---------|
-| Query param `?apiUrl={url}` | GET and DELETE requests |
-| Body field `{ apiUrl: "..." }` | POST and PUT requests |
+**Response:** External API response (passed through).
 
-The `apiUrl` is derived from the selected software's configuration:
-- If `external_mode === 'live'` → `external_live_url`
-- Otherwise → `external_test_url`
+---
 
-### 3.3 Error Response Format
+#### `POST /` — Create task
 
-All endpoints return errors in this format:
+Proxy to external `POST {baseUrl}/api/tasks-api`.
 
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `task` | object | ✅ | Task object to create |
+
+---
+
+#### `PUT /` — Update task
+
+Proxy to external `PUT {baseUrl}/api/tasks-api/{taskId}`.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `task` | object | ✅ | Task object (must include `task_id` or `id`) |
+
+**Side Effects:** Fires async notifications for assignment changes and workflow phase changes.
+
+---
+
+#### `DELETE /:id` — Delete task
+
+Proxy to external `DELETE {baseUrl}/api/tasks-api/{id}`.
+
+---
+
+#### `GET /:id` — Get single task
+
+Proxy to external `GET {baseUrl}/api/tasks-api/{id}`.
+
+> **⚠️ Route Order:** This route is registered **last** in the file as a wildcard catch-all.
+
+---
+
+### 2.2 Reorder
+
+#### `POST /reorder` — Reorder tasks
+
+Proxy to external `POST {baseUrl}/api/tasks-api/reorder`.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `orders` | array | ✅ | Array of `{ id, order }` pairs |
+
+---
+
+### 2.3 Associations
+
+#### `GET /:id/associations` — List associations
+
+Proxy to external `GET {baseUrl}/api/tasks-api/{id}/associated`.
+
+---
+
+#### `POST /:id/associations` — Create association
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/associate`.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `parent_task_id` | number | ✅ | Parent task ID |
+| `association_type` | string | ✅ | Association type |
+| `notes` | string | — | Association notes |
+
+---
+
+#### `DELETE /:id/associations` — Remove association
+
+Proxy to external `DELETE {baseUrl}/api/tasks-api/{id}/associate`.
+
+---
+
+#### `GET /:id/parent` — Get parent task
+
+Proxy to external `GET {baseUrl}/api/tasks-api/{id}/parent`.
+
+---
+
+### 2.4 Attachments
+
+#### `GET /:id/attachments` — List attachments
+
+Proxy to external `GET {baseUrl}/api/tasks-api/{id}/attachments`.
+
+**Response includes `download_url`** for each attachment — a public static path (`/uploads/development/{file}`) that requires no authentication. Frontend `buildFileUrl()` / `buildAttachmentUrl()` prefer this field for `<img src>` and `<a href>` rendering.
+
+---
+
+#### `POST /:id/attachments` — Upload attachments
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/attachments`.
+
+Converts base64-encoded files to `multipart/form-data` using native Node 18+ `FormData` and `Blob`.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `files` | array | ✅ | `[{ base64, fileName, mimeType }]` |
+| `comment_id` | number | — | Link attachment to a comment |
+
+**Response:** `{ success: true, attachments: [...results] }`
+
+---
+
+#### `DELETE /:id/attachments/:attachmentId` — Delete attachment
+
+Two-step: fetches attachment list to find `file_path` by ID, then calls external `DELETE {baseUrl}/api/tasks-api/attachments/{filePath}`.
+
+---
+
+#### `GET /attachments/:filename` — Stream attachment file
+
+**Binary streaming endpoint.** Fetches the file from the external API and pipes it directly to the response with correct `Content-Type` and `Content-Disposition` headers.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `download` | `"1"` | — | Force download disposition |
+
+**Response:** Binary file content (not JSON).
+
+---
+
+### 2.5 Comments
+
+#### `GET /:id/comments` — List comments
+
+Proxy to external `GET {baseUrl}/api/tasks-api/{id}/comments`.
+
+---
+
+#### `POST /:id/comments` — Create comment
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/comments`.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `comment` | object | — | Legacy shape (full comment object) |
+| `content` | string | — | Comment HTML content |
+| `is_internal` | number | — | `0` = public, `1` = internal (default: 0) |
+| `time_spent` | number | — | Hours spent (default: 0) |
+| `parent_comment_id` | number | — | Parent for threading |
+
+Supports both `{ comment: {...} }` and flat `{ content, is_internal, ... }` shapes.
+
+---
+
+#### `POST /:id/comments/with-attachment` — Create comment with drawing
+
+Two-step operation: creates comment, then uploads base64 image as attachment linked to the new comment.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `content` | string | — | Comment HTML content |
+| `is_internal` | number | — | Default: 1 |
+| `imageBase64` | string | ✅ | Base64-encoded image (data URL) |
+| `fileName` | string | — | Default: `"drawing.png"` |
+
+**Response:** `{ success: true, comment, comment_id, attachment }`
+
+> **⚠️ Route Order:** Registered **before** `/:id/comments` to avoid being shadowed.
+
+---
+
+#### `DELETE /comments/:commentId` — Delete comment
+
+Proxy to external `DELETE {baseUrl}/api/tasks-api/comments/{commentId}`.
+
+---
+
+#### `POST /comments/:commentId/convert-to-task` — Convert comment to task
+
+Proxy to external `POST {baseUrl}/api/tasks-api/comments/{commentId}/convert-to-task`.
+
+---
+
+### 2.6 Workflow
+
+#### `POST /:id/start` — Start task
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/start`.
+
+---
+
+#### `POST /:id/complete` — Complete task
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/complete`.
+
+---
+
+#### `POST /:id/approve` — Approve task
+
+Proxy to external `POST {baseUrl}/api/tasks-api/{id}/approve`.
+
+| Body | Type | Required | Description |
+|------|------|----------|-------------|
+| *(any)* | object | — | Passed through to external API |
+
+---
+
+#### `GET /pending-approval` — List pending approvals
+
+Proxy to external `GET {baseUrl}/api/tasks-api/pending-approval`.
+
+> **⚠️ Route Order:** Registered **before** `/:id` wildcard.
+
+---
+
+### 2.7 Statistics & Billing
+
+#### `GET /stats` — Task statistics
+
+Proxy to external `GET {baseUrl}/api/tasks-api/stats`.
+
+---
+
+#### `POST /sync` — Sync tasks (external API)
+
+Proxy to external `POST {baseUrl}/api/tasks-api/sync`.
+
+---
+
+#### `POST /invoice-tasks` — Invoice tasks
+
+Proxy to external `POST {baseUrl}/api/tasks-api/invoice-tasks`.
+
+---
+
+#### `POST /bill` — Bill tasks
+
+Proxy to external `POST {baseUrl}/api/tasks-api/bill`.
+
+---
+
+#### `PUT /time` — Update time
+
+Proxy to external `PUT {baseUrl}/api/tasks-api/time`.
+
+---
+
+#### `GET /statement` — Get statement
+
+Proxy to external `GET {baseUrl}/api/tasks-api/statement`.
+
+---
+
+### 2.8 Orders
+
+#### `GET /orders/latest` — Latest orders
+
+Proxy to external `GET {baseUrl}/api/tasks-api/orders/latest`.
+
+---
+
+#### `GET /orders/budgets` — All budgets
+
+Proxy to external `GET {baseUrl}/api/tasks-api/orders/budgets`.
+
+---
+
+#### `GET /orders/:orderNumber/budget` — Budget for order
+
+Proxy to external `GET {baseUrl}/api/tasks-api/orders/{orderNumber}/budget`.
+
+---
+
+### 2.9 Legacy
+
+#### `POST /authenticate` — Authentication stub
+
+No-op endpoint for backward compatibility. Always returns success.
+
+**Response:**
 ```json
 {
-  "success": false,
-  "error": "Error message here"
+  "success": true,
+  "message": "No external authentication required. Source API key is used automatically.",
+  "token": null,
+  "user": null
 }
 ```
 
-| Status | Error | When |
-|--------|-------|------|
-| 400 | `apiUrl is required` | Missing `apiUrl` parameter |
-| 401 | `Missing Authorization header` | No JWT Bearer token |
-| 401 | `Invalid token` | JWT expired or malformed |
-| 400 | Various | External API returned an error (proxied through) |
+---
+
+## 3. Local Router — `/api/local-tasks`
+
+All endpoints query the local MySQL database directly. No external API calls (except sync and invoice processing).
+
+### 3.1 Source Management
+
+#### `GET /sources` — List all sources
+
+Returns all registered task sources with task counts. API keys are masked (`••••••••`).
+
+**Response:**
+```json
+{
+  "status": 1,
+  "message": "Success",
+  "data": {
+    "sources": [
+      {
+        "id": 1,
+        "name": "Softaware Tasks",
+        "source_type": "tasks-api",
+        "base_url": "https://tasks.example.com",
+        "api_key": "••••••••",
+        "task_count": 150,
+        "active_task_count": 142,
+        "dirty_task_count": 3,
+        ...
+      }
+    ]
+  }
+}
+```
 
 ---
 
-## 4. Endpoints — Task CRUD
+#### `POST /sources` — Register source
 
-### 4.1 GET /api/softaware/tasks
+| Body Field | Type | Required | Default | Description |
+|------------|------|----------|---------|-------------|
+| `name` | string | ✅ | — | Unique source name |
+| `base_url` | string | ✅ | — | External API base URL |
+| `source_type` | string | — | `tasks-api` | `tasks-api` \| `software-proxy` \| `github` \| `jira` \| `manual` |
+| `api_key` | string | — | null | API key for auth |
+| `auth_method` | string | — | `api-key` | `api-key` \| `bearer` \| `software-token` \| `none` |
+| `auth_header` | string | — | `X-API-Key` | Header name |
+| `software_id` | number | — | null | FK to software |
+| `sync_enabled` | boolean | — | true | Enable auto-sync |
+| `sync_interval_min` | number | — | 15 | Sync interval (minutes) |
+| `extra_config` | object | — | null | Source-specific config |
 
-**Purpose:** List tasks from the external software API with pagination.
+**Response:** `201 Created` with source object. `409 Conflict` if name exists.
 
-**Query Params:**
+---
 
-| Param | Type | Default | Description |
-|-------|------|---------|-------------|
-| apiUrl | string | — (required) | External API base URL |
-| page | number | 1 | Page number |
-| limit | number | 1000 | Items per page |
+#### `PUT /sources/:id` — Update source
 
-**curl Example:**
+Same fields as POST (all optional). Only provided fields are updated.
 
-```bash
-curl "https://api.softaware.net.za/api/softaware/tasks?apiUrl=https://external.example.com&page=1&limit=1000" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}"
-```
+---
 
-**Proxied To:** `GET {apiUrl}/api/tasks?page={page}&limit={limit}`
+#### `DELETE /sources/:id` — Delete source
 
-**Success Response (200):** Passthrough from external API. Typical shape:
+Deletes source and **cascades** to all its tasks and sync log entries.
 
+---
+
+#### `POST /sources/:id/test` — Test source connectivity
+
+Attempts to fetch one task from the source to verify connectivity. Returns HTTP status, latency, and response preview.
+
+**Response:**
 ```json
 {
+  "status": 1,
+  "message": "Connection successful",
   "data": {
-    "data": [
-      {
-        "id": 42,
-        "title": "Implement login flow",
-        "description": "<p>HTML description</p>",
-        "status": "progress",
-        "type": "development",
-        "hours": "2.50",
-        "workflow_phase": "development",
-        "created_by_name": "John Doe",
-        "assigned_to_name": "Jane Smith",
-        "module_name": "Authentication",
-        "approval_required": 0,
-        "created_at": "2026-03-01T10:00:00.000Z"
-      }
-    ],
+    "http_status": 200,
+    "latency_ms": 142,
+    "response_preview": "{ \"status\": 1, ... }"
+  }
+}
+```
+
+---
+
+### 3.2 Sync Operations
+
+#### `GET /sync/enabled` — Check sync status
+
+Returns global sync state and per-source sync flags.
+
+**Response:**
+```json
+{
+  "status": 1,
+  "data": {
+    "enabled": true,
+    "all_enabled": true,
+    "sources": [{ "id": 1, "name": "...", "sync_enabled": 1 }]
+  }
+}
+```
+
+---
+
+#### `POST /sync` — Sync all enabled sources
+
+Calls `syncAllSources()` from `taskSyncService.ts`. Returns per-source results.
+
+---
+
+#### `POST /sync/:sourceId` — Sync specific source
+
+Calls `syncSource(sourceId)`. Returns detailed sync results (created, updated, unchanged, errors).
+
+---
+
+#### `POST /sync/disable` — Disable all sync + open case
+
+Disables sync on all sources and creates a support case documenting why.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `reason` | string | ✅ | Why sync is being disabled |
+| `reason_detail` | string | — | Additional details |
+| `software_name` | string | — | Software context |
+| `user_id` | string | — | User who disabled |
+| `user_name` | string | — | User display name |
+
+**Response:**
+```json
+{
+  "status": 1,
+  "message": "Sync disabled. Case CASE-12345678 opened.",
+  "data": { "sources_disabled": 2, "case_number": "CASE-12345678", "case_id": "abc..." }
+}
+```
+
+---
+
+#### `POST /sync/enable` — Re-enable all sync
+
+Re-enables sync on all sources.
+
+---
+
+#### `GET /sync/status` — Sync status per source
+
+Returns sync metadata (last_synced_at, status, message, count) for each source.
+
+---
+
+#### `GET /sync/log` — Sync history
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `limit` | number | 50 | Max entries (capped at 200) |
+| `source_id` | number | — | Filter by source |
+
+---
+
+### 3.3 Tasks CRUD
+
+#### `GET /` — List tasks (paginated, filterable)
+
+Main read endpoint for the frontend. Joins `local_tasks` with `task_sources`.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `limit` | number | 50 | Page size (max 200) |
+| `status` | string | `all` | Filter: `new`, `in-progress`, `completed`, `pending` |
+| `type` | string | `all` | Filter: `development`, `bug-fix`, `feature`, etc. |
+| `source_id` | number | — | Filter by source |
+| `software_id` | number | — | Filter by software product |
+| `search` | string | — | Search title, description, external_id |
+| `date_from` | string | — | Start date filter (ISO date) |
+| `date_to` | string | — | End date filter (ISO date) |
+| `exclude_billed` | `"1"` | — | Exclude billed tasks |
+| `workflow_phase` | string | `all` | Filter by workflow phase |
+| `priority` | string | `all` | Filter: `urgent`, `high`, `normal`, `low` |
+| `bookmarked` | `"1"` | — | Only bookmarked tasks |
+| `color_label` | string | — | Filter by colour label |
+| `tag` | string | — | Filter by tag (JSON_CONTAINS) |
+
+**Response:**
+```json
+{
+  "status": 1,
+  "message": "Success",
+  "data": {
+    "tasks": [...],
     "pagination": {
-      "has_next": false,
       "current_page": 1,
-      "total": 15
+      "per_page": 50,
+      "total": 142,
+      "total_pages": 3,
+      "has_next": true,
+      "has_prev": false
     }
   }
 }
 ```
 
-**Frontend Notes:**
-- The `useTasks` hook unwraps `body.data.data || body.data || body` to handle varying response shapes
-- Status `"progress"` is normalized to `"in-progress"` on the frontend
-- Pagination is auto-followed until `has_next === false` (safety limit: 50 pages)
+**Sort Order:** `task_order ASC, external_id DESC`
 
 ---
 
-### 4.2 POST /api/softaware/tasks
+#### `GET /:id` — Get single task
 
-**Purpose:** Create a new task on the external software API.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| task | object | ✅ | Task data object (see below) |
-
-**Task Object Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| task_name | string | Task title (required) |
-| task_description | string | HTML description |
-| task_notes | string | Additional notes |
-| task_status | string | `new`, `progress`, or `completed` |
-| task_type | string | `development`, `bug-fix`, `feature`, `maintenance`, `support` |
-| task_hours | string | Actual hours (decimal string, e.g., `"2.50"`) |
-| task_estimated_hours | string | Estimated hours (decimal string) |
-| task_color | string | Hex color (default `#667eea`) |
-| software_id | string | ID of the software product |
-| module_id | number | Module ID (optional) |
-| assigned_to | number | Assigned user ID (optional) |
-| task_created_by_name | string | Creator's display name |
-| user_name | string | Current user's name |
-| task_approval_required | number | `1` if estimated hours > 8, else `0` |
-
-**curl Example:**
-
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "task": {
-      "task_name": "Fix login bug",
-      "task_description": "Users cannot log in with SSO",
-      "task_status": "new",
-      "task_type": "bug-fix",
-      "task_hours": "0.00",
-      "task_estimated_hours": "4.00",
-      "task_color": "#667eea",
-      "task_created_by_name": "John Doe",
-      "user_name": "John Doe",
-      "task_approval_required": 0
-    }
-  }'
-```
-
-**Proxied To:** `POST {apiUrl}/api/tasks` with the `task` object as body.
-
-**Success Response (200):** Passthrough from external API.
+Returns task with joined source name and type.
 
 ---
 
-### 4.3 PUT /api/softaware/tasks
+#### `PUT /:id` — Update task
 
-**Purpose:** Update an existing task on the external software API.
+Updates any combination of allowed fields. **Automatically sets `local_dirty = 1`** so the next sync pushes changes back to the external source.
 
-**Request Body:** Same structure as POST, with additional fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| task.task_id | number | ID of the task to update (required for edit) |
-| task.workflow_phase | string | Current workflow phase (preserved from original) |
-
-**curl Example:**
-
-```bash
-curl -X PUT "https://api.softaware.net.za/api/softaware/tasks" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "task": {
-      "task_id": 42,
-      "task_name": "Fix login bug (updated)",
-      "task_status": "progress",
-      "task_type": "bug-fix",
-      "task_hours": "2.50",
-      "task_estimated_hours": "4.00",
-      "user_name": "John Doe"
-    }
-  }'
-```
-
-**Proxied To:** `PUT {apiUrl}/api/tasks` with the `task` object as body.
-
-**Success Response (200):** Passthrough from external API.
-
----
-
-### 4.4 DELETE /api/softaware/tasks/:id
-
-**Purpose:** Delete a task from the external software API.
-
-**Path Params:** `:id` — the external task ID
-
-**Query Params:**
-
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-
-**curl Example:**
-
-```bash
-curl -X DELETE "https://api.softaware.net.za/api/softaware/tasks/42?apiUrl=https://external.example.com" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}"
-```
-
-**Proxied To:** `DELETE {apiUrl}/api/tasks/{id}`
-
-**Success Response (200):** Passthrough from external API.
+| Body Field | Type | Description |
+|------------|------|-------------|
+| `title` | string | Task title |
+| `description` | string | HTML description |
+| `notes` | string | Additional notes |
+| `status` | string | Task status |
+| `type` | string | Task type |
+| `color` | string | Colour hex |
+| `start_date` | string | Start date |
+| `end_date` | string | Due date |
+| `actual_start` | string | Actual start |
+| `actual_end` | string | Actual end |
+| `hours` | string | Hours worked |
+| `estimated_hours` | number | Estimated hours |
+| `assigned_to` | number | Assigned user ID |
+| `assigned_to_name` | string | Assigned user name |
+| `workflow_phase` | string | Workflow phase |
+| `approval_required` | number | 0 or 1 |
+| `parent_task_id` | number | Parent task |
+| `task_order` | number | Display order |
+| `order_number` | string | Order reference |
+| `software_id` | number | Software ID |
+| `module_id` | number | Module ID |
+| `module_name` | string | Module name |
+| `task_billed` | number | Billing status |
+| `task_bill_date` | string | Bill date |
+| `priority` | string | Local priority |
+| `is_bookmarked` | number | Bookmark flag |
+| `color_label` | string | Colour label |
+| `local_tags` | string[] | Tag array |
+| `kanban_order` | number | Kanban sort |
+| `view_count` | number | View count |
+| `last_viewed_at` | string | Last viewed |
 
 ---
 
-### 4.5 POST /api/softaware/tasks/reorder
+#### `DELETE /:id` — Soft-delete task
 
-**Purpose:** Update the display order of tasks on the external API.
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| orders | object | ✅ | Map of `{ taskId: newPosition }` |
-
-**curl Example:**
-
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks/reorder" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "orders": { "42": 1, "43": 2 }
-  }'
-```
-
-**Proxied To:** `POST {apiUrl}/api/tasks/reorder` with `{ orders }` body.
-
-**Success Response (200):** Passthrough from external API.
+Sets `task_deleted = 1` and `local_dirty = 1`. Does **not** hard-delete.
 
 ---
 
-## 5. Endpoints — Comments
+### 3.4 Bulk Operations
 
-### 5.1 GET /api/softaware/tasks/:id/comments
+#### `PATCH /bulk` — Batch update
 
-**Purpose:** List all comments for a task from the external API.
+For kanban reorder, bulk priority changes, etc.
 
-**Path Params:** `:id` — the external task ID
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `updates` | array | ✅ | `[{ id, ...fields }]` |
 
-**Query Params:**
+**Allowed fields:** `priority`, `is_bookmarked`, `color_label`, `kanban_order`, `status`
 
-| Param | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
+---
 
-**curl Example:**
+### 3.5 Tags
 
-```bash
-curl "https://api.softaware.net.za/api/softaware/tasks/42/comments?apiUrl=https://external.example.com" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}"
-```
+#### `GET /tags` — List all unique tags
 
-**Proxied To:** `GET {apiUrl}/api/tasks/{id}/comments`
+Extracts distinct tags from `local_tags` JSON column across all tasks using `JSON_TABLE`.
 
-**Success Response (200):** Passthrough from external API. Typical shape:
-
+**Response:**
 ```json
 {
-  "data": [
-    {
-      "comment_id": 101,
-      "content": "<p>Comment text with possible HTML</p>",
-      "user_name": "John Doe",
-      "is_internal": 0,
-      "time_spent": "1.50",
-      "created_at": "2026-03-02T14:30:00.000Z",
-      "attachments": [
-        {
-          "attachment_id": 5,
-          "file_name": "drawing-2026-03-02T14-30-00.png",
-          "file_path": "https://external.example.com/storage/attachments/5.png"
-        }
-      ]
-    }
-  ]
+  "status": 1,
+  "message": "Success",
+  "data": { "tags": ["frontend", "urgent-fix", "backend", "design"] }
 }
 ```
 
-**Frontend Notes:**
-- Comments are unwrapped via `res.data?.data || res.data?.comments || []`
-- Internal comments show an amber "Internal" badge
-- Images in comment HTML content are clickable (open in lightbox)
+> **⚠️ Route Order:** Registered **before** `/:id` routes.
 
 ---
 
-### 5.2 POST /api/softaware/tasks/:id/comments/with-attachment
+### 3.6 Local Enhancement Endpoints
 
-**Purpose:** Create an internal comment with an image attachment. Used by the Excalidraw drawing feature. This is a **two-step operation** — the backend creates the comment, extracts the `comment_id`, then uploads the image as an attachment linked to that comment.
+These endpoints update **local-only** fields that are never synced upstream.
 
-**Path Params:** `:id` — the external task ID
+#### `PATCH /:id/bookmark` — Toggle bookmark
 
-**Request Body:**
+Toggles `is_bookmarked` between 0 and 1.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| content | string | ❌ | HTML content for the comment (default: empty) |
-| is_internal | number | ❌ | `1` for internal, `0` for public (default: `1`) |
-| imageBase64 | string | ✅ | Base64 data URL of the image (`data:image/png;base64,...`) |
-| fileName | string | ❌ | File name for the attachment (default: `drawing.png`) |
-
-**curl Example:**
-
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks/42/comments/with-attachment" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "content": "<p><strong>📐 Drawing:</strong> sketch.png</p><img src=\"data:image/png;base64,...\" />",
-    "is_internal": 1,
-    "imageBase64": "data:image/png;base64,iVBORw0KGgo...",
-    "fileName": "drawing-2026-03-03T10-00-00.png"
-  }'
-```
-
-**Backend Steps:**
-
-1. **Create comment** via `POST {apiUrl}/api/tasks/{id}/comments`:
-   ```json
-   { "content": "...", "is_internal": 1, "time_spent": 0, "parent_comment_id": null }
-   ```
-
-2. **Extract comment_id** from response (tries multiple paths):
-   - `data.comment_id`
-   - `data.data.comment_id`
-   - `data.data.id`
-   - `data.id`
-
-3. **Convert base64 to binary:**
-   - Strip `data:image/png;base64,` prefix
-   - `Buffer.from(base64Data, 'base64')`
-
-4. **Upload as multipart/form-data** via `POST {apiUrl}/api/attachments/development/{id}`:
-   - `file` — PNG blob
-   - `comment_id` — string ID from step 2
-
-**Success Response (200):**
-
-```json
-{
-  "success": true,
-  "comment": { "comment_id": 101, "content": "..." },
-  "comment_id": 101,
-  "attachment": { "attachment_id": 5, "file_name": "drawing-2026-03-03T10-00-00.png" }
-}
-```
-
-**Fallback Response (when comment_id not extractable):**
-
-```json
-{
-  "comment_id": null,
-  "attachment_skipped": true,
-  "message": "Comment created but attachment could not be linked (no comment_id returned)"
-}
-```
-
-**Error Responses:**
-
-| Status | Error | When |
-|--------|-------|------|
-| 400 | `imageBase64 is required` | Missing image data |
-| 400 | `apiUrl is required` | Missing API URL |
-| 400 | Various | External API error (proxied) |
+**Response:** `{ status: 1, message: "Bookmarked"|"Unbookmarked", data: { is_bookmarked: 0|1 } }`
 
 ---
 
-### 5.3 POST /api/softaware/tasks/:id/comments
+#### `PATCH /:id/priority` — Set priority
 
-**Purpose:** Post a text comment to a task on the external API. Supports two request body shapes.
-
-**Path Params:** `:id` — the external task ID
-
-**Request Body (Shape A — explicit fields):**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| content | string | ✅ | Comment text/HTML |
-| is_internal | number | ❌ | `1` for internal, `0` for public (default: `0`) |
-| time_spent | number | ❌ | Hours spent (default: `0`) |
-| parent_comment_id | number | ❌ | Parent comment for threading (default: `null`) |
-
-**Request Body (Shape B — wrapped comment):**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| comment | object | ✅ | Pre-built comment object passed through as-is |
-
-**curl Example:**
-
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks/42/comments" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "X-Software-Token: {software_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "content": "Looks good, merging now.",
-    "is_internal": 0
-  }'
-```
-
-**Proxied To:** `POST {apiUrl}/api/tasks/{id}/comments` with the comment body.
-
-**Success Response (200):** Passthrough from external API.
+| Body Field | Type | Required | Values |
+|------------|------|----------|--------|
+| `priority` | string | ✅ | `urgent`, `high`, `normal`, `low` |
 
 ---
 
-## 6. Endpoints — Authentication
+#### `PATCH /:id/color-label` — Set colour label
 
-### 6.1 POST /api/softaware/tasks/authenticate
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `color_label` | string\|null | ✅ | Colour name or `null` to clear |
 
-**Purpose:** Authenticate against an external software product's API. Supports password-based login with optional OTP verification.
+---
 
-**Request Body:**
+#### `PATCH /:id/tags` — Set tags
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| apiUrl | string | ✅ | External API base URL |
-| username | string | ✅ | External API username (email) |
-| password | string | ✅ | External API password |
-| otp | string | ❌ | 6-digit OTP code (for second step) |
-| otpToken | string | ❌ | OTP session token (returned from first step) |
+Full replacement — existing tags are overwritten.
 
-**curl Example — Initial Login:**
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `tags` | string[] | ✅ | Array of tag strings (empty array clears) |
 
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks/authenticate" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "username": "admin@example.com",
-    "password": "secretpassword"
-  }'
-```
+---
 
-**Proxied To:** `POST {apiUrl}/api/auth_login` with:
-```json
-{ "email": "{username}", "password": "{password}", "remember_me": false }
-```
+#### `PATCH /:id/view` — Record view
 
-**Success Response — Token Issued (200):**
+Increments `view_count` and sets `last_viewed_at = NOW()`. No request body.
 
+---
+
+### 3.7 Invoice Staging
+
+Three-stage workflow: **unbilled** (`task_billed = 0`) → **staged** (`task_billed = 2`) → **invoiced** (`task_billed = 1`).
+
+#### `POST /invoice/stage` — Stage tasks
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `task_ids` | string[] | ✅ | Array of `external_id` values |
+| `bill_date` | string | — | ISO date (default: today) |
+
+Only stages tasks with `task_billed = 0`.
+
+---
+
+#### `GET /invoice/staged` — List staged tasks
+
+Returns all tasks with `task_billed = 2`.
+
+**Response:**
 ```json
 {
-  "success": true,
-  "token": "eyJhbGciOiJIUzI1NiIs..."
+  "status": 1,
+  "data": { "tasks": [...], "count": 5 }
 }
-```
-
-**Success Response — OTP Required (200):**
-
-```json
-{
-  "requires_otp": true,
-  "otp_token": "temp-session-token-abc",
-  "user_id": 5
-}
-```
-
-**curl Example — OTP Verification:**
-
-```bash
-curl -X POST "https://api.softaware.net.za/api/softaware/tasks/authenticate" \
-  -H "Authorization: Bearer {jwt_token}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiUrl": "https://external.example.com",
-    "username": "admin@example.com",
-    "password": "secretpassword",
-    "otp": "123456",
-    "otpToken": "temp-session-token-abc"
-  }'
-```
-
-**Frontend Auth Flow:**
-
-```
-1. handleAuthenticate(false) → POST without OTP
-   ├── Token received → setSoftwareToken(id, token) → authVersion++ → loadTasks
-   ├── OTP required → setAuthStatus('otp') → show OTP input panel
-   └── Error → setAuthStatus('error') → show error message
-
-2. handleAuthenticate(true) → POST with OTP + otpToken
-   ├── Token received → same as above
-   └── Error → same as above
 ```
 
 ---
 
-## 7. Route Registration Order
+#### `POST /invoice/clear` — Clear all staging
 
-**Important:** Express evaluates routes in registration order. The `/:id/comments/with-attachment` route is registered **before** the generic `/:id/comments` route to prevent the parameterized `:id` from consuming `with-attachment` as a comment ID.
+Resets all staged tasks back to unbilled (`task_billed = 0`).
+
+---
+
+#### `POST /invoice/unstage/:id` — Unstage single task
+
+Resets a specific task from staged (`2`) to unbilled (`0`).
+
+---
+
+#### `POST /invoice/process` — Process staged invoices
+
+Syncs all staged tasks to the external portal, then marks them as fully invoiced.
+
+| Body Field | Type | Required | Description |
+|------------|------|----------|-------------|
+| `apiUrl` | string | ✅ | External API URL (used to resolve source + API key) |
+
+**Workflow:**
+1. Get all staged tasks (`task_billed = 2`)
+2. Resolve task source from `apiUrl`
+3. Call external `POST {baseUrl}/api/tasks-api/invoice-tasks` with external IDs
+4. Update local tasks to `task_billed = 1`
+
+**Response:**
+```json
+{
+  "status": 1,
+  "message": "5 task(s) invoiced and synced to portal",
+  "data": { "processed": 5, "bill_date": "2026-03-10" }
+}
+```
+
+---
+
+## 4. Error Handling
+
+### Proxy Router Errors
+
+```json
+{
+  "success": false,
+  "error": "Could not resolve task source..."
+}
+```
+
+HTTP status: `400` for resolution failures, otherwise passes through external API status.
+
+### Local Router Errors
+
+```json
+{
+  "status": 0,
+  "message": "Error description"
+}
+```
+
+HTTP status: `400` for validation, `404` for not found, `409` for duplicates, `500` for server errors.
+
+---
+
+## 5. curl Examples
+
+### List local tasks with filters
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://mcp.softaware.net.za/api/local-tasks?status=new&priority=high&page=1&limit=20"
+```
+
+### Create task via proxy
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"task": {"task_name": "Fix login bug", "task_type": "bug-fix"}, "software_id": 5}' \
+  "https://mcp.softaware.net.za/api/softaware/tasks"
+```
+
+### Toggle bookmark
+
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  "https://mcp.softaware.net.za/api/local-tasks/42/bookmark"
+```
+
+### Sync all sources
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "https://mcp.softaware.net.za/api/local-tasks/sync"
+```
+
+### Stage tasks for invoicing
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"task_ids": ["101", "102", "103"], "bill_date": "2026-03-10"}' \
+  "https://mcp.softaware.net.za/api/local-tasks/invoice/stage"
+```
+
+### Stream attachment
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  -o screenshot.png \
+  "https://mcp.softaware.net.za/api/softaware/tasks/attachments/screenshot.png?software_id=5"
+```
+
+---
+
+## 6. AI Assistant Tool Dispatch (v2.2.0)
+
+The Staff AI Assistant provides an alternative interface to the same task APIs. Instead of HTTP routes, the assistant dispatches operations via tool handler functions in `mobileActionExecutor.ts`.
+
+### Entry Point
+
+The assistant framework calls `exec_task_*` functions directly with structured parameters. There are no HTTP endpoints — these are internal function dispatches.
+
+### Write-Path Tools (16)
+
+| Tool Function | Proxied Method | External Endpoint | HTTP Route Equivalent |
+|---------------|----------------|-------------------|-----------------------|
+| `exec_task_create` | POST | `/api/tasks-api` | `POST /api/softaware/tasks` |
+| `exec_task_update` | PUT | `/api/tasks-api/{id}` | `PUT /api/softaware/tasks` |
+| `exec_task_delete` | DELETE | `/api/tasks-api/{id}` | `DELETE /api/softaware/tasks/:id` |
+| `exec_task_start` | POST | `/api/tasks-api/{id}/start` | `POST /api/softaware/tasks/:id/start` |
+| `exec_task_complete` | POST | `/api/tasks-api/{id}/complete` | `POST /api/softaware/tasks/:id/complete` |
+| `exec_task_approve` | POST | `/api/tasks-api/{id}/approve` | `POST /api/softaware/tasks/:id/approve` |
+| `exec_task_reorder` | POST | `/api/tasks-api/reorder` | `POST /api/softaware/tasks/reorder` |
+| `exec_task_comment_add` | POST | `/api/tasks-api/{id}/comments` | `POST /api/softaware/tasks/:id/comments` |
+| `exec_task_comment_delete` | DELETE | `/api/tasks-api/comments/{id}` | `DELETE /api/softaware/tasks/comments/:id` |
+| `exec_task_attachment_upload` | POST | `/api/tasks-api/{id}/attachments` | `POST /api/softaware/tasks/:id/attachments` |
+| `exec_task_attachment_delete` | DELETE | `/api/tasks-api/attachments/{path}` | `DELETE /api/softaware/tasks/:id/attachments/:attId` |
+| `exec_task_association_add` | POST | `/api/tasks-api/{id}/associate` | `POST /api/softaware/tasks/:id/associations` |
+| `exec_task_association_remove` | DELETE | `/api/tasks-api/{id}/associate` | `DELETE /api/softaware/tasks/:id/associations` |
+| `exec_task_time_update` | PUT | `/api/tasks-api/time` | `PUT /api/softaware/tasks/time` |
+| `exec_task_invoice` | POST | `/api/tasks-api/invoice-tasks` | `POST /api/softaware/tasks/invoice-tasks` |
+| `exec_task_bill` | POST | `/api/tasks-api/bill` | `POST /api/softaware/tasks/bill` |
+
+### Read-Path Tools (6)
+
+| Tool Function | Source | HTTP Route Equivalent |
+|---------------|--------|-----------------------|
+| `exec_task_list` | `local_tasks` (MySQL) | `GET /api/local-tasks` |
+| `exec_task_get` | `local_tasks` (MySQL) | `GET /api/local-tasks/:id` |
+| `exec_task_comments` | External API (GET) | `GET /api/softaware/tasks/:id/comments` |
+| `exec_task_attachments` | External API (GET) | `GET /api/softaware/tasks/:id/attachments` |
+| `exec_task_stats` | External API (GET) | `GET /api/softaware/tasks/stats` |
+| `exec_task_associations` | External API (GET) | `GET /api/softaware/tasks/:id/associations` |
+
+### Source Resolution
 
 ```
-Registration order in softawareTasks.ts:
-1. GET  /                              (line ~79)
-2. POST /                              (line ~95)
-3. PUT  /                              (line ~108)
-4. DELETE /:id                         (line ~121)
-5. POST /reorder                       (line ~134)
-6. GET  /:id/comments                  (line ~147)
-7. POST /:id/comments/with-attachment  (line ~160)  ← BEFORE generic comments POST
-8. POST /:id/comments                  (line ~243)  ← AFTER with-attachment
-9. POST /authenticate                  (line ~263)
+exec_task_*(params, context)
+  → resolveTaskSourceForTools(params.software_id)
+    → SELECT base_url, api_key FROM task_sources WHERE software_id = ?
+    → Returns { baseUrl, apiKey, sourceId }
+  → taskProxyV2(baseUrl, path, method, apiKey, body)
+    → Native fetch with X-API-Key header
+    → Returns { status, data }
 ```
+
+`resolveTaskSourceForTools()` is the AI assistant equivalent of `resolveTaskSource(req)` from the HTTP proxy router, but takes a direct `softwareId` parameter instead of extracting it from an Express request object.
+
+### Auth & Permissions
+
+The AI assistant checks role permissions at the tool dispatch layer (before reaching the executor functions). The source-level API key pattern is identical to the HTTP routes — no per-user tokens involved.

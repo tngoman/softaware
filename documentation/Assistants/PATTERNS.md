@@ -1,7 +1,7 @@
 # Assistants Module — Architecture Patterns
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-09
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine internals.
 
@@ -427,52 +427,72 @@ return `${core}\n\n${identity}\n\nCRITICAL INSTRUCTION FOR TONE AND PERSONALITY:
 
 ---
 
-### 2.9 External Task Proxy Pattern ⭐ NEW (v1.4.0)
+### 2.9 External Task Proxy Pattern ⚠️ DEPRECATED (v2.1.0)
 
-**Context:** Staff need to manage tasks from external software portals (e.g., Silulumanzi Portal) through voice commands. Tasks are NOT stored locally — all operations are proxied to the external API.
+> **⚠️ DEPRECATED:** This pattern was replaced in v2.1.0 with the dual-path architecture.
+> Task reads now go directly to the local `local_tasks` MySQL table.
+> Task writes use `resolveTaskSourceForTools()` → `taskProxyV2()` with source-level
+> API keys from `task_sources` (not per-user software tokens).
+> See Section 2.9a below for the current pattern.
+
+**Original Context (v1.4.0):** Staff needed to manage tasks from external software portals through voice commands. Tasks were NOT stored locally — all operations were proxied to the external API using per-user tokens from `staff_software_tokens`.
+
+---
+
+### 2.9a Task Dual-Path Pattern ⭐ CURRENT (v2.1.0)
+
+**Context:** Staff manage tasks through 22 AI assistant tools. The system uses a dual-path architecture — local DB reads for speed, external API proxy for writes.
 
 **Implementation:**
 
 ```typescript
 // mobileActionExecutor.ts
 
-async function getStaffSoftwareToken(userId: string) {
+async function resolveTaskSourceForTools(softwareId?: number | null) {
+  // Resolves first enabled source with API key from task_sources table
   return db.queryOne(
-    `SELECT api_url, token FROM staff_software_tokens WHERE user_id = ? LIMIT 1`,
-    [userId]
+    `SELECT id, base_url, api_key, software_id, name
+     FROM task_sources
+     WHERE sync_enabled = 1 AND api_key IS NOT NULL AND api_key != ''
+     ORDER BY id ASC LIMIT 1`
   );
 }
 
-async function taskProxy(apiUrl, path, method, token, body?) {
-  const response = await fetch(`${apiUrl}${path}`, {
+async function taskProxyV2(baseUrl, path, method, apiKey, body?) {
+  const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
-      'Authorization': `Bearer ${token}`,
+      'X-API-Key': apiKey,     // Source-level key (not per-user token)
       'Content-Type': 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return response.json();
+  return { status: response.status, data: await response.json() };
+}
+
+async function resolveLocalTask(taskId: string) {
+  // Try local id first, then external_id — flexible lookup
+  return db.queryOne('SELECT * FROM local_tasks WHERE id = ? AND task_deleted = 0', [taskId])
+    ?? db.queryOne('SELECT * FROM local_tasks WHERE external_id = ? AND task_deleted = 0', [taskId]);
 }
 ```
 
-**Auth Chain:**
+**Data Flow Paths:**
 
 ```
-Mobile App → JWT (internal) → Backend
-Backend → staff_software_tokens.token → Bearer header → External API
+READ:   LLM → execListTasks/execGetTask → local_tasks SQL → formatted response
+WRITE:  LLM → execCreateTask/execUpdateTask → taskProxyV2() → external API → sync local
+LOCAL:  LLM → execBookmark/execPriority/execTags → UPDATE local_tasks → done
+SYNC:   LLM → execSyncTasks → syncAllSources() → fetch + upsert
+INVOICE: LLM → execStage → local flag → execProcess → taskProxyV2 → mark billed
 ```
 
 **Benefits:**
-- ✅ No local task tables needed — single source of truth stays in external software
-- ✅ Mirrors existing `proxyToExternal()` pattern from `softawareTasks.ts`
-- ✅ Per-staff tokens — each staff member authenticates independently
-- ✅ UPSERT pattern for tokens — easy credential rotation
-
-**Drawbacks:**
-- ❌ External API downtime breaks task tools entirely
-- ❌ No offline/cached task data
-- ❌ Currently takes first token found (`LIMIT 1`) — doesn't handle multiple software instances
+- ✅ Fast reads — local DB, no external dependency
+- ✅ Source-level auth — no per-user token management
+- ✅ 22 tools — full task lifecycle including workflow, billing, sync
+- ✅ Graceful degradation — local changes persist even if external fails
+- ✅ Local enhancements — bookmarks, priority, tags, colors never leave the local DB
 - ❌ Token stored as plaintext in DB (should encrypt)
 
 ---
@@ -500,6 +520,101 @@ if (existing) throw badRequest('You already have a staff assistant.');
 **Drawbacks:**
 - ❌ No DB-level unique constraint (relies on application logic)
 - ❌ Race condition: two concurrent POSTs could create duplicates (mitigated by low concurrency)
+
+---
+
+### 2.11 Vision Tier-Based Routing Pattern ⭐ NEW (v2.0.0)
+
+**Context:** When a user attaches an image, the text-only GLM pipeline must be bypassed entirely in favor of vision-capable models. The routing must still respect the user's tier (free/paid) and fall back gracefully through multiple providers.
+
+**Implementation:**
+
+```typescript
+// assistantAIRouter.ts — chatCompletionWithVision()
+
+async function chatCompletionWithVision(
+  tier: string,
+  messages: VisionChatMessage[],
+  opts?: { temperature?: number; max_tokens?: number }
+) {
+  if (tier === 'paid') {
+    // 1. Try OpenRouter with GPT-4o (best quality)
+    try {
+      const orMessages = buildOpenRouterVisionMessages(messages);
+      return await openRouterVisionChat(orMessages, VISION_OPENROUTER_MODEL, opts);
+      // provider: 'openrouter'
+    } catch (e) { /* fall through */ }
+
+    // 2. Try OpenRouter with Gemini Flash (cost fallback)
+    try {
+      const orMessages = buildOpenRouterVisionMessages(messages);
+      return await openRouterVisionChat(orMessages, VISION_OPENROUTER_FALLBACK, opts);
+      // provider: 'openrouter-fallback'
+    } catch (e) { /* fall through */ }
+  }
+
+  // 3. Ollama qwen2.5vl:7b (free tier or last resort)
+  const ollamaMessages = buildOllamaVisionMessages(messages);
+  return await ollamaVisionChat(ollamaMessages, VISION_OLLAMA_MODEL, opts);
+  // provider: 'ollama-vision'
+}
+```
+
+**Image Format Conversion:**
+
+```typescript
+// OpenRouter: OpenAI content[] array format
+function buildOpenRouterVisionMessages(messages) {
+  return messages.map(m => ({
+    role: m.role,
+    content: m.images?.length
+      ? [
+          { type: 'text', text: m.content },
+          ...m.images.map(img => ({
+            type: 'image_url',
+            image_url: { url: img }  // data-URI preserved
+          }))
+        ]
+      : m.content
+  }));
+}
+
+// Ollama: separate images[] field with raw base64
+function buildOllamaVisionMessages(messages) {
+  return messages.map(m => ({
+    role: m.role,
+    content: m.content,
+    images: m.images?.map(stripDataUri)  // remove 'data:image/png;base64,' prefix
+  }));
+}
+```
+
+**Detection & Routing:**
+
+```typescript
+// assistants.ts — POST /chat handler
+const hasImage = typeof image === 'string' && image.startsWith('data:image/');
+if (hasImage) {
+  // Build VisionChatMessage[] with images on last user message
+  // Route to chatCompletionStreamWithVision(tier, visionMessages)
+} else {
+  // Route to chatCompletionStream(tier, messages) — text-only GLM pipeline
+}
+```
+
+**Benefits:**
+- ✅ GLM text-only model cleanly bypassed — no wasted API call
+- ✅ Three-level fallback for paid tier: GPT-4o (best) → Gemini Flash (fast/cheap) → Ollama (free/local)
+- ✅ Free tier works fully offline with local Ollama vision model
+- ✅ Image format automatically converted per provider (data-URI vs raw base64)
+- ✅ Same `VisionChatMessage` type used everywhere — single interface for all callers
+- ✅ `provider` field in response lets caller select correct stream parser
+
+**Drawbacks:**
+- ❌ Images not persisted — re-analysis requires re-upload
+- ❌ Base64 encoding increases payload size ~33% (10MB image → ~13.3MB body)
+- ❌ Express body limit at 20mb may be tight for very large images
+- ❌ Only one image per message supported in current UI (backend supports multiple)
 
 ---
 
@@ -597,14 +712,15 @@ if (existing) throw badRequest('You already have a staff assistant.');
 
 ---
 
-### 3.10 🟡 Software Tokens Stored as Plaintext ⭐ NEW (v1.4.0)
+### 3.10 � ~~Software Tokens Stored as Plaintext~~ — RESOLVED (v2.1.0)
 
 **Location:** `staff_software_tokens.token` column.
 
-**Impact:** External software API tokens are stored in plaintext in MySQL. A DB breach would expose all external credentials.
-
-**Recommended Fix:** Encrypt tokens at rest using `AES-256-GCM` with a server-side key. Decrypt only when proxying.
-**Effort:** MEDIUM
+**Status:** ~~Risk~~ → **Resolved.** Task tools no longer use per-user software tokens.
+API keys are now stored in `task_sources.api_key` (one key per source, admin-managed).
+The `staff_software_tokens` table is deprecated and will be dropped in a future migration.
+The remaining security note applies only to the legacy SoftwareManagement auth flow
+which is also scheduled for removal.
 
 ---
 

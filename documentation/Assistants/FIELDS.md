@@ -1,7 +1,7 @@
 # Assistants Module — Database Schema
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-08
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,10 +9,12 @@
 
 | Metric | Value |
 |--------|-------|
-| **MySQL tables** | 4 core (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 1 legacy (assistant_knowledge) |
-| **sqlite-vec tables** | 2 (knowledge_chunks, knowledge_vectors) |
+| **MySQL tables** | 4 core (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 1 legacy (assistant_knowledge) + telemetry columns on `users` |
+| **sqlite-vec tables** | 2 (knowledge_chunks, knowledge_vectors) + 1 analytics (ai_analytics_logs) |
 | **Vector dimensions** | 768 (nomic-embed-text float32) |
 | **sqlite-vec DB path** | `/var/opt/backend/data/vectors.db` |
+
+> **Note (v2.0.0):** Vision/multimodal support does not introduce new database tables or columns. Images are processed in-memory (base64 data-URI) and sent directly to vision models — they are not persisted in MySQL or sqlite-vec.
 
 ---
 
@@ -176,9 +178,15 @@ SELECT id, assistant_id, job_type, source, tier, status, chunks_created, retry_c
 
 ---
 
-### 2.3 `staff_software_tokens` — External Software API Tokens ⭐ NEW (v1.4.0)
+### 2.3 `staff_software_tokens` — External Software API Tokens ⚠️ DEPRECATED (v2.1.0)
 
-**Purpose:** Stores external software API tokens per staff member, enabling the mobile AI assistant to proxy task operations to external software portals (e.g., Silulumanzi Portal) on behalf of the staff user.
+> **⚠️ DEPRECATED:** This table is no longer used by AI task tools as of v2.1.0.
+> Task proxy operations now use source-level API keys from the `task_sources` table
+> (resolved via `resolveTaskSourceForTools()` in `mobileActionExecutor.ts`).
+> The table and its CRUD endpoints remain for backward compatibility with the
+> legacy SoftwareManagement authentication flow, but will be removed in a future release.
+
+**Original Purpose (v1.4.0):** Stored external software API tokens per staff member, enabling the mobile AI assistant to proxy task operations to external software portals on behalf of the staff user.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
@@ -327,6 +335,74 @@ ORDER BY kv.distance ASC
 const buf = new Float32Array(embedding).buffer;
 insertVec.run(chunkId, Buffer.from(buf));
 ```
+
+---
+
+## 3a. SQLite Analytics Table ⭐ NEW (v2.2.0)
+
+Located at `/var/opt/backend/data/vectors.db` (same database as knowledge vectors). Managed by `analyticsLogger.ts`. Auto-created on first insert.
+
+### 3a.1 `ai_analytics_logs` — PII-Sanitized Chat Telemetry
+
+**Purpose:** Stores anonymized AI chat interactions from all 3 chat routes (portal SSE, widget, enterprise webhook) with all PII stripped. POPIA-compliant — no personal data is ever stored.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| id | INTEGER | PK, AUTOINCREMENT | Sequential row ID |
+| client_id | TEXT | NOT NULL | User ID (portal), client ID (widget), or client_id (enterprise) |
+| source | TEXT | NOT NULL | Origin: `portal`, `widget`, or `enterprise` |
+| sanitized_prompt | TEXT | NOT NULL | User message with all PII replaced by `[TYPE REMOVED]` tokens |
+| sanitized_response | TEXT | NOT NULL | AI response with all PII replaced by `[TYPE REMOVED]` tokens |
+| model | TEXT | NULLABLE | LLM model used (e.g., `openai/gpt-4o-mini`) |
+| provider | TEXT | NULLABLE | LLM provider (e.g., `openrouter`, `ollama`, `glm`) |
+| duration_ms | INTEGER | NULLABLE | Request duration in milliseconds |
+| created_at | TEXT | DEFAULT CURRENT_TIMESTAMP | ISO timestamp |
+
+**PII Sanitization (applied to both prompt and response):**
+
+| Pattern | Replacement |
+|---------|-------------|
+| Email addresses | `[EMAIL REMOVED]` |
+| SA phone numbers (0xx or +27xx) | `[PHONE REMOVED]` |
+| SA ID numbers (13 consecutive digits) | `[SA_ID REMOVED]` |
+| Credit card numbers (16 digits) | `[CARD REMOVED]` |
+| Account numbers (7–12 digits) | `[ACCOUNT REMOVED]` |
+| Street addresses (number + street name + type) | `[ADDRESS REMOVED]` |
+
+**Example Data:**
+
+```sql
+SELECT id, client_id, source, sanitized_prompt, model, created_at FROM ai_analytics_logs LIMIT 2;
+-- 1, 'admin-softaware-001', 'portal', 'What are the office hours for [EMAIL REMOVED]?', 'openai/gpt-4o-mini', '2026-03-12 10:30:00'
+-- 2, 'widget_abc123', 'widget', 'My number is [PHONE REMOVED], please call me', 'glm-4.6', '2026-03-12 10:31:00'
+```
+
+**Notes:**
+- Written by `logAnonymizedChat()` — fire-and-forget (all errors caught silently)
+- Table auto-created on first INSERT if it doesn't exist
+- Portal chat checks `users.telemetry_opted_out` before logging; widget and enterprise always log
+- No foreign key constraints — `client_id` is a soft reference
+- No log rotation implemented yet (see Known Issues)
+
+---
+
+## 3b. MySQL Telemetry Columns on `users` Table ⭐ NEW (v2.2.0)
+
+**Migration:** `src/db/migrations/026_ai_telemetry.ts`  
+**Purpose:** Track per-user telemetry consent status. Added to the existing `users` table.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| telemetry_consent_accepted | TINYINT(1) | 0 | 1 = user accepted telemetry terms via consent modal |
+| telemetry_opted_out | TINYINT(1) | 0 | 1 = paid user opted out of portal chat logging |
+| telemetry_consent_date | DATETIME | NULL | Timestamp when consent was last given/updated |
+
+**Business Rules:**
+- Consent is checked by `GET /api/assistants/telemetry-consent` (reads these columns)
+- Consent is set by `POST /api/assistants/telemetry-consent` (writes these columns)
+- `telemetry_opted_out` is only respected in portal SSE chat (`assistants.ts`) — widget and enterprise webhook logging is always active
+- Frontend shows opt-out toggle only to paid-tier users
+- Consent modal appears before first assistant creation (when `telemetry_consent_accepted = 0` and user has 0 assistants)
 
 ---
 

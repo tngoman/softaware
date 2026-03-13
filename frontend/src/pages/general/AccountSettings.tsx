@@ -10,6 +10,7 @@ import { AuthModel } from '../../models';
 import { useAppStore } from '../../store';
 import TwoFactorSetup from '../../components/TwoFactorSetup';
 import MobileAuthQR from '../../components/MobileAuthQR';
+import PinSetup from '../../components/PinSetup';
 import { notify } from '../../utils/notify';
 
 interface PasswordFormData {
@@ -257,6 +258,11 @@ const AccountSettings: React.FC = () => {
             </button>
           </div>
         </form>
+      </div>
+
+      {/* Quick PIN Login */}
+      <div className="bg-white shadow rounded-lg p-6">
+        <PinSetup />
       </div>
 
       {/* Two-Factor Authentication */}

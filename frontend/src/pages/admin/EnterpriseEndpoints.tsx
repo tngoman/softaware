@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { AdminEnterpriseModel, EnterpriseEndpoint } from '../../models';
+import { AdminEnterpriseModel, EnterpriseEndpoint, ContactModel } from '../../models';
+import { Contact } from '../../types';
 import {
   SignalIcon,
   PlusIcon,
@@ -40,6 +41,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 const emptyForm = {
   client_id: '',
   client_name: '',
+  contact_id: '' as string | number,
   inbound_provider: 'custom_rest',
   llm_provider: 'ollama',
   llm_model: '',
@@ -64,6 +66,7 @@ const EnterpriseEndpoints: React.FC = () => {
   const [logs, setLogs] = useState<any[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<Contact[]>([]);
 
   const loadEndpoints = async () => {
     setLoading(true);
@@ -90,7 +93,13 @@ const EnterpriseEndpoints: React.FC = () => {
     }
   };
 
-  useEffect(() => { loadEndpoints(); }, []);
+  useEffect(() => {
+    loadEndpoints();
+    ContactModel.getAll('customers').then(data => {
+      const list = Array.isArray(data) ? data : (data as any).data || [];
+      setContacts(list);
+    }).catch(() => {});
+  }, []);
 
   const openCreate = () => {
     setEditing(null);
@@ -103,6 +112,7 @@ const EnterpriseEndpoints: React.FC = () => {
     setForm({
       client_id: ep.client_id,
       client_name: ep.client_name,
+      contact_id: (ep as any).contact_id || '',
       inbound_provider: ep.inbound_provider,
       llm_provider: ep.llm_provider,
       llm_model: ep.llm_model,
@@ -121,12 +131,13 @@ const EnterpriseEndpoints: React.FC = () => {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    const payload = { ...form, contact_id: form.contact_id ? Number(form.contact_id) : undefined };
     try {
       if (editing) {
-        await AdminEnterpriseModel.update(editing.id, form);
+        await AdminEnterpriseModel.update(editing.id, payload);
         Swal.fire({ icon: 'success', title: 'Updated', timer: 1500, showConfirmButton: false });
       } else {
-        const created = await AdminEnterpriseModel.create(form);
+        const created = await AdminEnterpriseModel.create(payload);
         Swal.fire({
           icon: 'success',
           title: 'Endpoint Created',
@@ -373,7 +384,7 @@ const EnterpriseEndpoints: React.FC = () => {
             </div>
             <form onSubmit={handleSave} className="p-5 space-y-5">
               {/* Client Info */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Client ID</label>
                   <input
@@ -396,6 +407,20 @@ const EnterpriseEndpoints: React.FC = () => {
                     required
                     className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-gray-900 dark:text-white"
                   />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Linked Client Record</label>
+                  <select
+                    value={form.contact_id}
+                    onChange={(e) => setForm({ ...form, contact_id: e.target.value ? Number(e.target.value) : '' })}
+                    required
+                    className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-gray-900 dark:text-white"
+                  >
+                    <option value="">Select a client...</option>
+                    {contacts.map(c => (
+                      <option key={c.contact_id} value={c.contact_id}>{c.contact_name}{c.contact_person ? ` — ${c.contact_person}` : ''}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 

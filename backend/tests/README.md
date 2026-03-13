@@ -4,6 +4,17 @@ This directory contains all test scripts for the backend.
 
 ## Test Files
 
+### Task Tool Unit Tests (v2.1.0) ⭐
+- **task-tools.test.ts** - 80 unit tests for the 22 staff AI assistant task tool executors
+  - Role guard tests (22 tools × client rejection)
+  - Core CRUD: list_tasks, get_task, create_task, update_task, delete_task
+  - Comments: get_task_comments, add_task_comment
+  - Local enhancements: bookmark_task, set_task_priority, set_task_color, set_task_tags
+  - Workflow actions: start_task, complete_task, approve_task
+  - Stats & queries: get_task_stats, get_pending_approvals, get_task_tags
+  - Sync: sync_tasks, get_sync_status
+  - Invoice staging: stage_tasks_for_invoice, get_staged_invoices, process_staged_invoices
+
 ### Authentication Tests
 - **test-auth.mjs** - Authentication testing
 
@@ -27,10 +38,16 @@ This directory contains all test scripts for the backend.
 ## Running Tests
 
 ```bash
-# Run a specific test
-npm run dev # or tsx
-tsx tests/test-glm.ts
+# Run all vitest tests
+npm test
 
-# Generate test token
+# Run tests in watch mode
+npm run test:watch
+
+# Run a specific test file
+npx vitest run tests/task-tools.test.ts
+
+# Run legacy tests (tsx/node)
+tsx tests/test-glm.ts
 node tests/generate_test_token.mjs
 ```

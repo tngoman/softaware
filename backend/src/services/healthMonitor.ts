@@ -499,10 +499,7 @@ async function createAutoDetectedCase(
     );
 
     const admins = await db.query<any>(
-      `SELECT DISTINCT u.id FROM users u
-       JOIN user_roles ur ON u.id = ur.user_id
-       JOIN roles r ON r.id = ur.role_id
-       WHERE r.slug IN ('admin', 'super_admin')`
+      `SELECT id FROM users WHERE is_admin = 1`
     );
     for (const admin of admins) {
       await createNotification({

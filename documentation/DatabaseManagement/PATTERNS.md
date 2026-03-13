@@ -9,7 +9,9 @@ All database connections are proxied through SSH tunnels using the `ssh2` librar
 Browser                 Backend                     SSH Server              DB Server
   │                       │                            │                      │
   ├─ POST /connect ──────►│                            │                      │
-  │   { tunnel: {...} }   ├─ ssh2 connect ────────────►│                      │
+  │   { tunnel: {...} }   ├─ requireAuth ──► JWT OK    │                      │
+  │                       ├─ requireDeveloper ──► role OK                     │
+  │                       ├─ ssh2 connect ────────────►│                      │
   │                       ├─ net.Server on 127.0.0.1:N │                      │
   │                       ├─ forwardOut(N → dbHost:dbPort) ──────────────────►│
   │                       ├─ mysql2.connect(127.0.0.1:N) ─── (tunneled) ────►│
@@ -25,19 +27,22 @@ Browser                 Backend                     SSH Server              DB S
 Both helpers follow the Resource Acquisition Is Initialization pattern — they create a tunnel + connection, execute a callback, and guarantee cleanup in a `finally` block:
 
 ```typescript
-async function withMySQL(body: ConnectionBody, fn: (conn) => Promise<T>): Promise<T> {
-  let tunnel: TunnelHandle | null = null;
-  let connection: mysql2.Connection | null = null;
+async function withMySQL<T>(body: ConnectionBody, fn: (conn: mysql.Connection) => Promise<T>): Promise<T> {
+  let tunnel: TunnelHandle | undefined;
+  let host = body.host || '127.0.0.1';
+  let port = body.port || 3306;
+
+  if (body.tunnel?.sshHost) {
+    tunnel = await createTunnel(body.tunnel, host, port);
+    host = '127.0.0.1';
+    port = tunnel.localPort;
+  }
+  let conn: mysql.Connection | undefined;
   try {
-    if (body.tunnel) tunnel = await createTunnel(body.tunnel);
-    connection = await mysql2.createConnection({
-      host: '127.0.0.1',
-      port: tunnel?.localPort || body.port,
-      user: body.user, password: body.password, database: body.database
-    });
-    return await fn(connection);
+    conn = await mysql.createConnection({ host, port, user: body.user, password: body.password, database: body.database });
+    return await fn(conn);
   } finally {
-    if (connection) await connection.end().catch(() => {});
+    if (conn) await conn.end().catch(() => {});
     if (tunnel) closeTunnel(tunnel);
   }
 }
@@ -52,13 +57,13 @@ Every endpoint branches on `body.type` to handle MySQL and MSSQL with engine-spe
 if (body.type === 'mssql') {
   return withMSSQL(body, async (pool) => {
     const result = await pool.request().query('SELECT name FROM sys.databases WHERE state_desc=\'ONLINE\'');
-    res.json({ databases: result.recordset.map(r => r.name) });
+    res.json({ success: true, databases: result.recordset.map(r => r.name) });
   });
 }
 // Default: MySQL
 return withMySQL(body, async (conn) => {
   const [rows] = await conn.execute('SHOW DATABASES');
-  res.json({ databases: rows.map(r => r.Database) });
+  res.json({ success: true, databases: rows.map(r => r.Database) });
 });
 ```
 
@@ -69,16 +74,19 @@ The `mssql` package is loaded at runtime via `await import('mssql')` rather than
 
 ```typescript
 async function withMSSQL(body, fn) {
-  let mssqlLib;
+  let pool: any;
   try {
-    mssqlLib = await import('mssql');
-  } catch (err) {
-    if (err.code === 'MODULE_NOT_FOUND') {
-      throw new Error('mssql package is not installed. Run: npm install mssql');
-    }
+    const mssql = await import('mssql');
+    pool = await new mssql.default.ConnectionPool({ ... }).connect();
+    return await fn(pool);
+  } catch (err: any) {
+    if (err.code === 'MODULE_NOT_FOUND' || err.code === 'ERR_MODULE_NOT_FOUND')
+      throw new Error('MSSQL driver not installed. Run: npm install mssql');
     throw err;
+  } finally {
+    if (pool) await pool.close().catch(() => {});
+    if (tunnel) closeTunnel(tunnel);
   }
-  // ... use mssqlLib.default
 }
 ```
 
@@ -88,40 +96,45 @@ async function withMSSQL(body, fn) {
 No connection pooling exists. Each API request creates a fresh tunnel + connection, executes one operation, then tears both down:
 
 ```
-Request → createTunnel() → createConnection() → execute() → closeConnection() → closeTunnel() → Response
+Request → requireAuth → requireDeveloper → createTunnel() → createConnection() → execute() → closeConnection() → closeTunnel() → Response
 ```
 
 **Trade-off**: Maximum isolation and simplicity — no state to manage, no stale connections. However, every request pays the SSH handshake + TCP connect overhead (~100-500ms per request depending on network).
 
-### 6. Client-Side Connection Persistence
-Connection configurations (including credentials) are stored in browser `localStorage` under versioned keys:
+### 6. Server-Side Connection Persistence (MySQL `db_connections` table)
+Connection configurations are stored in the application's MySQL database in the `db_connections` table, shared across all authorized users:
 
 ```typescript
-// Save
-localStorage.setItem('db_connections_v2', JSON.stringify(connections));
+// Save (upsert)
+await db.query(
+  `INSERT INTO db_connections (id, name, host, port, user, password, ..., created_by)
+   VALUES (?, ?, ?, ?, ?, ?, ..., ?)
+   ON DUPLICATE KEY UPDATE name = VALUES(name), host = VALUES(host), ...`,
+  [connId, name, host, port, user, password, ..., userId]
+);
 
-// Load
-const saved = JSON.parse(localStorage.getItem('db_connections_v2') || '[]');
+// Load all
+const rows = await db.query('SELECT * FROM db_connections ORDER BY name ASC');
+// Map flat rows to nested Connection shape
+const connections = rows.map(r => ({
+  ...r,
+  tunnel: { sshHost: r.ssh_host, sshPort: r.ssh_port, sshUser: r.ssh_user, ... }
+}));
 ```
 
-**Rationale**: No server-side user session or database for connection configs. Simple and stateless. The `_v2` suffix allows migration from older formats.
+**Rationale**: Connections are shared resources — all developers need access to the same database connections. Server-side storage also avoids XSS credential exposure that localStorage had. Query history and saved queries remain in localStorage as they are user-specific and non-sensitive.
 
 ### 7. `connPayload()` Request Builder
 A single helper function transforms a `Connection` object into the flat request body format expected by all backend endpoints:
 
 ```typescript
-const connPayload = (c: Connection) => ({
+const connPayload = (c: Connection, extra?: Record<string, any>) => ({
   host: c.host, port: c.port, user: c.user, password: c.password,
-  database: c.database, type: c.type,
-  tunnel: c.tunnel?.sshHost ? {
-    sshHost: c.tunnel.sshHost, sshPort: c.tunnel.sshPort || 22,
-    sshUser: c.tunnel.sshUser, sshPassword: c.tunnel.sshPassword,
-    sshKeyFile: c.tunnel.sshKeyFile,
-  } : undefined,
+  database: c.database, type: c.type, tunnel: c.tunnel, ...extra,
 });
 ```
 
-**Pattern**: Centralizes connection→body mapping. Every API call uses `connPayload(activeConnection)` to avoid field duplication.
+**Pattern**: Centralizes connection→body mapping. Every API call uses `connPayload(activeConnection, { table, ... })` to avoid field duplication. The `extra` parameter allows passing additional fields like `table`, `sql`, `sortColumn`, etc.
 
 ### 8. Auto-Refresh on DDL
 The SQL executor detects DDL statements and automatically refreshes the table list:
@@ -148,19 +161,107 @@ const quickSelect = (table: string) => {
 };
 ```
 
-### 10. Collapsible Sidebar with Action Reveal
-The sidebar uses Tailwind's `group-hover` pattern to show table action buttons only on hover:
+### 10. Authentication + Role-Based Access (Multi-Layer)
+Access control is enforced at four layers:
 
-```tsx
-<div className="group flex items-center">
-  <span className="flex-1">{table.name}</span>
-  <div className="opacity-0 group-hover:opacity-100 transition-opacity">
-    <button title="SELECT *"><EyeIcon /></button>
-    <button title="Browse"><ListBulletIcon /></button>
-    <button title="Info"><InformationCircleIcon /></button>
-  </div>
-</div>
 ```
+Layer 1: Sidebar NavItem — roleSlug: 'developer' hides menu from non-developers
+Layer 2: DeveloperRoute — frontend route guard, redirects to dashboard
+Layer 3: requireAuth — JWT verification middleware, extracts userId
+Layer 4: requireDeveloper — queries user_roles + roles for developer/admin/super_admin slug
+```
+
+**Implementation**:
+```typescript
+// Backend: middleware chain
+router.use(requireAuth, requireDeveloper);
+
+// requireDeveloper checks:
+const role = await db.queryOne(
+  `SELECT r.slug FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+   WHERE ur.user_id = ? AND r.slug IN ('developer', 'admin', 'super_admin') LIMIT 1`,
+  [userId]
+);
+if (!role) return res.status(403).json({ error: 'Developer access required' });
+
+// Frontend: route guard
+const hasDeveloperAccess = () => {
+  if (user.is_admin) return true;
+  if (user.role?.slug === 'developer') return true;    // singular (backend returns this)
+  if (user.roles?.some(r => r.slug === 'developer')) return true;  // plural (fallback)
+  return false;
+};
+
+// Frontend: sidebar visibility
+if (item.roleSlug) {
+  const hasRole = user?.is_admin || user?.role?.slug === item.roleSlug || user?.roles?.includes(slug);
+  if (!hasRole) return null; // hide item
+}
+```
+
+**Critical Note**: Backend's `mapUser()` returns `role` (singular object with `.slug`) NOT `roles` (plural array). The frontend checks both shapes for robustness.
+
+### 11. Server-Side Sort & Filter
+The `/table-data` endpoint generates SQL ORDER BY and WHERE clauses from request parameters:
+
+```typescript
+// Sorting
+const orderBy = sortCol ? ` ORDER BY \`${sortCol.replace(/`/g, '')}\` ${sortDir}` : '';
+
+// Filtering (MySQL — parameterized)
+const clauses = filters.map(f => {
+  const col = `\`${f.column.replace(/`/g, '')}\``;
+  if (f.operator === 'IS NULL') return `${col} IS NULL`;
+  if (f.operator === 'IS NOT NULL') return `${col} IS NOT NULL`;
+  if (f.operator === 'LIKE') { whereParams.push(`%${f.value}%`); return `${col} LIKE ?`; }
+  if (f.operator === 'REGEXP') { whereParams.push(f.value); return `${col} REGEXP ?`; }
+  whereParams.push(f.value);
+  return `${col} ${f.operator} ?`;
+});
+where = ' WHERE ' + clauses.join(' AND ');
+```
+
+**Rationale**: Replaces the previous client-side-only filtering. Server-side WHERE means the database returns only matching rows, dramatically improving performance for large tables. The `total` count also respects filters.
+
+### 12. Inline CRUD with Parameterized Queries
+Row operations use parameterized queries for security:
+
+```typescript
+// Insert — dynamic columns from row object
+const cols = Object.keys(row);
+const colList = cols.map(c => `\`${c.replace(/`/g, '')}\``).join(', ');
+const placeholders = cols.map(() => '?').join(', ');
+const values = cols.map(c => row[c] === '' ? null : row[c]);
+await conn.execute(`INSERT INTO \`${table}\` (${colList}) VALUES (${placeholders})`, values);
+
+// Update — SET from row, WHERE from where object
+const setClause = setCols.map(c => `\`${c}\`=?`).join(', ');
+const whereClause = whereCols.map(c => whereObj[c] === null ? `\`${c}\` IS NULL` : `\`${c}\`=?`).join(' AND ');
+await conn.execute(`UPDATE \`${table}\` SET ${setClause} WHERE ${whereClause} LIMIT 1`, params);
+
+// Delete — WHERE from where object, LIMIT 1 safety
+await conn.execute(`DELETE FROM \`${table}\` WHERE ${whereClause} LIMIT 1`, params);
+```
+
+**Safety**: `LIMIT 1` on UPDATE/DELETE (MySQL) and `DELETE TOP(1)` (MSSQL) prevent accidental mass operations. Empty strings are converted to `null`. Null values in WHERE generate `IS NULL` clauses.
+
+### 13. SQL Import with Sequential Execution
+The `/import-sql` endpoint handles multi-statement SQL files:
+
+```typescript
+const statements = sql.split(/;\s*\n/).map(s => s.trim()).filter(s => s.length > 0 && !s.startsWith('--'));
+let executed = 0;
+let errors: string[] = [];
+
+for (const stmt of statements) {
+  try { await conn.query(stmt); executed++; }
+  catch (e: any) { errors.push(`${e.message} — ${stmt.substring(0, 80)}…`); }
+}
+
+res.json({ success: true, executed, errors: errors.slice(0, 20), totalStatements: statements.length });
+```
+
+**Pattern**: Splits by `;\n` (semicolon + newline) to avoid breaking strings containing semicolons. Continues execution on error to maximize successful statements. Error messages include first 80 characters of the failing statement for debugging. Maximum 20 errors returned to prevent response bloat.
 
 ---
 
@@ -168,45 +269,43 @@ The sidebar uses Tailwind's `group-hover` pattern to show table action buttons o
 
 ### 🔴 Critical
 
-1. **No authentication middleware** — The `/api/database/*` router has no `requireAuth` or permission check. Any unauthenticated request to the API server can connect to databases, execute arbitrary SQL, and export data. This is a **critical security vulnerability**.
+1. **SQL injection in MSSQL schema queries** — MSSQL table/database names are interpolated via string templates (`[${table}]`, `[${body.database}]`) in schema browsing endpoints. While `]` characters are doubled, this is not as secure as parameterized queries. The CRUD endpoints (`row-insert`, `row-update`, `row-delete`) properly use `pool.request().input()` for values but still interpolate table names.
 
-2. **SQL injection in MSSQL queries** — MSSQL table/database names are interpolated via string templates (`[${table}]`, `[${body.database}]`) without parameterization. While bracket-escaping prevents basic injection, it does not handle names containing `]` characters. MySQL uses backtick escaping which has the same issue.
+2. **Credentials stored in plaintext MySQL** — The `db_connections` table stores database passwords and SSH passwords as plaintext VARCHAR columns. Any user with direct MySQL access can read all saved credentials. Should be encrypted at rest using an application-level encryption key.
 
-3. **Credentials stored in plaintext localStorage** — Database passwords and SSH passwords are stored in the browser's `localStorage` as plain JSON. Any XSS vulnerability on the domain would expose all saved credentials.
+3. **Credentials sent in every request body** — Full database credentials are included in the POST body of every API request. Without enforced HTTPS, these travel in cleartext. Even with HTTPS, they appear in server access logs if body logging is enabled.
 
-4. **Credentials sent in every request body** — Full database credentials (user, password) and SSH credentials are sent in the POST body of every API request. If HTTPS is not enforced, these are transmitted in cleartext.
-
-5. **Arbitrary SQL execution without restrictions** — `POST /query` executes any SQL the user sends — including `DROP DATABASE`, `GRANT`, `CREATE USER`, etc. There is no query whitelisting, read-only mode, or dangerous-query confirmation on the backend.
+4. **Arbitrary SQL execution without restrictions** — `POST /query` executes any SQL statement without restriction. Now requires developer authentication, but any authorized developer can execute `DROP DATABASE`, `CREATE USER`, `GRANT ALL`, etc.
 
 ### 🟡 Moderate
 
-6. **No connection pooling** — Each request creates and destroys a full SSH tunnel + database connection. For rapid operations (e.g., table browse + describe + indexes), this means 3 separate SSH handshakes. A connection cache with TTL would significantly improve performance.
+5. **No connection pooling** — Each request creates and destroys a full SSH tunnel + database connection. Improved by server-side sort/filter reducing request count, but sequential operations still pay full SSH handshake cost each time.
 
-7. **MSSQL CREATE TABLE not supported** — `POST /table-create-sql` returns a hardcoded placeholder for MSSQL instead of generating DDL. This is a feature gap that makes the Info tab incomplete for SQL Server.
+6. **MSSQL CREATE TABLE not supported** — `POST /table-create-sql` returns a placeholder for MSSQL.
 
-8. **No request validation** — POST bodies are not validated with any schema (e.g., Joi, Zod). Missing `host`, `port`, or `type` fields result in cryptic `mysql2` or `mssql` errors instead of clean 400 responses.
+7. **No request validation** — POST bodies lack schema validation. Missing fields produce driver-level errors.
 
-9. **Client-side filtering only** — The `TableBrowser` component fetches all rows for the current page, then filters client-side by column value. For large tables, server-side WHERE clauses would be more efficient.
+8. **Non-deterministic MSSQL pagination** — `ORDER BY (SELECT NULL)` when no sort column specified.
 
-10. **No rate limiting** — With no auth and arbitrary SQL execution, the endpoint is vulnerable to abuse — repeated connections, denial-of-service via expensive queries, or brute-force credential testing against databases.
+9. **MySQL `SHOW INDEX` denormalized** — Returns one row per column in composite index. MSSQL returns aggregated rows.
 
-11. **MSSQL `ORDER BY (SELECT NULL)`** — The `table-data` endpoint uses `ORDER BY (SELECT NULL)` for MSSQL pagination, which means row order is non-deterministic. Rows may shift between pages.
+### 🟢 Minor / Resolved
 
-12. **MySQL `SHOW INDEX` returns denormalized rows** — MySQL returns one row per index-column combination, while MSSQL returns aggregated rows. The frontend must handle both shapes, but doesn't normalize them.
+10. ~~**No authentication middleware**~~ — ✅ RESOLVED. All routes now protected by `requireAuth` + `requireDeveloper`.
 
-### 🟢 Minor
+11. ~~**Credentials in plaintext localStorage**~~ — ✅ RESOLVED. Connections stored in MySQL `db_connections` table.
 
-13. **No TypeScript interfaces for route responses** — Backend endpoints return `any`-typed objects. Adding response type definitions would improve maintainability.
+12. ~~**Client-side filtering only**~~ — ✅ RESOLVED. Server-side `sortColumn`, `sortDirection`, and `filters[]` supported.
 
-14. **Hardcoded SHOW GLOBAL STATUS variables** — The status endpoint requests a fixed list of MySQL status variables. Adding configurable variable selection would be useful.
+13. **No TypeScript response types** — Backend returns untyped objects.
 
-15. **No query formatting/syntax highlighting** — The SQL textarea is a plain `<textarea>` with dark background colors but no syntax highlighting, auto-complete, or formatting.
+14. **No SQL syntax highlighting** — Plain `<textarea>` with dark theme.
 
-16. **No EXPLAIN support** — There's no way to run `EXPLAIN` or view query execution plans from the UI.
+15. **Static export filenames** — Always `export.csv`.
 
-17. **Export filename is static** — CSV exports always use `export.csv` / `query_result.csv`. Should include database/table name and timestamp.
+16. **No EXPLAIN support** — No query plan visualization.
 
-18. **No keyboard shortcuts documentation** — Ctrl+Enter and Tab behavior aren't discoverable beyond the placeholder text.
+17. **No keyboard shortcut documentation** — Only discoverable via placeholder text.
 
 ---
 
@@ -215,14 +314,19 @@ The sidebar uses Tailwind's `group-hover` pattern to show table action buttons o
 | Operation | SSH Overhead | DB Query | Est. Total | Notes |
 |-----------|-------------|----------|------------|-------|
 | Connect (test) | ~200-500ms | ~10ms | ~300-600ms | Full SSH handshake + ping |
+| List connections | 0ms | ~5ms | ~10ms | Local MySQL query, no SSH tunnel |
 | List databases | ~200-500ms | ~5ms | ~300-600ms | New tunnel per request |
 | List tables | ~200-500ms | ~10ms | ~300-600ms | New tunnel per request |
 | Describe table | ~200-500ms | ~5ms | ~300-600ms | New tunnel per request |
-| Browse data (100 rows) | ~200-500ms | ~20ms | ~300-600ms | COUNT + SELECT |
+| Browse data (sorted + filtered) | ~200-500ms | ~20ms | ~300-600ms | COUNT + SELECT with WHERE/ORDER BY |
+| Insert/Update/Delete row | ~200-500ms | ~10ms | ~300-600ms | Single parameterized query |
+| Import SQL (100 stmts) | ~200-500ms | ~500ms | ~600-1000ms | Single tunnel, sequential execution |
 | Load table info | ~600-1500ms | ~30ms | ~700-1600ms | 3 parallel requests, each with own tunnel |
 | Execute query | ~200-500ms | Variable | ~300ms+ | Depends on query complexity |
 | Export CSV (server) | ~200-500ms | Variable | ~300ms+ | Entire result buffered in memory |
 
 **Key bottleneck**: SSH tunnel creation dominates every operation. Connection pooling would reduce repeat operations to ~10-50ms.
+
+**Improvement from server-side filtering**: Previously, browsing a filtered view required fetching all 100 rows then filtering client-side. Now the server generates WHERE clauses, so the database only returns matching rows and the `total` count reflects the filter.
 
 **Recommendation**: Implement a server-side connection cache with 60-second TTL keyed by `(host:port:user:sshHost:sshKeyFile)`. Reuse existing tunnels + connections for sequential operations.

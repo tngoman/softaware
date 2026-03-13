@@ -93,15 +93,22 @@ updErrorReportRouter.get('/', requireAuth, requireAdmin, async (req, res, next) 
 });
 
 const errorSchema = z.object({
-  type: z.string().min(1),
-  level: z.enum(['error', 'warning', 'notice']),
-  label: z.string().min(1),
+  // Accept both spec-documented names (error_type) and short names (type)
+  type: z.string().min(1).optional(),
+  error_type: z.string().min(1).optional(),
+  level: z.enum(['error', 'warning', 'notice']).optional(),
+  error_level: z.enum(['error', 'warning', 'notice']).optional(),
+  label: z.string().optional(),
   message: z.string().min(1),
   file: z.string().optional(),
   line: z.number().optional(),
   column: z.number().optional(),
   trace: z.string().optional(),
+  stack_trace: z.string().optional(),
   url: z.string().optional(),
+  user_agent: z.string().optional(),
+  request_method: z.string().optional(),
+  request_uri: z.string().optional(),
   request: z.object({
     method: z.string().optional(),
     uri: z.string().optional(),
@@ -110,7 +117,31 @@ const errorSchema = z.object({
     user_agent: z.string().optional(),
   }).optional(),
   timestamp: z.string().optional(),
-});
+}).refine(d => d.type || d.error_type, { message: 'type or error_type is required' })
+  .refine(d => d.level || d.error_level, { message: 'level or error_level is required' });
+
+type ParsedError = z.infer<typeof errorSchema>;
+
+/** Normalize an error object — resolve spec vs short field names */
+function normalizeError(e: ParsedError) {
+  return {
+    type: e.type || e.error_type || 'unknown',
+    level: (e.level || e.error_level || 'error') as 'error' | 'warning' | 'notice',
+    label: e.label || e.type || e.error_type || 'unknown',
+    message: e.message,
+    file: e.file || null,
+    line: e.line || null,
+    column: e.column || null,
+    trace: e.trace || e.stack_trace || null,
+    url: e.url || null,
+    request_method: e.request_method || e.request?.method || null,
+    request_uri: e.request_uri || e.request?.uri || null,
+    request_route: e.request?.route || null,
+    request_ip: e.request?.ip || null,
+    request_user_agent: e.user_agent || e.request?.user_agent || null,
+    timestamp: e.timestamp || new Date().toISOString(),
+  };
+}
 
 const bodySchema = z.object({
   software_key: z.string().min(1),
@@ -119,7 +150,7 @@ const bodySchema = z.object({
   machine_name: z.string().optional(),
   os_info: z.string().optional(),
   app_version: z.string().optional(),
-  source: z.enum(['backend', 'frontend']).default('backend'),
+  source: z.enum(['backend', 'frontend', 'desktop', 'mobile']).default('backend'),
   errors: z.array(errorSchema).min(1),
   metadata: z.object({
     php_version: z.string().optional(),
@@ -128,6 +159,12 @@ const bodySchema = z.object({
     portal_type: z.string().optional(),
     error_count: z.number().optional(),
     user_agent: z.string().optional(),
+    browser: z.string().optional(),
+    screen_resolution: z.string().optional(),
+    page_url: z.string().optional(),
+    user_id: z.string().optional(),
+    memory_usage: z.number().optional(),
+    uptime: z.string().optional(),
     extra: z.any().optional(),
   }).optional(),
 });
@@ -163,7 +200,8 @@ updErrorReportRouter.post('/', async (req, res, next) => {
 
     // Store each error
     let received = 0;
-    for (const error of body.errors) {
+    for (const rawError of body.errors) {
+      const error = normalizeError(rawError);
       await db.insert(
         `INSERT INTO error_reports (
           software_key, client_identifier, hostname, source,
@@ -182,21 +220,21 @@ updErrorReportRouter.post('/', async (req, res, next) => {
           error.level,
           error.label,
           error.message.substring(0, 65000),
-          error.file || null,
-          error.line || null,
-          error.column || null,
-          error.trace || null,
-          error.url || null,
-          error.request?.method || null,
-          error.request?.uri || null,
-          error.request?.route || null,
-          error.request?.ip || null,
-          error.request?.user_agent || null,
+          error.file,
+          error.line,
+          error.column,
+          error.trace,
+          error.url,
+          error.request_method,
+          error.request_uri,
+          error.request_route,
+          error.request_ip,
+          error.request_user_agent,
           body.app_version || null,
           body.metadata?.php_version || null,
           body.metadata?.server_software || null,
           body.os_info || null,
-          error.timestamp || new Date().toISOString(),
+          error.timestamp,
           body.metadata?.extra ? JSON.stringify(body.metadata.extra) : null,
         ]
       );
@@ -204,9 +242,9 @@ updErrorReportRouter.post('/', async (req, res, next) => {
     }
 
     // Update client error summary
-    const errorCount = body.errors.filter(e => e.level === 'error').length;
-    const warningCount = body.errors.filter(e => e.level === 'warning').length;
-    const noticeCount = body.errors.filter(e => e.level === 'notice').length;
+    const errorCount = body.errors.filter(e => (e.level || e.error_level) === 'error').length;
+    const warningCount = body.errors.filter(e => (e.level || e.error_level) === 'warning').length;
+    const noticeCount = body.errors.filter(e => (e.level || e.error_level) === 'notice').length;
 
     await db.execute(
       `INSERT INTO client_error_summaries

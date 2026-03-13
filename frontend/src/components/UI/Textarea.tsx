@@ -26,6 +26,9 @@ const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(({
     disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed
     transition-colors duration-200
     resize-vertical
+    dark:bg-dark-800 dark:border-dark-600 dark:text-gray-100 dark:placeholder-gray-500
+    dark:focus:ring-blue-400 dark:focus:border-blue-400
+    dark:disabled:bg-dark-900 dark:disabled:text-gray-600
   `;
 
   const errorClasses = error 
@@ -35,9 +38,9 @@ const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(({
   return (
     <div className={fullWidth ? 'w-full' : 'w-auto'}>
       {label && (
-        <label className="block text-sm font-medium text-gray-700 mb-1.5">
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
           {label}
-          {required && <span className="text-red-500 ml-1">*</span>}
+          {required && <span className="text-red-500 dark:text-red-400 ml-1">*</span>}
         </label>
       )}
       
@@ -49,7 +52,7 @@ const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(({
       />
       
       {(error || helperText) && (
-        <p className={`mt-1.5 text-xs ${error ? 'text-red-600' : 'text-gray-500'}`}>
+        <p className={`mt-1.5 text-xs ${error ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>
           {error || helperText}
         </p>
       )}

@@ -7,6 +7,8 @@
 **Router**: `/v1/pricing` with 6 endpoints (350 LOC)  
 **Frontend**: Pricing management page (451 LOC) + ItemPickerModal integration
 
+> **Note (June 2025)**: This module manages *product/service pricing items* for quotations and invoices. For **AI package pricing** (the landing page pricing tiers — Free, Starter, Professional, etc.), see the [Packages module](../Packages/README.md). The landing page `LandingPage.tsx` now fetches package pricing dynamically from `GET /packages/pricing` with a hardcoded fallback. The `config/credits.ts` file now uses `REQUEST_PRICING` (replacing `CREDIT_COSTS`) for per-request AI credit costs.
+
 ---
 
 ## Version History

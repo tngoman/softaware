@@ -30,8 +30,9 @@ The Admin module provides comprehensive administrative control over the entire S
 | Frontend LOC | ~6,012 |
 | Backend LOC | ~3,568 |
 | Total LOC | ~9,580 |
-| API endpoints | 116 |
+| API endpoints | 122 |
 | MySQL tables | 25+ (users, roles, permissions, role_permissions, user_roles, user_two_factor, credentials, sys_settings, email_log, sms_log, staff_software_tokens, assistants, widget_clients, credit_packages, credit_balances, credit_transactions, teams, device_activations, client_agents, activation_keys, subscriptions, update_software, update_modules, update_releases, update_clients, generated_sites, lead_captures, cases, case_comments, case_activity) |
+| SQLite databases | 1 (audit_log.db — admin action audit trail) |
 | JSON storage files | 1 (enterprise_endpoints.json) |
 | Protected routes | All (requireAuth + requireAdmin) |
 
@@ -49,7 +50,7 @@ The Admin module provides comprehensive administrative control over the entire S
 │  │  AIOverview.tsx              — AI system dashboard & metrics        │    │
 │  │  Dashboard.tsx               — Software tasks & project management  │    │
 │  │  ClientManager.tsx           — User accounts & kill switches        │    │
-│  │  AICredits.tsx               — Credit packages & balances           │    │
+│  │  AIPackages.tsx              — Package & credit management (replaces AICredits.tsx) │    │
 │  │  EnterpriseEndpoints.tsx     — Dynamic webhook configuration        │    │
 │  │  AdminCaseManagement.tsx     — Case triage, bulk ops & analytics    │    │
 │  │  SystemSettings.tsx          — System settings (KV) & SMTP config  │    │
@@ -64,7 +65,9 @@ The Admin module provides comprehensive administrative control over the entire S
 │  │  • AdminConfigModel  — System stats & AI config                 │    │
 │  │  • AdminClientModel  — Client CRUD & masquerade                 │    │
 │  │  • AdminEnterpriseModel — Enterprise endpoints CRUD             │    │
-│  │  • AdminCreditsModel — Credit packages & balances               │    │
+│  │  • AdminCreditsModel — Credit packages & balances (legacy)      │    │
+│  │  • AdminPackagesModel — Package definitions, subscriptions,     │    │
+│  │                         transactions, user links (new)          │    │
 │  │  SystemModels.ts — System API client layer                      │    │
 │  │  • SystemSettingModel — sys_settings CRUD                       │    │
 │  │  • UserModel         — User CRUD + role assignment              │    │
@@ -122,18 +125,35 @@ The Admin module provides comprehensive administrative control over the entire S
 │  │    → PATCH /:id/status      — Status kill switch                │    │
 │  │    → GET /:id/logs          — Request logs                      │    │
 │  │                                                                  │    │
-│  │  adminCredits.ts            /admin/credits/*                    │    │
-│  │    → GET /packages          — List credit packages              │    │
-│  │    → POST /packages         — Create package                    │    │
-│  │    → PUT /packages/:id      — Update package                    │    │
-│  │    → DELETE /packages/:id   — Deactivate package                │    │
-│  │    → POST /packages/seed    — Seed default packages             │    │
-│  │    → GET /balances          — All team balances                 │    │
-│  │    → GET /balances/:teamId  — Single team balance               │    │
-│  │    → POST /balances/:teamId/adjust — Adjust team credits        │    │
-│  │    → GET /transactions      — All transactions                  │    │
-│  │    → GET /balances/:teamId/transactions — Team transactions     │    │
-│  │    → GET /pricing           — View pricing config               │    │
+│  │  adminCredits.ts            /admin/credits/* (LEGACY)           │    │
+│  │    → GET /packages          — List credit packages (legacy)     │    │
+│  │    → POST /packages         — Create package (legacy)           │    │
+│  │    → PUT /packages/:id      — Update package (legacy)           │    │
+│  │    → DELETE /packages/:id   — Deactivate package (legacy)       │    │
+│  │    → POST /packages/seed    — Seed default packages (legacy)    │    │
+│  │    → GET /balances          — All team balances (legacy)        │    │
+│  │    → GET /balances/:teamId  — Single team balance (legacy)      │    │
+│  │    → POST /balances/:teamId/adjust — Adjust team credits (leg.) │    │
+│  │    → GET /transactions      — All transactions (legacy)         │    │
+│  │    → GET /balances/:teamId/transactions — Team txns (legacy)    │    │
+│  │    → GET /pricing           — View pricing config (legacy)      │    │
+│  │                                                                  │    │
+│  │  adminPackages.ts           /admin/packages/* (NEW)             │    │
+│  │    → GET /definitions       — List package definitions          │    │
+│  │    → POST /definitions      — Create package definition         │    │
+│  │    → PUT /definitions/:id   — Update package definition         │    │
+│  │    → DELETE /definitions/:id — Deactivate package               │    │
+│  │    → GET /subscriptions     — List all subscriptions            │    │
+│  │    → POST /subscriptions    — Assign package to contact         │    │
+│  │    → PATCH /subscriptions/:id/status — Update subscription      │    │
+│  │    → GET /transactions      — All credit transactions           │    │
+│  │    → POST /credits/adjust   — Adjust contact credits            │    │
+│  │    → GET /user-links        — List user-contact links           │    │
+│  │    → POST /user-links       — Link user to contact              │    │
+│  │    → DELETE /user-links/:id — Remove user-contact link          │    │
+│  │    → GET /usage-stats       — Credit usage statistics           │    │
+│  │    → GET /dashboard         — Package system dashboard          │    │
+│  │    → GET /definitions/:id/subscribers — Package subscribers     │    │
 │  │                                                                  │    │
 │  │  adminConfig.ts             /admin/config/*                     │    │
 │  │    → GET /payment-gateways  — Payment gateway status            │    │
@@ -190,9 +210,13 @@ The Admin module provides comprehensive administrative control over the entire S
 │  │    • staff_software_tokens — staff tokens for task proxy        │    │
 │  │    • assistants — status, tier, pages_indexed                   │    │
 │  │    • widget_clients — status, subscription_tier                 │    │
-│  │    • credit_packages — pricing, bonus credits                   │    │
-│  │    • credit_balances — team balances, thresholds                │    │
-│  │    • credit_transactions — audit trail, payment tracking        │    │
+│  │    • credit_packages — pricing, bonus credits (legacy)          │    │
+│  │    • credit_balances — team balances, thresholds (legacy)       │    │
+│  │    • credit_transactions — audit trail, payment tracking (leg.) │    │
+│  │    • packages — package definitions (7 seeded tiers) (NEW)      │    │
+│  │    • contact_packages — contact subscriptions + balances (NEW)  │    │
+│  │    • package_transactions — credit audit trail (NEW)            │    │
+│  │    • user_contact_link — user-to-contact mapping (NEW)          │    │
 │  │    • teams / team_members — credit owners, membership           │    │
 │  │    • device_activations — desktop client activations            │    │
 │  │    • client_agents — agents per device                          │    │
@@ -296,9 +320,38 @@ The Admin module provides comprehensive administrative control over the entire S
 
 ---
 
-### 3.3 AI Credits Management
+### 3.3 AI Packages Management (formerly AI Credits)
 
-**Purpose:** Full lifecycle management of credit packages, team balances, and transaction history.
+> ⚠️ **Updated June 2025**: The legacy `AICredits.tsx` page has been replaced by `AIPackages.tsx`. The sidebar link changed from "AI Credits" to "AI Packages" and the route changed from `/admin/ai-credits` to `/admin/packages`. The new page provides a 4-tab interface for managing package definitions, contact subscriptions, credit transactions, and user-contact links. See [Packages module](../Packages/README.md) for full documentation.
+
+**Purpose:** Full lifecycle management of package definitions, contact-scoped subscriptions, credit balances, and transaction history.
+
+**Tab 1 — Packages:**
+- View all package definitions (Free, Starter, Professional, BYOE, Managed, Architecture & Build, Staff)
+- Create/edit packages with pricing, credit allocation, and feature limits
+- Toggle active/public/featured status
+- Manage `max_users`, `max_agents`, `max_widgets`, `max_landing_pages`, `max_enterprise_endpoints`
+
+**Tab 2 — Subscriptions:**
+- View all contact-package subscriptions with status badges
+- Assign packages to contacts with billing cycle selection
+- Update subscription status (TRIAL → ACTIVE → CANCELLED, etc.)
+- Monitor credit balances and usage per subscription
+
+**Tab 3 — Transactions:**
+- Full credit transaction audit trail
+- Filter by type (PURCHASE, USAGE, BONUS, REFUND, ADJUSTMENT, MONTHLY_ALLOCATION)
+- View per-transaction metadata (request type, token counts)
+- Admin credit adjustments with mandatory reason field
+
+**Tab 4 — User Links:**
+- Map users to contacts (companies) via `user_contact_link`
+- Assign roles (OWNER, ADMIN, MEMBER, STAFF)
+- Remove user-contact links
+
+**Legacy section retained below for reference:**
+
+**Purpose (Legacy):** Full lifecycle management of credit packages, team balances, and transaction history.
 
 **Credit Packages Tab:**
 - View all credit packages with pricing and bonus credits

@@ -4,8 +4,9 @@ import { Dialog, Transition } from '@headlessui/react';
 import { useAppStore } from '../../store';
 import { useSoftware } from '../../hooks/useSoftware';
 import { useTasks } from '../../hooks/useTasks';
+import { useBugs } from '../../hooks/useBugs';
 import { useModules } from '../../hooks/useModules';
-import { Software, Task } from '../../types';
+import { Software, Task, Bug } from '../../types';
 import {
   BugAntIcon,
   ArrowRightIcon,
@@ -98,15 +99,8 @@ const AdminDashboard: React.FC = () => {
   const [phasePopoverOpen, setPhasePopoverOpen] = useState(false);
   const [selectedPhase, setSelectedPhase] = useState<string | null>(null);
 
-  // Derive apiUrl from selected software
-  const apiUrl = useMemo(() => {
-    if (!selectedSoftware) return null;
-    return selectedSoftware.external_mode === 'live'
-      ? selectedSoftware.external_live_url
-      : selectedSoftware.external_test_url;
-  }, [selectedSoftware]);
-
-  const { tasks, loading, error, loadTasks } = useTasks({ apiUrl });
+  const { tasks, loading, error, loadTasks } = useTasks({ softwareId: selectedSoftware?.id });
+  const { bugs, loading: bugsLoading, loadBugs } = useBugs({ softwareId: selectedSoftware?.id });
   const { modules } = useModules(selectedSoftware?.id);
 
   // Restore selected software from localStorage
@@ -120,10 +114,13 @@ const AdminDashboard: React.FC = () => {
     }
   }, [softwareLoading, softwareList]);
 
-  // Load tasks when apiUrl changes
+  // Load tasks and bugs when selected software changes
   useEffect(() => {
-    if (apiUrl) loadTasks();
-  }, [apiUrl, loadTasks]);
+    if (selectedSoftware?.id) {
+      loadTasks();
+      loadBugs();
+    }
+  }, [selectedSoftware?.id, loadTasks, loadBugs]);
 
   // Open auth dialog on 401
   useEffect(() => {
@@ -211,16 +208,15 @@ const AdminDashboard: React.FC = () => {
     // Completed unbilled
     const completedUnbilled = unbilledTasks.filter(t => t.status === 'completed').length;
 
-    // Bug tasks
-    const bugTasks = activeTasks
-      .filter(t => t.type === 'bug-fix')
-      .sort((a, b) =>
-        new Date(b.created_at || b.start || b.date || 0).getTime() -
-        new Date(a.created_at || a.start || a.date || 0).getTime()
-      );
-    const oldestBug = bugTasks.length > 0 ? bugTasks[bugTasks.length - 1] : null;
+    // Bug stats — sourced from the bugs system, not tasks
+    const activeBugs = bugs.filter(b =>
+      b.status !== 'resolved' && b.status !== 'closed'
+    ).sort((a, b) =>
+      new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+    );
+    const oldestBug = activeBugs.length > 0 ? activeBugs[activeBugs.length - 1] : null;
     const oldestBugAge = oldestBug
-      ? Math.floor((Date.now() - new Date(oldestBug.created_at || oldestBug.start || oldestBug.date || 0).getTime()) / 86400000)
+      ? Math.floor((Date.now() - new Date(oldestBug.created_at || 0).getTime()) / 86400000)
       : 0;
 
     // Recent 8
@@ -244,13 +240,13 @@ const AdminDashboard: React.FC = () => {
       byStatus,
       byPhase,
       byModule,
-      bugTasks,
+      activeBugs,
       oldestBug,
       oldestBugAge,
       totalHours,
       recent,
     };
-  }, [tasks, role, roleMeta.focusPhase, modules]);
+  }, [tasks, bugs, role, roleMeta.focusPhase, modules]);
 
   // First name
   const firstName = user?.first_name || user?.user_name?.split(' ')[0] || user?.email?.split('@')[0] || '';
@@ -261,6 +257,14 @@ const AdminDashboard: React.FC = () => {
       localStorage.setItem('openTaskId', String(task.id));
     }
     navigate('/tasks');
+  }, [navigate]);
+
+  // Handle bug click — navigate to the Bugs page
+  const handleBugClick = useCallback((bug: Bug) => {
+    if (bug?.id) {
+      localStorage.setItem('openBugId', String(bug.id));
+    }
+    navigate('/bugs');
   }, [navigate]);
 
   // Handle phase click
@@ -327,7 +331,7 @@ const AdminDashboard: React.FC = () => {
             </select>
           </div>
           <button
-            onClick={() => loadTasks()}
+            onClick={() => { loadTasks(); loadBugs(); }}
             disabled={loading || !selectedSoftware}
             className="flex items-center gap-2 px-3 py-2 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 disabled:opacity-40 transition-colors"
             title="Refresh tasks"
@@ -477,24 +481,42 @@ const AdminDashboard: React.FC = () => {
               <div className="flex items-center gap-2 mb-4">
                 <BugAntIcon className="h-5 w-5 text-red-500" />
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Active Bugs</h3>
-                {stats.bugTasks.length > 0 && (
-                  <span className="ml-auto text-xs font-semibold bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-2 py-0.5 rounded-full">{stats.bugTasks.length}</span>
+                {stats.activeBugs.length > 0 && (
+                  <span className="ml-auto text-xs font-semibold bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-2 py-0.5 rounded-full">{stats.activeBugs.length}</span>
                 )}
               </div>
               <div className="space-y-2 max-h-[200px] overflow-y-auto">
-                {stats.bugTasks.length > 0 ? stats.bugTasks.map(t => (
-                  <div 
-                    key={t.id} 
-                    onClick={() => handleTaskClick(t)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors cursor-pointer"
-                  >
-                    <div className={`h-6 w-6 rounded-lg ${STATUS_COLORS[t.status]} text-white flex items-center justify-center shrink-0`}>
-                      <BugAntIcon className="h-3.5 w-3.5" />
-                    </div>
-                    <span className="text-xs text-gray-800 dark:text-gray-200 truncate flex-1">{t.title}</span>
-                    <span className="text-xs text-gray-400 dark:text-gray-500 shrink-0">{relativeDate(t.created_at || t.start || t.date)}</span>
+                {bugsLoading ? (
+                  <div className="text-center py-8">
+                    <ArrowPathIcon className="animate-spin h-6 w-6 text-gray-400 mx-auto mb-2" />
+                    <p className="text-xs text-gray-400 dark:text-gray-500">Loading bugs…</p>
                   </div>
-                )) : (
+                ) : stats.activeBugs.length > 0 ? stats.activeBugs.map(b => {
+                  const severityColor: Record<string, string> = {
+                    critical: 'bg-red-500',
+                    high: 'bg-orange-500',
+                    medium: 'bg-amber-500',
+                    low: 'bg-emerald-500',
+                  };
+                  return (
+                    <div 
+                      key={b.id} 
+                      onClick={() => handleBugClick(b)}
+                      className="flex items-center gap-2 p-2 rounded-lg border border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors cursor-pointer"
+                    >
+                      <div className={`h-6 w-6 rounded-lg ${severityColor[b.severity] || 'bg-gray-400'} text-white flex items-center justify-center shrink-0`}>
+                        <BugAntIcon className="h-3.5 w-3.5" />
+                      </div>
+                      <span className="text-xs text-gray-800 dark:text-gray-200 truncate flex-1">{b.title}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded capitalize shrink-0 ${
+                        b.severity === 'critical' ? 'text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400' :
+                        b.severity === 'high' ? 'text-orange-600 bg-orange-50 dark:bg-orange-900/20 dark:text-orange-400' :
+                        'text-gray-500 dark:text-gray-400'
+                      }`}>{b.severity}</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500 shrink-0">{relativeDate(b.created_at)}</span>
+                    </div>
+                  );
+                }) : (
                   <div className="text-center py-8">
                     <CheckCircleIcon className="h-10 w-10 text-emerald-300 dark:text-emerald-700 mx-auto mb-2" />
                     <p className="text-xs text-gray-400 dark:text-gray-500">No active bugs</p>

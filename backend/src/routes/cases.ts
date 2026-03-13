@@ -180,10 +180,7 @@ casesRouter.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
     
     // Notify admins
     const admins = await db.query<any>(
-      `SELECT DISTINCT u.id FROM users u
-       JOIN user_roles ur ON u.id COLLATE utf8mb4_unicode_ci = ur.user_id COLLATE utf8mb4_unicode_ci
-       JOIN roles r ON r.id COLLATE utf8mb4_unicode_ci = ur.role_id COLLATE utf8mb4_unicode_ci
-       WHERE r.slug IN ('admin', 'super_admin')`
+      `SELECT id FROM users WHERE is_admin = 1`
     );
     
     for (const admin of admins) {
@@ -278,12 +275,11 @@ casesRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => 
     }
     
     // Check access: reporter or admin
-    const isAdmin = await db.queryOne<any>(
-      `SELECT 1 FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id = ? AND r.slug IN ('admin', 'super_admin')`,
+    const adminRow = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
       [userId]
     );
+    const isAdmin = adminRow && adminRow.is_admin;
     
     if (caseData.reported_by !== userId && !isAdmin) {
       return res.status(403).json({ success: false, error: 'Access denied' });
@@ -342,12 +338,11 @@ casesRouter.patch('/:id', requireAuth, async (req: AuthRequest, res: Response) =
     }
     
     // Check access: reporter or admin
-    const isAdmin = await db.queryOne<any>(
-      `SELECT 1 FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id = ? AND r.slug IN ('admin', 'super_admin')`,
+    const adminRow2 = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
       [userId]
     );
+    const isAdmin = adminRow2 && adminRow2.is_admin;
     
     if (existing.reported_by !== userId && !isAdmin) {
       return res.status(403).json({ success: false, error: 'Access denied' });

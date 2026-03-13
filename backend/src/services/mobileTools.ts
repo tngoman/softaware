@@ -370,15 +370,22 @@ const GET_SITE_DEPLOYMENTS: ToolDefinition = {
 };
 
 // ============================================================================
-// Staff Tools — Administrative (global scope) + Task Management
+// Staff Tools — Administrative (global scope) + Task Management (v2.0)
+//
+// Tasks v2.0 — Dual-path architecture:
+//   READ:  Direct from local MySQL `local_tasks` table (synced from external sources)
+//   WRITE: Proxy to external APIs via `task_sources` table (source-level API key auth)
+//   LOCAL: Bookmark, priority, tags, color labels managed locally (no external call)
 // ============================================================================
+
+// ── Task Core CRUD ──────────────────────────────────────────────
 
 const LIST_TASKS: ToolDefinition = {
   type: 'function',
   function: {
     name: 'list_tasks',
     description:
-      'List development tasks from the external software API. Shows task titles, statuses, assignees, and workflow phases. Use when staff says "show my tasks", "what tasks are pending", "list development tasks", etc.',
+      'List tasks from the local database (synced from external sources). Shows task titles, statuses, assignees, priorities, and workflow phases. Supports filtering by status, type, priority, bookmarks, tags, search text, and date range. Use when staff says "show my tasks", "what tasks are pending", "list development tasks", "high priority tasks", "bookmarked tasks", etc.',
     parameters: {
       type: 'object',
       properties: {
@@ -387,13 +394,64 @@ const LIST_TASKS: ToolDefinition = {
           description: 'Filter tasks by status. Leave empty for all tasks.',
           enum: ['new', 'progress', 'completed', 'pending'],
         },
+        type: {
+          type: 'string',
+          description: 'Filter by task type.',
+          enum: ['development', 'bug-fix', 'feature', 'maintenance', 'support'],
+        },
+        priority: {
+          type: 'string',
+          description: 'Filter by priority level.',
+          enum: ['urgent', 'high', 'normal', 'low'],
+        },
+        workflow_phase: {
+          type: 'string',
+          description: 'Filter by workflow phase.',
+          enum: ['intake', 'triage', 'development', 'quality_review', 'verification', 'resolution'],
+        },
+        bookmarked: {
+          type: 'string',
+          description: 'Set to "1" to show only bookmarked tasks.',
+          enum: ['0', '1'],
+        },
+        tag: {
+          type: 'string',
+          description: 'Filter by a specific tag.',
+        },
+        search: {
+          type: 'string',
+          description: 'Search in task titles, descriptions, and external IDs.',
+        },
         assignedToMe: {
           type: 'string',
           description: 'Set to "true" to show only tasks assigned to the current user.',
           enum: ['true', 'false'],
         },
+        limit: {
+          type: 'string',
+          description: 'Maximum number of tasks to return (default "20", max "50").',
+        },
       },
       required: [],
+    },
+  },
+};
+
+const GET_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_task',
+    description:
+      'Get full details of a single task including description, notes, hours, dates, priority, tags, and workflow phase. Use when staff asks about a specific task, e.g. "show me task 42", "details on that bug fix", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID (local DB ID or external ID number).',
+        },
+      },
+      required: ['taskId'],
     },
   },
 };
@@ -403,7 +461,7 @@ const CREATE_TASK: ToolDefinition = {
   function: {
     name: 'create_task',
     description:
-      'Create a new development task on the external software API. Use when staff says "create a task", "add a new ticket", "log a bug", "I need a feature request", etc.',
+      'Create a new task on the external software portal. The task will sync back to the local database automatically. Use when staff says "create a task", "add a new ticket", "log a bug", "I need a feature request", etc.',
     parameters: {
       type: 'object',
       properties: {
@@ -413,7 +471,7 @@ const CREATE_TASK: ToolDefinition = {
         },
         description: {
           type: 'string',
-          description: 'Detailed description of the task (can include HTML).',
+          description: 'Detailed description of the task.',
         },
         type: {
           type: 'string',
@@ -438,6 +496,10 @@ const CREATE_TASK: ToolDefinition = {
           type: 'string',
           description: 'Estimated hours (e.g. "2.5").',
         },
+        software_id: {
+          type: 'string',
+          description: 'The software source ID to create the task on. If omitted, uses the first available source.',
+        },
       },
       required: ['title', 'type'],
     },
@@ -449,13 +511,13 @@ const UPDATE_TASK: ToolDefinition = {
   function: {
     name: 'update_task',
     description:
-      'Update an existing task — change status, reassign, update description, log hours, or move to a different workflow phase. Use when staff says "mark task done", "move task to review", "assign task to X", "update task 42", etc.',
+      'Update an existing task — change status, reassign, update description, log hours, move to a different workflow phase, or set priority/color. Also syncs changes to the external source. Use when staff says "mark task done", "move task to review", "assign task to X", "update task 42", etc.',
     parameters: {
       type: 'object',
       properties: {
         taskId: {
           type: 'string',
-          description: 'The task ID (number) to update.',
+          description: 'The task ID (local DB ID or external ID) to update.',
         },
         status: {
           type: 'string',
@@ -479,6 +541,55 @@ const UPDATE_TASK: ToolDefinition = {
           type: 'string',
           description: 'Updated description.',
         },
+        title: {
+          type: 'string',
+          description: 'Updated task title.',
+        },
+        priority: {
+          type: 'string',
+          description: 'Set task priority.',
+          enum: ['urgent', 'high', 'normal', 'low'],
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+const DELETE_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'delete_task',
+    description:
+      'Soft-delete a task (marks as deleted locally, syncs deletion on next sync). Use when staff says "delete task 42", "remove that ticket", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID to delete.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+// ── Task Comments ───────────────────────────────────────────────
+
+const GET_TASK_COMMENTS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_task_comments',
+    description:
+      'Get all comments on a task from the external source. Use when staff asks "show comments on task 42", "what notes are on that ticket", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The external task ID to get comments for.',
+        },
       },
       required: ['taskId'],
     },
@@ -490,13 +601,13 @@ const ADD_TASK_COMMENT: ToolDefinition = {
   function: {
     name: 'add_task_comment',
     description:
-      'Add a comment to a task. Use when staff says "comment on task 42", "add a note to that ticket", "leave a comment", etc.',
+      'Add a comment to a task on the external source. Use when staff says "comment on task 42", "add a note to that ticket", "leave a comment", etc.',
     parameters: {
       type: 'object',
       properties: {
         taskId: {
           type: 'string',
-          description: 'The task ID (number) to comment on.',
+          description: 'The external task ID to comment on.',
         },
         content: {
           type: 'string',
@@ -509,6 +620,283 @@ const ADD_TASK_COMMENT: ToolDefinition = {
         },
       },
       required: ['taskId', 'content'],
+    },
+  },
+};
+
+// ── Task Local Enhancements ─────────────────────────────────────
+
+const BOOKMARK_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'bookmark_task',
+    description:
+      'Toggle the bookmark status of a task. Bookmarks are local-only (not synced to external). Use when staff says "bookmark task 42", "save that task", "unbookmark it", "star that ticket", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID to bookmark/unbookmark.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+const SET_TASK_PRIORITY: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'set_task_priority',
+    description:
+      'Set the priority level of a task. Priority is a local enhancement. Use when staff says "set task 42 to urgent", "make that high priority", "lower the priority", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID to update priority for.',
+        },
+        priority: {
+          type: 'string',
+          description: 'The priority level.',
+          enum: ['urgent', 'high', 'normal', 'low'],
+        },
+      },
+      required: ['taskId', 'priority'],
+    },
+  },
+};
+
+const SET_TASK_COLOR: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'set_task_color',
+    description:
+      'Set or clear the color label on a task. Color labels are local-only visual markers. Use when staff says "label task 42 red", "color that task blue", "remove the color", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID.',
+        },
+        color_label: {
+          type: 'string',
+          description: 'The color label (e.g. "red", "blue", "green", "yellow", "purple", "orange"). Send empty string to clear.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+const SET_TASK_TAGS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'set_task_tags',
+    description:
+      'Set tags on a task (replaces all existing tags). Tags are local-only. Use when staff says "tag task 42 as frontend", "add tags urgent and mobile to that task", "clear tags on task 42", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The task ID.',
+        },
+        tags: {
+          type: 'string',
+          description: 'Comma-separated list of tags (e.g. "frontend,urgent,mobile"). Send empty string to clear all tags.',
+        },
+      },
+      required: ['taskId', 'tags'],
+    },
+  },
+};
+
+// ── Task Workflow Actions ───────────────────────────────────────
+
+const START_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'start_task',
+    description:
+      'Start working on a task (transitions status to in-progress on the external source). Use when staff says "start task 42", "begin working on that", "pick up that task", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The external task ID to start.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+const COMPLETE_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'complete_task',
+    description:
+      'Mark a task as completed on the external source. Use when staff says "complete task 42", "finish that task", "mark it done", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The external task ID to complete.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+const APPROVE_TASK: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'approve_task',
+    description:
+      'Approve a completed task. Use when staff says "approve task 42", "sign off on that", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        taskId: {
+          type: 'string',
+          description: 'The external task ID to approve.',
+        },
+      },
+      required: ['taskId'],
+    },
+  },
+};
+
+// ── Task Stats & Queries ────────────────────────────────────────
+
+const GET_TASK_STATS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_task_stats',
+    description:
+      'Get task statistics — counts by status, type, and workflow phase. Use when staff asks "how many tasks are open", "task statistics", "project status overview", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+const GET_PENDING_APPROVALS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_pending_approvals',
+    description:
+      'Get a list of tasks waiting for approval. Use when staff asks "what needs approval", "pending sign-offs", "tasks awaiting review", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+const GET_TASK_TAGS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_task_tags',
+    description:
+      'Get all unique tags used across tasks. Use when staff asks "what tags exist", "show all tags", "list available tags", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+// ── Task Sync ───────────────────────────────────────────────────
+
+const SYNC_TASKS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'sync_tasks',
+    description:
+      'Trigger a sync of tasks from all external sources into the local database. Use when staff says "sync tasks", "refresh tasks", "pull latest tasks", "update from external", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+const GET_SYNC_STATUS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_sync_status',
+    description:
+      'Check the sync status — when each source was last synced, success/failure, and task counts. Use when staff asks "when was last sync", "sync status", "are tasks up to date", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+// ── Invoice Staging ─────────────────────────────────────────────
+
+const STAGE_TASKS_FOR_INVOICE: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'stage_tasks_for_invoice',
+    description:
+      'Stage completed tasks for invoicing. Staged tasks can be reviewed before being processed into a bill. Use when staff says "invoice these tasks", "stage tasks for billing", "prepare invoice for tasks 42, 43, 44", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        task_ids: {
+          type: 'string',
+          description: 'Comma-separated external task IDs to stage (e.g. "42,43,44").',
+        },
+        bill_date: {
+          type: 'string',
+          description: 'Invoice date (YYYY-MM-DD format). Defaults to today if omitted.',
+        },
+      },
+      required: ['task_ids'],
+    },
+  },
+};
+
+const GET_STAGED_INVOICES: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_staged_invoices',
+    description:
+      'View all tasks currently staged for invoicing. Use when staff asks "what\'s staged for billing", "show invoice queue", "pending invoices", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+const PROCESS_STAGED_INVOICES: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'process_staged_invoices',
+    description:
+      'Process all staged tasks into actual invoices on the external portal. This finalizes the billing. Use when staff says "process the invoices", "finalize billing", "send invoices", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
     },
   },
 };
@@ -1005,6 +1393,244 @@ const CREATE_SCHEDULED_CALL: ToolDefinition = {
   },
 };
 
+// ── Staff Bug Tracking Tools ──────────────────────────────────────
+
+const LIST_BUGS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'list_bugs',
+    description:
+      'List bug reports. Can filter by status, severity, workflow phase, software, or assignee. Use when staff says "show bugs", "any critical bugs", "open bugs in intake", "bugs assigned to me", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          description: 'Filter by bug status.',
+          enum: ['open', 'in-progress', 'pending-qa', 'resolved', 'closed', 'reopened'],
+        },
+        severity: {
+          type: 'string',
+          description: 'Filter by severity level.',
+          enum: ['critical', 'high', 'medium', 'low'],
+        },
+        workflow_phase: {
+          type: 'string',
+          description: 'Filter by workflow phase.',
+          enum: ['intake', 'qa', 'development'],
+        },
+        software_id: {
+          type: 'string',
+          description: 'Filter by software product ID (numeric).',
+        },
+        assigned_to: {
+          type: 'string',
+          description: 'Filter by assigned user ID (numeric).',
+        },
+        search: {
+          type: 'string',
+          description: 'Search in title, description, or reporter name.',
+        },
+        limit: {
+          type: 'string',
+          description: 'Max results (default "20").',
+        },
+      },
+      required: [],
+    },
+  },
+};
+
+const GET_BUG_DETAILS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_bug_details',
+    description:
+      'Get full details of a bug report including description, current/expected behaviour, comments, and attachments. Use when staff asks about a specific bug, e.g. "show bug #5", "bug details", "what is bug 12 about".',
+    parameters: {
+      type: 'object',
+      properties: {
+        bugId: {
+          type: 'string',
+          description: 'The bug ID (numeric).',
+        },
+      },
+      required: ['bugId'],
+    },
+  },
+};
+
+const CREATE_BUG: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'create_bug',
+    description:
+      'Create a new bug report. Use when staff says "report a bug", "log a bug", "create a bug report", "found an issue", etc. Title and reporter name are required.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Short title describing the bug.',
+        },
+        reporter_name: {
+          type: 'string',
+          description: 'Name (or email) of the person reporting the bug.',
+        },
+        description: {
+          type: 'string',
+          description: 'Detailed description of the bug.',
+        },
+        current_behaviour: {
+          type: 'string',
+          description: 'What currently happens (the buggy behaviour).',
+        },
+        expected_behaviour: {
+          type: 'string',
+          description: 'What should happen instead.',
+        },
+        severity: {
+          type: 'string',
+          description: 'Bug severity level (default "medium").',
+          enum: ['critical', 'high', 'medium', 'low'],
+        },
+        software_id: {
+          type: 'string',
+          description: 'Software product ID (numeric) this bug relates to.',
+        },
+        software_name: {
+          type: 'string',
+          description: 'Software product name (for display).',
+        },
+        assigned_to: {
+          type: 'string',
+          description: 'User ID to assign the bug to (numeric).',
+        },
+        assigned_to_name: {
+          type: 'string',
+          description: 'Display name of the assignee.',
+        },
+      },
+      required: ['title', 'reporter_name'],
+    },
+  },
+};
+
+const UPDATE_BUG: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'update_bug',
+    description:
+      'Update a bug report — change status, severity, assignment, or add resolution notes. Use when staff says "close bug #5", "mark bug as resolved", "assign bug to X", "escalate bug severity", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        bugId: {
+          type: 'string',
+          description: 'The bug ID to update (numeric).',
+        },
+        status: {
+          type: 'string',
+          description: 'New status.',
+          enum: ['open', 'in-progress', 'pending-qa', 'resolved', 'closed', 'reopened'],
+        },
+        severity: {
+          type: 'string',
+          description: 'New severity.',
+          enum: ['critical', 'high', 'medium', 'low'],
+        },
+        assigned_to: {
+          type: 'string',
+          description: 'Assign to user ID (numeric).',
+        },
+        assigned_to_name: {
+          type: 'string',
+          description: 'Display name of the new assignee.',
+        },
+        resolution_notes: {
+          type: 'string',
+          description: 'Resolution notes (when resolving or closing).',
+        },
+        title: {
+          type: 'string',
+          description: 'Updated title.',
+        },
+        description: {
+          type: 'string',
+          description: 'Updated description.',
+        },
+      },
+      required: ['bugId'],
+    },
+  },
+};
+
+const ADD_BUG_COMMENT: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'add_bug_comment',
+    description:
+      'Add a comment to a bug report. Can be an internal team note or visible to the reporter. Use when staff says "add a note to bug #5", "comment on that bug", "update bug with notes", etc.',
+    parameters: {
+      type: 'object',
+      properties: {
+        bugId: {
+          type: 'string',
+          description: 'The bug ID to comment on (numeric).',
+        },
+        content: {
+          type: 'string',
+          description: 'The comment text.',
+        },
+        is_internal: {
+          type: 'string',
+          description: 'Whether this is an internal-only note (default "true"). Set to "false" to make visible to the reporter.',
+          enum: ['true', 'false'],
+        },
+      },
+      required: ['bugId', 'content'],
+    },
+  },
+};
+
+const UPDATE_BUG_WORKFLOW: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'update_bug_workflow',
+    description:
+      'Advance or change the workflow phase of a bug (Intake → QA → Development). Use when staff says "move bug to QA", "send bug to development", "move to intake", "advance bug workflow", etc. Note: this changes the phase only — status must be updated separately.',
+    parameters: {
+      type: 'object',
+      properties: {
+        bugId: {
+          type: 'string',
+          description: 'The bug ID (numeric).',
+        },
+        workflow_phase: {
+          type: 'string',
+          description: 'The new workflow phase.',
+          enum: ['intake', 'qa', 'development'],
+        },
+      },
+      required: ['bugId', 'workflow_phase'],
+    },
+  },
+};
+
+const GET_BUG_STATS: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'get_bug_stats',
+    description:
+      'Get bug tracking statistics — counts by status, severity, phase, and software. Use when staff asks "bug stats", "how many bugs", "bug overview", "bug dashboard", etc.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+};
+
 // ── Staff Chat Tools ──────────────────────────────────────────────
 
 const LIST_CONVERSATIONS: ToolDefinition = {
@@ -1106,12 +1732,34 @@ export function getToolsForRole(role: MobileRole): ToolDefinition[] {
     ...clientSiteTools,
   ];
 
-  // ── Staff admin tools ──
-  const staffAdminTools = [
+  // ── Staff task tools (v2.0 — comprehensive) ──
+  const staffTaskTools = [
     LIST_TASKS,
+    GET_TASK,
     CREATE_TASK,
     UPDATE_TASK,
+    DELETE_TASK,
+    GET_TASK_COMMENTS,
     ADD_TASK_COMMENT,
+    BOOKMARK_TASK,
+    SET_TASK_PRIORITY,
+    SET_TASK_COLOR,
+    SET_TASK_TAGS,
+    START_TASK,
+    COMPLETE_TASK,
+    APPROVE_TASK,
+    GET_TASK_STATS,
+    GET_PENDING_APPROVALS,
+    GET_TASK_TAGS,
+    SYNC_TASKS,
+    GET_SYNC_STATUS,
+    STAGE_TASKS_FOR_INVOICE,
+    GET_STAGED_INVOICES,
+    PROCESS_STAGED_INVOICES,
+  ];
+
+  // ── Staff admin tools ──
+  const staffAdminTools = [
     SEARCH_CLIENTS,
     SUSPEND_CLIENT_ACCOUNT,
     CHECK_CLIENT_HEALTH,
@@ -1154,15 +1802,28 @@ export function getToolsForRole(role: MobileRole): ToolDefinition[] {
     SEND_CHAT_MESSAGE,
   ];
 
+  // ── Staff bug tracking tools ──
+  const staffBugTools = [
+    LIST_BUGS,
+    GET_BUG_DETAILS,
+    CREATE_BUG,
+    UPDATE_BUG,
+    ADD_BUG_COMMENT,
+    UPDATE_BUG_WORKFLOW,
+    GET_BUG_STATS,
+  ];
+
   if (role === 'staff') {
     return [
       ...allClientTools,
+      ...staffTaskTools,
       ...staffAdminTools,
       ...staffCaseTools,
       ...staffCrmTools,
       ...staffFinanceTools,
       ...staffSchedulingTools,
       ...staffChatTools,
+      ...staffBugTools,
     ];
   }
 

@@ -65,14 +65,26 @@ export const siteBuilderService = {
       ? encryptPassword(data.ftpPassword)
       : null;
 
-    // Validate widget_client_id — only use if it's a valid UUID that exists in widget_clients
+    // Validate widget_client_id — accept assistant IDs (assistant-*) or legacy UUIDs
     let validWidgetClientId: string | null = null;
-    if (data.widgetClientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.widgetClientId)) {
-      const exists = await db.queryOne<{ id: string }>(
-        'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
-        [data.widgetClientId]
-      );
-      if (exists) validWidgetClientId = data.widgetClientId;
+    if (data.widgetClientId) {
+      const wid = data.widgetClientId.trim();
+      if (/^(assistant-|staff-assistant-)/.test(wid)) {
+        // New assistant system — verify it exists in assistants table
+        const exists = await db.queryOne<{ id: string }>(
+          'SELECT id FROM assistants WHERE id = ? LIMIT 1',
+          [wid]
+        );
+        if (exists) validWidgetClientId = wid;
+        else console.warn(`[SiteBuilder] Assistant not found: ${wid}`);
+      } else if (/^[0-9a-f]{8}-/i.test(wid)) {
+        // Legacy widget_clients UUID — accept if it exists
+        const exists = await db.queryOne<{ id: string }>(
+          'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
+          [wid]
+        );
+        if (exists) validWidgetClientId = wid;
+      }
     }
 
     await db.execute(
@@ -203,15 +215,24 @@ export const siteBuilderService = {
       values.push(data.ftpDirectory);
     }
     if (data.widgetClientId !== undefined) {
-      if (data.widgetClientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.widgetClientId)) {
-        const exists = await db.queryOne<{ id: string }>(
-          'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
-          [data.widgetClientId]
-        );
-        if (exists) {
-          updates.push('widget_client_id = ?');
-          values.push(data.widgetClientId);
+      if (data.widgetClientId) {
+        const wid = data.widgetClientId.trim();
+        let valid = false;
+        if (/^(assistant-|staff-assistant-)/.test(wid)) {
+          const exists = await db.queryOne<{ id: string }>(
+            'SELECT id FROM assistants WHERE id = ? LIMIT 1',
+            [wid]
+          );
+          valid = !!exists;
+        } else if (/^[0-9a-f]{8}-/i.test(wid)) {
+          const exists = await db.queryOne<{ id: string }>(
+            'SELECT id FROM widget_clients WHERE id = ? LIMIT 1',
+            [wid]
+          );
+          valid = !!exists;
         }
+        updates.push('widget_client_id = ?');
+        values.push(valid ? wid : null);
       } else {
         updates.push('widget_client_id = ?');
         values.push(null);
@@ -270,19 +291,16 @@ export const siteBuilderService = {
     const outputDir = `/var/tmp/generated_sites/${siteId}`;
     await fs.mkdir(outputDir, { recursive: true });
 
-    // Generate HTML
-    const html = this.buildHTML(site);
-    await fs.writeFile(path.join(outputDir, 'index.html'), html, 'utf8');
-
-    // Generate CSS
-    const css = this.buildCSS(site);
-    await fs.writeFile(path.join(outputDir, 'style.css'), css, 'utf8');
-
-    // Update status
-    await db.execute(
-      'UPDATE generated_sites SET status = ?, updated_at = ? WHERE id = ?',
-      ['generated', toMySQLDate(new Date()), siteId]
-    );
+    if (site.generated_html) {
+      // Use the AI-generated Tailwind HTML directly — it's self-contained (CDN)
+      await fs.writeFile(path.join(outputDir, 'index.html'), site.generated_html, 'utf8');
+    } else {
+      // Fallback: build basic HTML + CSS from raw site data
+      const html = this.buildHTML(site);
+      await fs.writeFile(path.join(outputDir, 'index.html'), html, 'utf8');
+      const css = this.buildCSS(site);
+      await fs.writeFile(path.join(outputDir, 'style.css'), css, 'utf8');
+    }
 
     return outputDir;
   },

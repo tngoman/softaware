@@ -1,8 +1,8 @@
 # Mobile App — QR-Based 2FA Authentication Guide
 
-**Version:** 1.0.0  
-**Date:** 2026-03-06  
-**Backend Version Required:** ≥ 1.5.0  
+**Version:** 2.0.0  
+**Date:** 2026-03-13  
+**Backend Version Required:** ≥ 1.9.0  
 **Base URL:** `https://api.softaware.net.za`
 
 ---
@@ -15,7 +15,7 @@ When a user has **TOTP (App)** selected as their 2FA method, the mobile app uses
 
 | Step | Actor | Action |
 |------|-------|--------|
-| 1 | Mobile App | User logs in with email + password |
+| 1 | Mobile App | User logs in with email + password **or PIN** |
 | 2 | Backend | Returns `requires_2fa: true`, `two_factor_method: 'totp'`, `temp_token` |
 | 3 | Mobile App | Detects `method === 'totp'` → calls `POST /auth/2fa/mobile-challenge` |
 | 4 | Backend | Creates a 5-minute challenge → returns `challenge_id` |
@@ -92,6 +92,163 @@ Standard login — no changes needed. When 2FA is required, the response include
 }
 ```
 
+### 2.1b POST /auth/pin/verify (NEW — PIN Quick Login)
+
+Alternative login using a 4-digit PIN instead of a password. The user must have previously set up a PIN in their account settings. Returns the same response structure as `/auth/login`.
+
+**Auth:** None (public endpoint)
+
+**Request:**
+
+```json
+{
+  "email": "user@example.com",
+  "pin": "1234"
+}
+```
+
+**Success Response (no 2FA):**
+
+```json
+{
+  "success": true,
+  "message": "PIN login successful",
+  "data": {
+    "token": "eyJhbGciOiJIUzI1NiIs...",
+    "user": {
+      "id": "bdc2efb3-d7b9-47b8-9a09-79daabb58c7e",
+      "email": "user@example.com",
+      "name": "John Doe",
+      "is_admin": false,
+      "role": { "id": 2, "name": "Client", "slug": "client" }
+    }
+  },
+  "accessToken": "eyJhbGciOiJIUzI1NiIs...",
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "expiresIn": "30d",
+  "user": { ... }
+}
+```
+
+**Success Response (2FA required — same as /auth/login):**
+
+```json
+{
+  "success": true,
+  "requires_2fa": true,
+  "two_factor_method": "totp",
+  "temp_token": "eyJhbGciOiJIUzI1NiIs...",
+  "challenge_id": "a1b2c3d4-e5f6-...",
+  "message": "2FA verification required"
+}
+```
+
+**Error Responses:**
+
+| Status | Message | When |
+|--------|---------|------|
+| 400 | "Invalid email or PIN" | Wrong email or wrong PIN (deliberately vague for security) |
+| 400 | "Account is not active" | User account is deactivated |
+| 400 | "PIN login is not set up for this account. Please sign in with your password." | No PIN configured |
+| 400 | "Too many failed attempts. PIN login locked for 15 minutes." | 5 failed attempts → lockout |
+| 400 | "Too many failed attempts. Try again in X minute(s)." | During active lockout window |
+
+**Rate Limiting:**
+- **5 failed attempts** → 15-minute lockout
+- Lockout resets automatically after 15 minutes
+- Successful PIN login resets the failed attempt counter
+
+### 2.1c GET /auth/pin/check/:email (NEW — Check PIN Availability)
+
+Public endpoint to check if an email address has PIN login enabled. Used by the mobile app to decide whether to show the PIN pad.
+
+**Auth:** None (public endpoint)
+
+**Request:**
+
+```
+GET /api/auth/pin/check/user%40example.com
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "has_pin": true
+  }
+}
+```
+
+**Notes:**
+- Returns `has_pin: false` for non-existent emails (does not reveal whether an email exists)
+- Email must be URL-encoded in the path
+
+### 2.1d GET /auth/pin/status (NEW — Current User PIN Status)
+
+Check if the currently authenticated user has a PIN set. Used in the settings screen.
+
+**Auth:** Required (JWT Bearer token)
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "has_pin": true
+  }
+}
+```
+
+### 2.1e POST /auth/pin/set (NEW — Set or Update PIN)
+
+Set or change the user's 4-digit PIN. Requires password confirmation.
+
+**Auth:** Required (JWT Bearer token)
+
+**Request:**
+
+```json
+{
+  "pin": "1234",
+  "password": "currentPassword123"
+}
+```
+
+**Success Response:**
+
+```json
+{
+  "success": true,
+  "message": "PIN set successfully"
+}
+```
+
+**Error Responses:**
+
+| Status | Message | When |
+|--------|---------|------|
+| 400 | "PIN must be exactly 4 digits" | PIN is not 4 digits |
+| 400 | "Incorrect password" | Password verification failed |
+| 400 | "User not found" | Invalid user ID |
+
+### 2.1f DELETE /auth/pin (NEW — Remove PIN)
+
+Remove the user's PIN login capability.
+
+**Auth:** Required (JWT Bearer token)
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "PIN removed"
+}
+```
+
 **Decision Logic in Mobile App:**
 
 ```
@@ -101,8 +258,12 @@ if (response.requires_2fa) {
   } else {
     → Use standard OTP code entry (email/SMS code)
   }
+} else {
+  → Store JWT, navigate to dashboard
 }
 ```
+
+> **Note:** This same decision logic applies whether the user logged in with email+password (`POST /auth/login`) or with email+PIN (`POST /auth/pin/verify`). Both endpoints return the same 2FA response structure.
 
 ---
 
@@ -285,7 +446,80 @@ try {
 
 ### 4.1 Login Screen Modification
 
-After `POST /auth/login` returns `requires_2fa: true`:
+The login screen should support two login modes: **password** and **PIN**.
+
+**Returning User Detection:**
+
+On app launch or when the login screen loads:
+1. Check if a `last_login_email` is stored locally
+2. If yes, call `GET /auth/pin/check/:email` to check if PIN login is available
+3. If `has_pin: true`, show PIN login mode by default
+4. If not, show standard email+password form
+
+```
+onLoginScreenLoad:
+  email = getStoredEmail("last_login_email")
+  if (email) {
+    response = GET /auth/pin/check/{email}
+    if (response.data.has_pin) {
+      showPinLoginMode(email)   // → PIN pad with 4 digit inputs
+    } else {
+      showPasswordLoginMode()   // → standard email + password
+    }
+  } else {
+    showPasswordLoginMode()
+  }
+```
+
+**PIN Login Mode UI:**
+
+```
+┌──────────────────────────────────────┐
+│         Welcome back, John!          │
+│         john@example.com             │
+│                                      │
+│         Enter your PIN               │
+│                                      │
+│      ┌───┐ ┌───┐ ┌───┐ ┌───┐       │
+│      │ ● │ │ ● │ │ ● │ │   │       │
+│      └───┘ └───┘ └───┘ └───┘       │
+│                                      │
+│      (auto-submits on 4th digit)     │
+│                                      │
+│  [ Use password instead ]            │ ← switches to password mode
+│  [ Not you? Different account ]      │ ← clears stored email, shows password
+│                                      │
+└──────────────────────────────────────┘
+```
+
+**PIN Login Flow:**
+
+```
+onPinComplete(pin):  // triggered when user enters 4th digit
+  response = POST /auth/pin/verify { email, pin }
+
+  if (response.success && !response.requires_2fa) {
+    storeEmail("last_login_email", email)
+    storeJWT(response.data.token)
+    navigateToDashboard()
+  }
+  else if (response.requires_2fa) {
+    // Same 2FA handling as password login
+    if (response.two_factor_method === "totp") {
+      navigate to → MobileQRAuthScreen
+    } else {
+      navigate to → OTPEntryScreen
+    }
+  }
+  else {
+    showError(response.message)
+    clearPinInputs()
+  }
+```
+
+**Password Login Flow (after `POST /auth/login`):**
+
+After successful login:
 
 ```
 if (two_factor_method === "totp") {
@@ -295,6 +529,12 @@ if (two_factor_method === "totp") {
 } else if (two_factor_method === "sms") {
   navigate to → OTPEntryScreen (with message "Check your phone")
 }
+```
+
+**Always store the email after any successful login:**
+
+```
+AuthModel.setLastEmail(email)  // saves to local storage for next login
 ```
 
 ### 4.2 MobileQRAuthScreen Design
@@ -439,6 +679,7 @@ Mobile App                   Backend                    Web Browser
 
 ### Happy Path
 - [ ] Login with email/password → receives `requires_2fa: true, method: 'totp'`
+- [ ] Login with email/PIN → receives `requires_2fa: true, method: 'totp'` (same flow)
 - [ ] Call `POST /auth/2fa/mobile-challenge` → receives `challenge_id`
 - [ ] Web profile shows QR code automatically (poll detects pending challenge)
 - [ ] Scan QR with mobile app camera
@@ -483,6 +724,7 @@ Mobile App                   Backend                    Web Browser
 - TOTP manual code entry (still works as fallback)
 - Registration flow
 - Password reset flow
+- PIN login integrates with all existing 2FA methods (no separate handling needed)
 
 ---
 
@@ -490,24 +732,55 @@ Mobile App                   Backend                    Web Browser
 
 | # | Method | Endpoint | Auth | Purpose |
 |---|--------|----------|------|---------|
-| 1 | POST | `/auth/login` | None | Login → returns temp_token if 2FA required |
-| 2 | POST | `/auth/2fa/mobile-challenge` | temp_token in body | Create QR challenge for mobile login |
-| 3 | POST | `/auth/2fa/mobile-verify` | temp_token in body | Submit scanned QR data → get JWT |
-| 4 | POST | `/auth/2fa/verify` | temp_token in body | Fallback: manual TOTP code entry |
-| 5 | POST | `/auth/2fa/send-otp` | temp_token in body | Resend OTP (email/SMS only, not TOTP) |
+| 1 | POST | `/auth/login` | None | Login with email+password → returns JWT or temp_token if 2FA |
+| 2 | POST | `/auth/pin/verify` | None | **NEW** Login with email+PIN → returns JWT or temp_token if 2FA |
+| 3 | GET | `/auth/pin/check/:email` | None | **NEW** Check if email has PIN login enabled |
+| 4 | GET | `/auth/pin/status` | JWT | **NEW** Check if current user has PIN set |
+| 5 | POST | `/auth/pin/set` | JWT | **NEW** Set or update 4-digit PIN (requires password) |
+| 6 | DELETE | `/auth/pin` | JWT | **NEW** Remove user's PIN |
+| 7 | POST | `/auth/2fa/mobile-challenge` | temp_token in body | Create QR challenge for mobile login |
+| 8 | POST | `/auth/2fa/mobile-verify` | temp_token in body | Submit scanned QR data → get JWT |
+| 9 | POST | `/auth/2fa/verify` | temp_token in body | Fallback: manual TOTP/OTP code entry |
+| 10 | POST | `/auth/2fa/send-otp` | temp_token in body | Resend OTP (email/SMS only, not TOTP) |
 
 ### cURL Examples
 
+**Login with PIN:**
+```bash
+curl -X POST https://api.softaware.net.za/api/auth/pin/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@example.com","pin":"1234"}'
+```
+
+**Check if email has PIN:**
+```bash
+curl https://api.softaware.net.za/api/auth/pin/check/user%40example.com
+```
+
+**Set PIN (authenticated):**
+```bash
+curl -X POST https://api.softaware.net.za/api/auth/pin/set \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer eyJhbGci...' \
+  -d '{"pin":"1234","password":"currentPassword123"}'
+```
+
+**Remove PIN (authenticated):**
+```bash
+curl -X DELETE https://api.softaware.net.za/api/auth/pin \
+  -H 'Authorization: Bearer eyJhbGci...'
+```
+
 **Create challenge:**
 ```bash
-curl -X POST https://api.softaware.net.za/auth/2fa/mobile-challenge \
+curl -X POST https://api.softaware.net.za/api/auth/2fa/mobile-challenge \
   -H 'Content-Type: application/json' \
   -d '{"temp_token":"eyJhbGciOiJIUzI1NiIs..."}'
 ```
 
 **Verify (after scanning QR):**
 ```bash
-curl -X POST https://api.softaware.net.za/auth/2fa/mobile-verify \
+curl -X POST https://api.softaware.net.za/api/auth/2fa/mobile-verify \
   -H 'Content-Type: application/json' \
   -d '{
     "temp_token": "eyJhbGciOiJIUzI1NiIs...",
@@ -518,7 +791,176 @@ curl -X POST https://api.softaware.net.za/auth/2fa/mobile-verify \
 
 **Fallback (manual code):**
 ```bash
-curl -X POST https://api.softaware.net.za/auth/2fa/verify \
+curl -X POST https://api.softaware.net.za/api/auth/2fa/verify \
   -H 'Content-Type: application/json' \
   -d '{"temp_token":"eyJhbGciOiJIUzI1NiIs...","code":"123456"}'
 ```
+
+---
+
+## 10. PIN Login — Mobile App Implementation Guide
+
+### 10.1 Overview
+
+PIN login provides a faster re-authentication experience. Instead of typing a full password, returning users enter a 4-digit numeric PIN. The PIN:
+
+- Is **bcrypt-hashed** on the server (never stored in plaintext)
+- Is **rate-limited** (5 failed attempts → 15-minute lockout)
+- Does **NOT** bypass 2FA — if 2FA is enabled, the standard 2FA flow still applies after PIN entry
+- Uses a **30-day JWT** (same as "Remember Me" password login)
+
+### 10.2 PIN Setup — Settings Screen
+
+Add a "Quick PIN Login" section to the mobile app's Account/Security settings.
+
+**UI Design:**
+
+```
+┌──────────────────────────────────────┐
+│  🔑 Quick PIN Login                 │
+│                                      │
+│  Set a 4-digit PIN for faster        │
+│  sign-in on this app.                │
+│                                      │
+│  Status: ● Not Set                   │  ← or "✅ Active"
+│                                      │
+│  [ Set Up PIN ]                      │  ← or "Change PIN" / "Remove"
+└──────────────────────────────────────┘
+```
+
+**Setup Flow:**
+
+```
+onSetUpPinTapped:
+  1. Check current status: GET /auth/pin/status
+  2. Show PIN entry screen (4 digit boxes)
+
+  Step 1: "Enter a 4-digit PIN"
+    → User enters 4 digits
+    → Tap "Next"
+
+  Step 2: "Confirm your PIN"
+    → User re-enters the same 4 digits
+    → If mismatch → "PINs do not match. Try again."
+
+  Step 3: "Enter your current password"
+    → User enters account password
+    → Tap "Set PIN"
+    → POST /auth/pin/set { pin: "1234", password: "currentPass" }
+
+  On success → show "PIN set! You can now use your PIN for quick login."
+  On error  → show error message (e.g., "Incorrect password")
+
+onRemovePinTapped:
+  1. Confirm dialog: "Remove PIN? You'll need your password to sign in."
+  2. DELETE /auth/pin
+  3. On success → update UI to "Not Set"
+```
+
+### 10.3 PIN Login — Login Screen
+
+**Returning User Detection:**
+
+```
+onLoginScreenLoad:
+  email = secureStorage.get("last_login_email")
+  if (email) {
+    result = GET /auth/pin/check/{urlEncode(email)}
+    if (result.data.has_pin) {
+      showPinMode = true
+    }
+  }
+```
+
+**PIN Input Behavior:**
+- 4 individual digit input boxes
+- `inputMode: "numeric"` (shows number keyboard)
+- `type: "password"` (masks digits as dots)
+- Auto-advance to next box on digit entry
+- Backspace navigates to previous box
+- **Auto-submit** when 4th digit is entered (no submit button needed)
+
+**PIN Submit:**
+
+```
+onAllFourDigitsEntered(pin):
+  showLoadingSpinner()
+
+  try {
+    response = POST /auth/pin/verify { email, pin }
+
+    if (response.success && response.data?.token) {
+      // Direct login — no 2FA
+      secureStorage.set("jwt_token", response.data.token)
+      secureStorage.set("user", response.data.user)
+      secureStorage.set("last_login_email", email)
+      navigateToDashboard()
+    }
+    else if (response.requires_2fa) {
+      // PIN was valid, but 2FA still required
+      store temp_token = response.temp_token
+      store method = response.two_factor_method
+      store challenge_id = response.challenge_id  // for TOTP push
+
+      if (method === "totp") {
+        navigate to → MobileQRAuthScreen
+      } else {
+        navigate to → OTPEntryScreen
+      }
+    }
+  } catch (error) {
+    if (error.status === 400) {
+      showError(error.message)  // "Invalid email or PIN", lockout message, etc.
+      clearPinInputs()
+      focusFirstPinInput()
+    }
+  }
+```
+
+**"Use password instead" button:**
+- Switches to standard email+password form
+- Pre-fills the email field from stored email
+
+**"Not you? Different account" button:**
+- Clears stored `last_login_email`
+- Shows standard email+password form with empty fields
+
+### 10.4 PIN Security Notes
+
+| Aspect | Detail |
+|--------|--------|
+| Storage | PIN is bcrypt-hashed on server. Never store PIN locally. |
+| Transmission | PIN is sent over HTTPS only. |
+| Rate Limiting | 5 failed attempts → 15-minute lockout. Counter resets on success. |
+| 2FA | PIN does NOT bypass 2FA. If 2FA is enabled, the full 2FA flow still runs. |
+| Session | PIN login issues a 30-day JWT (same as "Remember Me"). |
+| Uniqueness | One PIN per user account. Setting a new PIN replaces the old one. |
+| Email check | `GET /pin/check/:email` does not reveal whether an email exists (returns `has_pin: false` for unknown emails). |
+
+### 10.5 PIN Testing Checklist
+
+**Setup:**
+- [ ] `GET /auth/pin/status` returns `{ has_pin: false }` for new user
+- [ ] Set PIN with valid 4 digits + correct password → success
+- [ ] Set PIN with wrong password → "Incorrect password" error
+- [ ] Set PIN with 3 digits → validation error
+- [ ] `GET /auth/pin/status` returns `{ has_pin: true }` after setup
+- [ ] Change PIN → replaces old PIN, new one works
+- [ ] `DELETE /auth/pin` → removes PIN, status returns false
+
+**Login:**
+- [ ] `GET /auth/pin/check/:email` → `has_pin: true` for user with PIN
+- [ ] `GET /auth/pin/check/:email` → `has_pin: false` for non-existent email
+- [ ] `POST /auth/pin/verify` with correct PIN → JWT returned
+- [ ] `POST /auth/pin/verify` with wrong PIN → "Invalid email or PIN"
+- [ ] 5 wrong PINs → "Too many failed attempts. PIN login locked for 15 minutes."
+- [ ] During lockout → "Try again in X minute(s)"
+- [ ] After lockout expires → PIN login works again
+- [ ] PIN login with 2FA enabled → returns `requires_2fa: true` + `temp_token`
+- [ ] PIN login 2FA flow → same as password login 2FA flow
+
+**Returning User:**
+- [ ] After successful login, `last_login_email` is stored
+- [ ] On next login screen load, PIN pad shown automatically
+- [ ] "Use password instead" switches to password form
+- [ ] "Not you?" clears stored email and shows password form

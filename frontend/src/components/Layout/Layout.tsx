@@ -1,4 +1,4 @@
-import React, { ReactNode, useEffect, useState } from 'react';
+import React, { ReactNode, useEffect, useState, useCallback, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   HomeIcon,
@@ -36,13 +36,16 @@ import {
   CalendarIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
+import { usePermissions } from '../../hooks/usePermissions';
 import { AuthModel } from '../../models';
+import { WebmailModel } from '../../models/WebmailModel';
 import AppSettingsModel from '../../models/AppSettingsModel';
 import Can from '../Can';
 import { getApiBaseUrl, getAssetUrl } from '../../config/app';
 import NotificationDropdown from '../Notifications/NotificationDropdown';
 import UserAccountMenu from '../User/UserAccountMenu';
 import GlobalCallProvider from '../CallProvider/GlobalCallProvider';
+import ThemeToggle from '../UI/ThemeToggle';
 
 interface LayoutProps {
   children: ReactNode;
@@ -54,6 +57,9 @@ interface NavItem {
   href: string;
   icon: React.ComponentType<{ className?: string }>;
   permission?: string;
+  roleSlug?: string;  // If set, item only shows for users with this role (or admin)
+  adminOnly?: boolean; // If true, item only shows for admin/staff users
+  badgeKey?: string;   // Key to look up dynamic badge count
 }
 
 // ─── Collapsible section ─────────────────────────────────────────────────
@@ -64,6 +70,7 @@ interface NavSection {
   items: NavItem[];
   defaultOpen?: boolean;
   color?: string;
+  adminOnly?: boolean; // If true, entire section only shows for admin/staff users
 }
 
 const navSections: NavSection[] = [
@@ -73,9 +80,10 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
       { name: 'Tasks', href: '/tasks', icon: ClipboardDocumentCheckIcon },
+      { name: 'Bugs', href: '/bugs', icon: BugAntIcon },
       { name: 'Groups', href: '/groups', icon: ChatBubbleLeftRightIcon },
       { name: 'Chat', href: '/chat', icon: ChatBubbleLeftRightIcon },
-      { name: 'Webmail', href: '/admin/webmail', icon: EnvelopeIcon },
+      { name: 'Webmail', href: '/webmail', icon: EnvelopeIcon, badgeKey: 'webmail-unread' },
       { name: 'Planning', href: '/planning', icon: CalendarIcon },
     ],
   },
@@ -83,12 +91,11 @@ const navSections: NavSection[] = [
     label: 'AI & Enterprise',
     defaultOpen: false,
     color: 'purple',
-    anyPermission: ['settings.view'],
+    adminOnly: true,
     items: [
-      { name: 'AI Overview', href: '/admin/ai', icon: SparklesIcon, permission: 'settings.view' },
-      { name: 'Client Manager', href: '/admin/clients', icon: UsersIcon, permission: 'settings.view' },
-      { name: 'Enterprise Endpoints', href: '/admin/enterprise', icon: SignalIcon, permission: 'settings.view' },
-      { name: 'AI Credits', href: '/admin/credits', icon: CurrencyDollarIcon, permission: 'settings.view' },
+      { name: 'AI Overview', href: '/admin/ai', icon: SparklesIcon, adminOnly: true },
+      { name: 'Client Manager', href: '/admin/clients', icon: UsersIcon, adminOnly: true },
+      { name: 'AI Packages', href: '/admin/packages', icon: CubeIcon, adminOnly: true },
     ],
   },
   {
@@ -98,7 +105,7 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Dashboard', href: '/cases/dashboard', icon: ChartBarIcon },
       { name: 'My Cases', href: '/cases', icon: FlagIcon },
-      { name: 'All Cases', href: '/admin/cases', icon: FlagIcon, permission: 'settings.view' },
+      { name: 'All Cases', href: '/admin/cases', icon: FlagIcon, adminOnly: true },
     ],
   },
   {
@@ -113,13 +120,12 @@ const navSections: NavSection[] = [
   {
     label: 'Billing & Finance',
     defaultOpen: false,
-    anyPermission: ['dashboard.view', 'invoices.view', 'quotations.view', 'transactions.view', 'contacts.view'],
+    anyPermission: ['dashboard.view', 'invoices.view', 'quotations.view', 'transactions.view'],
     items: [
       { name: 'Financial Dashboard', href: '/financial-dashboard', icon: CurrencyDollarIcon, permission: 'dashboard.view' },
       { name: 'Invoices', href: '/invoices', icon: DocumentDuplicateIcon, permission: 'invoices.view' },
       { name: 'Quotations', href: '/quotations', icon: DocumentTextIcon, permission: 'quotations.view' },
       { name: 'Transactions', href: '/transactions', icon: BanknotesIcon, permission: 'transactions.view' },
-      { name: 'Contacts', href: '/contacts', icon: UsersIcon, permission: 'contacts.view' },
     ],
   },
   {
@@ -150,8 +156,9 @@ const navSections: NavSection[] = [
       { name: 'Users', href: '/system/users', icon: UsersIcon, permission: 'users.view' },
       { name: 'Roles', href: '/system/roles', icon: UserGroupIcon, permission: 'roles.view' },
       { name: 'Permissions', href: '/system/permissions', icon: ShieldCheckIcon, permission: 'permissions.view' },
-      { name: 'Credentials', href: '/credentials', icon: KeyIcon, permission: 'credentials.view' },
+      { name: 'Credentials', href: '/credentials', icon: KeyIcon, adminOnly: true },
       { name: 'System Settings', href: '/system/settings', icon: AdjustmentsHorizontalIcon, permission: 'settings.view' },
+      { name: 'Audit Log', href: '/admin/audit-log', icon: ClipboardDocumentListIcon, adminOnly: true },
     ],
   },
   {
@@ -162,9 +169,9 @@ const navSections: NavSection[] = [
     items: [
       { name: 'Software', href: '/software', icon: CubeIcon, permission: 'settings.view' },
       { name: 'Updates', href: '/updates', icon: ArrowPathIcon, permission: 'settings.view' },
-      { name: 'Client Monitor', href: '/client-monitor', icon: SignalIcon, permission: 'settings.view' },
-      { name: 'Error Reports', href: '/error-reports', icon: BugAntIcon, permission: 'settings.view' },
-      { name: 'Database', href: '/database', icon: CircleStackIcon, permission: 'settings.view' },
+      { name: 'Client Monitor', href: '/client-monitor', icon: SignalIcon, adminOnly: true },
+      { name: 'Error Reports', href: '/error-reports', icon: BugAntIcon, adminOnly: true },
+      { name: 'Database', href: '/database', icon: CircleStackIcon, permission: 'settings.view', roleSlug: 'developer' },
     ],
   },
 ];
@@ -173,7 +180,10 @@ const navSections: NavSection[] = [
 const SidebarSection: React.FC<{
   section: NavSection;
   pathname: string;
-}> = ({ section, pathname }) => {
+  badgeCounts?: Record<string, number>;
+}> = ({ section, pathname, badgeCounts = {} }) => {
+  const { user } = useAppStore();
+  const { isStrictAdmin } = usePermissions();
   const [isOpen, setIsOpen] = useState(section.defaultOpen ?? false);
 
   // Auto-open section if current path matches any item
@@ -184,6 +194,9 @@ const SidebarSection: React.FC<{
     if (hasActive) setIsOpen(true);
   }, [pathname, section.items]);
 
+  // Hide entire section from non-admin users if section is admin-only
+  if (section.adminOnly && !isStrictAdmin()) return null;
+
   const isPurple = section.color === 'purple';
   const isRed = section.color === 'red';
 
@@ -192,13 +205,13 @@ const SidebarSection: React.FC<{
       {/* Section header (collapsible toggle) */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700 transition-colors"
+        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
       >
         <span>{section.label}</span>
         {isOpen ? (
-          <ChevronDownIcon className="h-3.5 w-3.5 text-gray-400" />
+          <ChevronDownIcon className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
         ) : (
-          <ChevronRightIcon className="h-3.5 w-3.5 text-gray-400" />
+          <ChevronRightIcon className="h-3.5 w-3.5 text-gray-400 dark:text-gray-500" />
         )}
       </button>
 
@@ -225,10 +238,10 @@ const SidebarSection: React.FC<{
                         ? 'bg-red-500 text-white shadow-sm'
                         : 'bg-picton-blue text-white shadow-sm'
                     : isPurple
-                      ? 'text-gray-700 hover:bg-purple-50 hover:text-purple-900'
+                      ? 'text-gray-700 dark:text-gray-300 hover:bg-purple-50 dark:hover:bg-purple-900/20 hover:text-purple-900 dark:hover:text-purple-300'
                       : isRed
-                        ? 'text-gray-700 hover:bg-red-50 hover:text-red-900'
-                        : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
+                        ? 'text-gray-700 dark:text-gray-300 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-900 dark:hover:text-red-300'
+                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 hover:text-gray-900 dark:hover:text-gray-100'
                 } group flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-all duration-200`}
               >
                 <item.icon
@@ -236,16 +249,34 @@ const SidebarSection: React.FC<{
                     isActive
                       ? 'text-white'
                       : isPurple
-                        ? 'text-purple-500 group-hover:text-purple-700'
+                        ? 'text-purple-500 group-hover:text-purple-700 dark:text-purple-400 dark:group-hover:text-purple-300'
                         : isRed
-                          ? 'text-red-500 group-hover:text-red-700'
-                          : 'text-gray-500 group-hover:text-gray-700'
+                          ? 'text-red-500 group-hover:text-red-700 dark:text-red-400 dark:group-hover:text-red-300'
+                          : 'text-gray-500 group-hover:text-gray-700 dark:text-gray-400 dark:group-hover:text-gray-200'
                   } mr-3 h-5 w-5 flex-shrink-0`}
                 />
-                {item.name}
+                <span className="flex-1">{item.name}</span>
+                {item.badgeKey && (badgeCounts[item.badgeKey] ?? 0) > 0 && (
+                  <span className={`ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-xs font-bold rounded-full ${
+                    isActive
+                      ? 'bg-white/25 text-white'
+                      : 'bg-red-500 text-white'
+                  }`}>
+                    {(badgeCounts[item.badgeKey] ?? 0) > 99 ? '99+' : badgeCounts[item.badgeKey]}
+                  </span>
+                )}
               </Link>
             );
 
+            // Hide admin-only items from non-admin users
+            if (item.adminOnly && !isStrictAdmin()) return null;
+
+            if (item.roleSlug) {
+              const userRoleSlug = user?.role?.slug || '';
+              const userRoleSlugs = user?.roles?.map(r => r.slug) || [];
+              const hasRole = user?.is_admin || userRoleSlug === item.roleSlug || userRoleSlugs.includes(item.roleSlug);
+              if (!hasRole) return null;
+            }
             if (item.permission) {
               return (
                 <Can key={item.name} permission={item.permission}>
@@ -290,6 +321,26 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [siteName, setSiteName] = useState<string>('');
   const [isMasquerading, setIsMasquerading] = useState(false);
   const [exitingMasquerade, setExitingMasquerade] = useState(false);
+  const [badgeCounts, setBadgeCounts] = useState<Record<string, number>>({});
+  const unreadTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll webmail unread count every 2 minutes
+  const fetchUnreadCount = useCallback(async () => {
+    try {
+      const result = await WebmailModel.getUnreadCount();
+      setBadgeCounts(prev => ({ ...prev, 'webmail-unread': result.total }));
+    } catch {
+      // Silently ignore — user may not have mailboxes configured
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchUnreadCount();
+    unreadTimerRef.current = setInterval(fetchUnreadCount, 120_000); // 2 min
+    return () => {
+      if (unreadTimerRef.current) clearInterval(unreadTimerRef.current);
+    };
+  }, [fetchUnreadCount]);
 
   // Check masquerade state on mount and user changes
   useEffect(() => {
@@ -396,15 +447,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-gray-50 dark:bg-dark-900">
       {/* Global incoming-call listener (persists across pages) */}
       <GlobalCallProvider />
       {/* Sidebar */}
       <div className="hidden md:flex md:w-64 md:flex-col">
-        <div className="flex min-h-0 flex-1 flex-col bg-white border-r border-gray-200 shadow-sm">
+        <div className="flex min-h-0 flex-1 flex-col bg-white dark:bg-dark-850 border-r border-gray-200 dark:border-dark-700 shadow-sm">
           <div className="flex flex-1 flex-col overflow-y-auto pt-5 pb-4">
             {/* Logo */}
-            <div className="flex flex-shrink-0 items-center px-4 pb-4 border-b border-gray-200">
+            <div className="flex flex-shrink-0 items-center px-4 pb-4 border-b border-gray-200 dark:border-dark-700">
               {siteLogo ? (
                 <img
                   src={siteLogo}
@@ -415,7 +466,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   }}
                 />
               ) : (
-                <span className="text-xl font-bold text-gray-900">
+                <span className="text-xl font-bold text-gray-900 dark:text-white">
                   {siteName || 'Soft Aware'}
                 </span>
               )}
@@ -428,6 +479,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   key={section.label}
                   section={section}
                   pathname={location.pathname}
+                  badgeCounts={badgeCounts}
                 />
               ))}
             </nav>
@@ -463,12 +515,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         )}
 
         {/* Top header */}
-        <header className="bg-white shadow-md border-b-2 border-picton-blue/20">
+        <header className="bg-white dark:bg-dark-850 shadow-md border-b-2 border-picton-blue/20 dark:border-primary-700/30">
           <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
-            <h2 className="text-xl font-bold text-gray-900">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white">
               {resolveTitle()}
             </h2>
             <div className="flex items-center space-x-3">
+              <ThemeToggle />
               <NotificationDropdown />
               <UserAccountMenu
                 user={user}

@@ -1,7 +1,7 @@
 # Assistants Module — Overview
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-09
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -24,11 +24,11 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 - **Unified assistant management** — both staff and clients create/manage assistants through `/api/v1/mobile/my-assistant`; clients can create multiple, staff limited to one
 - **Primary assistant flag** — one assistant per user is marked `is_primary`; auto-selected when no assistant is specified in mobile intent
 - **Two-part prompt system** — `core_instructions` (hidden, backend-managed) + `personality_flare` (GUI-editable) stitched at runtime
-- **Voice-driven task management** — staff can list, create, update, and comment on tasks via mobile voice through external software API proxy
-- **External software token management** — per-staff API tokens for secure proxied operations
+- **Voice-driven task management** — staff can manage full task lifecycle (22 tools) via mobile voice: CRUD, bookmark, prioritize, tag, sync, invoice, workflow actions, stats
+- **Source-level API key auth** — task operations use API keys from `task_sources` table (no per-user software tokens needed)
 - **Mobile assistant selection** — clients and staff can choose which assistant to use on mobile
 - **Client capabilities awareness** — toggleable panel showing 6 capability categories (chat, leads, embed, KB, email, site builder)
-- **Staff capabilities dashboard** — collapsible 10-category tool inventory with 41 tools, webhook/integration info panel
+- **Staff capabilities dashboard** — collapsible 10-category tool inventory with 59 tools, webhook/integration info panel
 - **Enhanced staff assistant UI** — dark gradient header, quick-stats strip, card-based personality/voice picker, section-grouped form
 - **Visual parity** — staff assistant view mode redesigned to match client-side visual quality
 - **Chat persistence (staff)** — staff chat messages survive modal close/reopen; explicit trash icon to clear
@@ -36,13 +36,22 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 - **Staff chat UI** — real-time chat with AI assistant via `MobileModel.sendIntent()` in StaffAssistantTab, with full tool access
 - **"Help me write this with AI"** — button next to Personality Flare textarea generates creative personality text via AI
 - **SSE streaming fixes** — line buffering, `response.ok` check, conversation history in requests, error display in chat bubbles
-- **35/35 verified tools** — all staff tools tested via automated test suite with 0 failures
+- **53/53 staff tools** — all staff tools (22 task + 31 other) registered and route-dispatched with 0 compile errors
 - **Actionable tool errors** — all tool error messages guide user to exact dashboard location (e.g., "Go to Dashboard → Software Connections")
 - **Collation fix** — `ingestion_jobs` table columns ALTERed from `utf8mb4_0900_ai_ci` to `utf8mb4_unicode_ci` to match `assistants`
 - **Model pre-warming** — both Assistant and Tools Ollama models warmed on server startup to eliminate cold-start latency
 - **GLM-first 3-tier routing** — all assistant chat routes through GLM (Anthropic API) → OpenRouter → Ollama cascading fallback; default model `glm-4.6`
 - **Chat history sidebar** — staff chat modal includes collapsible sidebar showing previous conversations with first-message previews, relative timestamps, and delete
 - **Conversation preview API** — `GET /conversations` returns `preview` field (first user message) and `assistant_id`
+- **Vision/multimodal support** — image analysis via tier-based routing: paid → GPT-4o → Gemini 2.0 Flash → Ollama qwen2.5vl:7b; free → Ollama qwen2.5vl:7b. GLM bypassed for vision (text-only model)
+- **Image attachment UI** — staff chat modal includes 📎 attach button, image preview strip, automatic vision routing, and `📎` prefix in chat bubbles
+- **Bidirectional voice** — OpenAI-compatible neural TTS (`/api/v1/mobile/tts`) for voice output; browser-native Web Speech API for STT input
+- **Voice interaction awareness** — `STAFF_CORE_DEFAULT` and `CLIENT_CORE_DEFAULT` include `VOICE INTERACTION:` section: AI knows it receives speech via STT and replies via TTS, never claims "I can't hear you", avoids markdown formatting (asterisks, bullets, headers) in responses since they're spoken aloud
+- **Base64 image payloads** — express body limit increased to 20mb to accommodate base64-encoded images (up to ~10MB original)
+- **AI Telemetry** — POPIA-compliant anonymized chat logging across all 3 chat routes (portal SSE, widget, enterprise webhook) with automatic PII sanitization
+- **PII sanitization** — emails, SA phone numbers, SA ID numbers, credit cards, account numbers, and street addresses stripped before analytics storage
+- **Telemetry consent flow** — users must accept telemetry terms before first assistant creation; paid users get an opt-out toggle
+- **Fire-and-forget analytics** — `analyticsLogger.ts` writes to SQLite asynchronously; errors never break chat flow
 
 > **🔗 sqlite-vec Deep Dive:** This module is the primary consumer of sqlite-vec vector storage. See [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a comprehensive deep-dive covering the vec0 KNN engine, embedding pipeline, dual-storage write path, drift risks, and performance characteristics.
 
@@ -51,15 +60,15 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 | Metric | Value |
 |--------|-------|
 | Backend route files | 5 (assistants.ts, assistantIngest.ts, myAssistant.ts, staffAssistant.ts, mobileIntent.ts) |
-| Backend service files | 8 (vectorStore.ts, knowledgeCategorizer.ts, ingestionWorker.ts, ingestionAIRouter.ts, **assistantAIRouter.ts**, mobileTools.ts, mobileAIProcessor.ts, mobileActionExecutor.ts) |
-| Backend LOC | ~6,460 |
+| Backend service files | 9 (vectorStore.ts, knowledgeCategorizer.ts, ingestionWorker.ts, ingestionAIRouter.ts, **assistantAIRouter.ts**, mobileTools.ts, mobileAIProcessor.ts, mobileActionExecutor.ts, **analyticsLogger.ts**) |
+| Backend LOC | ~7,440 |
 | Frontend source files | 5 (AssistantsPage.tsx, CreateAssistant.tsx, Dashboard.tsx, KnowledgeHealthBadge.tsx, KnowledgeHealthScore.tsx) + Profile.tsx (StaffAssistantTab) + SystemModels.ts |
-| Frontend LOC | ~4,200 |
-| Total LOC | ~10,660 |
-| API endpoints | 36 |
-| Staff AI tools | 41 (35 staff-accessible, verified 35/35 passing) |
-| MySQL tables | 4 (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 1 legacy (assistant_knowledge) |
-| sqlite-vec tables | 2 (knowledge_chunks, knowledge_vectors) |
+| Frontend LOC | ~4,666 |
+| Total LOC | ~12,106 |
+| API endpoints | 38 (+ 2 telemetry consent) |
+| Staff AI tools | 59 (53 staff-accessible) — 22 task tools + 31 other staff tools |
+| MySQL tables | 4 (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 3 task tables (task_sources, local_tasks, task_sync_log) + 1 legacy (assistant_knowledge) + telemetry columns on `users` |
+| sqlite-vec tables | 2 (knowledge_chunks, knowledge_vectors) + 1 analytics (ai_analytics_logs) |
 
 ---
 
@@ -110,6 +119,8 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 │  │  POST /chat            — SSE streaming chat with RAG            │    │
 │  │  GET  /widget.js       — embeddable chat widget script          │    │
 │  │  GET  /templates       — persona templates for creation UI      │    │
+│  │  GET  /telemetry-consent — user's telemetry consent status      │    │
+│  │  POST /telemetry-consent — accept/update telemetry consent      │    │
 │  │  POST /admin/unload-model — free Ollama RAM                    │    │
 │  │  GET  /admin/model-status — check loaded models                │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
@@ -127,14 +138,17 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 │  │  vectorStore.ts  — sqlite-vec CRUD (768-dim float32 vectors)    │    │
 │  │  knowledgeCategorizer.ts — LLM-based checklist analysis         │    │
 │  │  ingestionWorker.ts — background poll loop (6s interval)        │    │
-│  │  assistantAIRouter.ts — 3-tier routing (GLM/OR/Ollama)          │    │
+│  │  assistantAIRouter.ts — 3-tier text routing + vision routing    │    │
+│  │  analyticsLogger.ts — PII-sanitized telemetry to SQLite         │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │  STORAGE                                                        │    │
 │  │  MySQL: assistants, ingestion_jobs, assistant_knowledge,        │    │
 │  │         mobile_conversations, staff_software_tokens              │    │
+│  │         users (telemetry_consent_*, telemetry_opted_out)        │    │
 │  │  sqlite-vec: knowledge_chunks, knowledge_vectors (vec0)         │    │
+│  │  SQLite analytics: ai_analytics_logs (PII-sanitized chat logs)  │    │
 │  │  Path: /var/opt/backend/data/vectors.db                         │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -183,14 +197,20 @@ User sends message → POST /api/assistants/chat (SSE)
   → Embed user query via nomic-embed-text
   → sqlite-vec KNN search (top 5 chunks by distance)
   → Build system prompt: persona + business context + RAG knowledge + tools
-  → 3-tier routing via assistantAIRouter.chatCompletionStream():
-      1. GLM (glm-4.6) via Anthropic SSE — tried first for ALL tiers
-      2. OpenRouter (gpt-4o-mini) via OpenAI SSE — paid-tier fallback
-      3. Ollama (qwen2.5:1.5b-instruct) via NDJSON — last resort
+  → IF image attached:
+      → Route to chatCompletionStreamWithVision() (see 3.8 Vision/Image Chat)
+  → ELSE text-only:
+      → 3-tier routing via assistantAIRouter.chatCompletionStream():
+          1. GLM (glm-4.6) via Anthropic SSE — tried first for ALL tiers
+          2. OpenRouter (gpt-4o-mini) via OpenAI SSE — paid-tier fallback
+          3. Ollama (qwen2.5:1.5b-instruct) via NDJSON — last resort
   → 3-format parser handles Anthropic SSE, OpenAI SSE, and Ollama NDJSON
   → Parse tool calls if present → execute → append to stream
-  → Done event includes { provider: 'ollama' | 'openrouter' }
+  → Done event includes { provider: 'ollama' | 'openrouter' | 'openrouter-fallback' | 'ollama-vision' }
   → Client renders tokens in real-time
+  → IF user not opted out (telemetry_opted_out = 0):
+      → logAnonymizedChat(userId, prompt, fullResponse, { source: 'portal', model, provider })
+      → PII sanitized → fire-and-forget SQLite INSERT into ai_analytics_logs
 ```
 
 ### 3.4 Delete with Knowledge Base Option
@@ -255,8 +275,8 @@ Mobile voice input → POST /api/v1/mobile/intent { text, assistantId }
     │  Fallback: legacy personality column mapping          │
     ├─────────────────────────────────────────────────────┤
     │  TOOL DEFINITIONS (injected dynamically by role)     │
-    │  Staff: 13 tools (incl. 4 task tools)               │
-    │  Client: 5 tools                                     │
+    │  Staff: 53 tools (incl. 22 task tools)              │
+    │  Client: 17 tools                                    │
     │  NEVER stored in DB                                  │
     └─────────────────────────────────────────────────────┘
 
@@ -268,28 +288,123 @@ Mobile voice input → POST /api/v1/mobile/intent { text, assistantId }
   → Return plain text reply for TTS
 ```
 
-### 3.7 Task Proxy via Voice ⭐ NEW (v1.4.0)
+### 3.7 Task Management via Voice ⭐ REWIRED (v2.1.0)
 
 ```
 Staff says "Show me pending tasks" → POST /api/v1/mobile/intent
   → AI recognizes intent → emits tool_call: list_tasks { status: "pending" }
 
   → mobileActionExecutor.ts:
-    → getStaffSoftwareToken(userId)
-      → SELECT api_url, token FROM staff_software_tokens WHERE user_id = ?
-    → taskProxy(apiUrl, '/api/development/tasks/', 'GET', token)
-      → HTTP GET {apiUrl}/api/development/tasks/?status=pending
-      → Headers: Authorization: Bearer {token}
-    → Format results as human-readable text
+    → READ path (list_tasks, get_task, get_task_stats, get_task_tags, etc.):
+      → Direct SQL query to local MySQL `local_tasks` table
+      → No external API call needed — tasks already synced locally
+      → Supports all filters: status, type, priority, bookmarked, tags, search, etc.
+
+    → WRITE path (create_task, update_task, start_task, complete_task, approve_task):
+      → resolveTaskSourceForTools(software_id?)
+        → SELECT base_url, api_key FROM task_sources WHERE sync_enabled = 1
+      → taskProxyV2(baseUrl, '/api/tasks-api/...', method, apiKey, body)
+        → Headers: X-API-Key: {apiKey}  ← source-level auth (NOT per-user tokens)
+      → Also updates local DB immediately (marks dirty for sync)
+
+    → LOCAL path (bookmark_task, set_task_priority, set_task_color, set_task_tags):
+      → Direct UPDATE on local_tasks table
+      → No external API call (local-only enhancements)
+
+    → SYNC path (sync_tasks, get_sync_status):
+      → syncAllSources() from taskSyncService.ts
+      → Pulls latest from all configured external sources
+
+    → INVOICE path (stage_tasks_for_invoice, get_staged_invoices, process_staged_invoices):
+      → Stage: UPDATE local_tasks SET task_billed = 2 (local staging)
+      → Process: POST /api/tasks-api/invoice-tasks (external) → mark as billed
 
   → AI wraps result in conversational reply
   → Return to mobile for TTS playback
 
-Task tools available:
-  list_tasks     → GET  /api/development/tasks/ (with filters)
-  create_task    → POST /api/development/tasks/
-  update_task    → PUT  /api/development/tasks/{id}
-  add_task_comment → POST /api/development/tasks/{id}/comments
+22 Task tools (v2.0):
+  ┌─ Core CRUD ──────────────────────────────────────────────┐
+  │ list_tasks        → Local DB query (filterable)           │
+  │ get_task          → Local DB query by id/external_id      │
+  │ create_task       → POST /api/tasks-api (proxy + sync)    │
+  │ update_task       → Local DB + PUT /api/tasks-api/:id     │
+  │ delete_task       → Soft-delete local (dirty flag)        │
+  ├─ Comments ───────────────────────────────────────────────┤
+  │ get_task_comments → GET /api/tasks-api/:id/comments       │
+  │ add_task_comment  → POST /api/tasks-api/:id/comments      │
+  ├─ Local Enhancements ─────────────────────────────────────┤
+  │ bookmark_task     → Toggle is_bookmarked (local only)     │
+  │ set_task_priority → Set priority level (local only)       │
+  │ set_task_color    → Set color label (local only)          │
+  │ set_task_tags     → Set tags array (local only)           │
+  ├─ Workflow Actions ───────────────────────────────────────┤
+  │ start_task        → POST /api/tasks-api/:id/start         │
+  │ complete_task     → POST /api/tasks-api/:id/complete       │
+  │ approve_task      → POST /api/tasks-api/:id/approve        │
+  ├─ Stats & Queries ────────────────────────────────────────┤
+  │ get_task_stats    → Local DB aggregation (by status/type)  │
+  │ get_pending_approvals → GET /api/tasks-api/pending-approval│
+  │ get_task_tags     → Local DB distinct tags                 │
+  ├─ Sync ───────────────────────────────────────────────────┤
+  │ sync_tasks        → syncAllSources() (pull from externals) │
+  │ get_sync_status   → Query task_sources sync metadata       │
+  ├─ Invoice Staging ────────────────────────────────────────┤
+  │ stage_tasks_for_invoice → Stage tasks (task_billed = 2)   │
+  │ get_staged_invoices     → List staged tasks               │
+  │ process_staged_invoices → Sync to portal + mark billed    │
+  └──────────────────────────────────────────────────────────┘
+
+Key architectural change (v2.1.0):
+  OLD: getStaffSoftwareToken(userId) → taskProxy(apiUrl, path, 'Bearer', token)
+       ❌ Per-user software tokens from staff_software_tokens table
+       ❌ External API calls for ALL operations (reads + writes)
+       ❌ Only 4 tools (list, create, update, comment)
+
+  NEW: resolveTaskSourceForTools() → taskProxyV2(baseUrl, path, 'X-API-Key', apiKey)
+       ✅ Source-level API keys from task_sources table
+       ✅ Reads from local DB (no external call needed)
+       ✅ 22 tools covering full task lifecycle
+       ✅ Local enhancements (bookmark, priority, tags, colors)
+       ✅ Sync engine integration
+       ✅ Invoice staging workflow
+```
+
+### 3.8 Vision/Image Chat ⭐ NEW (v2.0.0)
+
+```
+User attaches image → 📎 button in chat modal → FileReader → base64 data-URI
+  → POST /api/assistants/chat { assistantId, message, image: "data:image/png;base64,..." }
+  → Zod validates image field (optional string)
+  → Backend detects hasImage: image.startsWith('data:image/')
+  → Builds VisionChatMessage[] with images[] on last user message
+  → Routes to chatCompletionStreamWithVision(tier, messages):
+
+      PAID TIER:
+        1. OpenRouter openai/gpt-4o (primary)
+           → content[] array format: [{type:"text",...}, {type:"image_url", image_url:{url:dataUri}}]
+           → Stream: OpenAI SSE (choices[0].delta.content)
+        2. OpenRouter google/gemini-2.0-flash-001 (fallback)
+           → Same content[] array format
+           → Stream: OpenAI SSE
+        3. Ollama qwen2.5vl:7b (last resort)
+           → Ollama format: messages[].images[] (raw base64, no data-URI prefix)
+           → Stream: NDJSON (message.content)
+
+      FREE TIER:
+        1. Ollama qwen2.5vl:7b (only option)
+           → Same Ollama format as above
+
+  → Stream parser branches on provider:
+      'openrouter' / 'openrouter-fallback' → OpenAI SSE
+      'ollama-vision' → NDJSON
+  → Done event includes { provider, model }
+  → Client renders AI description of image in real-time
+
+Mobile intent path:
+  POST /api/v1/mobile/intent { text, image: "data:image/..." }
+  → Validates: must be data:image/*, max 15M chars (~10MB)
+  → On round 0: chatCompletionWithVision() (non-streaming, same tier fallback)
+  → Subsequent rounds: text-only chatCompletion() (image only analyzed once)
 ```
 
 ---
@@ -392,15 +507,18 @@ Each staff member can create **one personal AI assistant** via their profile tab
 - **ID format** — `staff-assistant-{timestamp}` (vs `assistant-{timestamp}` for clients)
 - **Prompt stitching guardrail** — tools injected dynamically at runtime, never stored in DB. Staff CANNOT inject tools via the personality field.
 
-### 4.7 Voice-Driven Task Management ⭐ NEW (v1.4.0)
+### 4.7 Voice-Driven Task Management ⭐ REWIRED (v2.1.0)
 
 Staff can manage tasks from external software portals through voice commands on mobile:
 
-- **4 task tools** — `list_tasks`, `create_task`, `update_task`, `add_task_comment`
-- **External proxy** — tasks NOT stored locally; all operations proxy to `{apiUrl}/api/development/tasks/`
-- **Dual auth** — JWT (internal) + stored software token (external, `X-Software-Token` header)
-- **Token management** — staff store their external API tokens via `/software-tokens` endpoints
-- **Task fields** — title, status (new/progress/completed/pending), type (development/bug-fix/feature/maintenance/support), assigned_to, hours, due_date, etc.
+- **22 task tools** — full lifecycle coverage (up from 4 in v1.4.0)
+- **Dual-path architecture** — reads from local MySQL `local_tasks`, writes proxied to external APIs
+- **Source-level auth** — API keys resolved from `task_sources` table (no per-user tokens required)
+- **Local enhancements** — bookmark, priority, color labels, tags (managed locally, not synced)
+- **Workflow actions** — start, complete, approve tasks directly from voice
+- **Sync integration** — trigger syncs, check sync status from voice
+- **Invoice staging** — stage, review, and process task invoices through voice
+- **Task fields** — title, status (new/progress/completed/pending), type (development/bug-fix/feature/maintenance/support), priority (urgent/high/normal/low), assigned_to, hours, workflow_phase, tags, bookmarks, color labels
 
 ### 4.8 Mobile Assistant Selection ⭐ NEW (v1.4.0)
 
@@ -432,10 +550,10 @@ The staff `StaffAssistantTab` in `Profile.tsx` provides rich capabilities awaren
 
 **View Mode:**
 - **Dark gradient header** with status dot indicator, personality/voice/tier badges
-- **Quick-stats strip** — 3 metrics: Tools Available (41), Categories (10), Pages Indexed
+- **Quick-stats strip** — 3 metrics: Tools Available (59), Categories (10), Pages Indexed
 - **Detail section** — description, primary goal, greeting blockquote, personality flare, model, created date
 - **Collapsible capabilities panel** — 2-column grid of 10 tool categories:
-  - Task Management (4 tools), Client Admin (4 tools), Support Cases (4 tools)
+  - Task Management (22 tools), Client Admin (4 tools), Support Cases (4 tools)
   - CRM & Contacts (3 tools), Finance (3 tools), Scheduling (2 tools)
   - Chat & Messaging (2 tools), Lead Management (4 tools), Email Automation (2 tools)
   - Site Builder (5 tools)
@@ -472,9 +590,12 @@ The staff `StaffAssistantTab` in `Profile.tsx` provides rich capabilities awaren
 | **Staff assistant auth** | JWT + staff role check via `requireStaffRole()` on all staff endpoints |
 | **core_instructions lockout** | Only `super_admin` can set `core_instructions` via dedicated endpoint |
 | **Prompt injection guard** | Tools injected dynamically by role at runtime — never stored in or loaded from DB |
-| **Task proxy auth** | Dual-auth: JWT (internal) + per-staff software token (external Bearer header) |
+| **Task proxy auth** | Source-level API key from `task_sources` table (X-API-Key header); no per-user tokens needed |
 | **Max 1 staff assistant** | Enforced by DB check before INSERT (`is_staff_agent = 1` unique per user) |
 | **Software token ownership** | Token deletion verifies `user_id` match before DELETE |
+| **Telemetry PII sanitization** | All chat logs stripped of emails, phones, SA IDs, credit cards, account numbers, addresses before SQLite storage |
+| **Telemetry consent** | Users must accept telemetry terms before first assistant creation; paid users can opt out entirely |
+| **Fire-and-forget logging** | Analytics errors caught silently — never blocks or breaks chat responses |
 
 ---
 
@@ -487,6 +608,9 @@ The staff `StaffAssistantTab` in `Profile.tsx` provides rich capabilities awaren
 | `OLLAMA_KEEP_ALIVE` | Model RAM pinning (`-1` = forever) | — |
 | `ASSISTANT_OPENROUTER_MODEL` | **NEW (v1.8.0)** Paid-tier chat model via OpenRouter | `google/gemma-3-4b-it:free` |
 | `OPENROUTER_API_KEY` | OpenRouter auth (checked via credentialVault) | — |
+| `VISION_OPENROUTER_MODEL` | **NEW (v2.0.0)** Primary vision model via OpenRouter | `openai/gpt-4o` |
+| `VISION_OPENROUTER_FALLBACK` | **NEW (v2.0.0)** Fallback vision model via OpenRouter | `google/gemini-2.0-flash-001` |
+| `VISION_OLLAMA_MODEL` | **NEW (v2.0.0)** Local vision model for free tier + last resort | `qwen2.5vl:7b` |
 
 | Hardcoded Constant | File | Value |
 |--------------------|------|-------|
@@ -518,5 +642,6 @@ The staff `StaffAssistantTab` in `Profile.tsx` provides rich capabilities awaren
 | [ROUTES.md](ROUTES.md) | All 30 API endpoints with curl examples and response shapes |
 | [PATTERNS.md](PATTERNS.md) | Architecture patterns, anti-patterns, technical debt |
 | [CHANGES.md](CHANGES.md) | Version history (v1.0.0–v1.6.0) and known issues |
+| [MODELS.md](MODELS.md) | **AI model routing, 3-tier fallback chains, vision routing, enterprise routing, env vars** |
 | [KNOWLEDGE_BASE_EDITING.md](KNOWLEDGE_BASE_EDITING.md) | Knowledge base CRUD workflows and editing UX |
 | [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) | **Deep dive:** vec0 engine, KNN search, embedding pipeline, dual-storage, performance |

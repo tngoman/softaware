@@ -9,7 +9,8 @@ import { getToolsForTier, getToolsSystemPrompt, parseToolCall, executeToolCall }
 import { search as vectorSearch, deleteByAssistant as deleteVecByAssistant } from '../services/vectorStore.js';
 import { checkAssistantStatus } from '../middleware/statusCheck.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
-import { chatCompletionStream } from '../services/assistantAIRouter.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
+import { chatCompletionStream, chatCompletionStreamWithVision, type VisionChatMessage } from '../services/assistantAIRouter.js';
 
 const router = express.Router();
 
@@ -85,7 +86,9 @@ const chatRequestSchema = z.object({
   conversationHistory: z.array(z.object({
     role: z.enum(['user', 'assistant']),
     content: z.string()
-  })).optional().default([])
+  })).optional().default([]),
+  /** Base64 data-URI of an attached image (data:image/png;base64,...) */
+  image: z.string().optional(),
 });
 
 const createAssistantSchema = z.object({
@@ -307,6 +310,93 @@ router.put('/:assistantId/update', async (req, res) => {
       error: 'Failed to update assistant',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
+// ── Telemetry Consent ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/assistants/telemetry-consent
+ *
+ * Returns the current user's telemetry consent status.
+ * Used by the frontend to decide whether to show the terms modal.
+ */
+router.get('/telemetry-consent', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const row = await db.queryOne<{
+      telemetry_consent_accepted: number;
+      telemetry_opted_out: number;
+      telemetry_consent_date: string | null;
+    }>(
+      'SELECT telemetry_consent_accepted, telemetry_opted_out, telemetry_consent_date FROM users WHERE id = ?',
+      [req.userId]
+    );
+
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Also check if this user has any assistants (to know if it's first-time)
+    const countRow = await db.queryOne<{ cnt: number }>(
+      'SELECT COUNT(*) as cnt FROM assistants WHERE userId = ?',
+      [req.userId]
+    );
+
+    return res.json({
+      success: true,
+      consent: {
+        accepted: !!row.telemetry_consent_accepted,
+        optedOut: !!row.telemetry_opted_out,
+        consentDate: row.telemetry_consent_date,
+      },
+      assistantCount: countRow?.cnt || 0,
+    });
+  } catch (error) {
+    console.error('Telemetry consent check error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to check telemetry consent' });
+  }
+});
+
+/**
+ * POST /api/assistants/telemetry-consent
+ *
+ * Accept (or update) telemetry terms. Paid-tier users may set optOut=true.
+ *
+ * Body: { accepted: true, optOut?: boolean }
+ */
+router.post('/telemetry-consent', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { accepted, optOut } = req.body;
+
+    if (typeof accepted !== 'boolean') {
+      return res.status(400).json({ success: false, error: '"accepted" must be a boolean' });
+    }
+
+    await db.execute(
+      `UPDATE users SET
+        telemetry_consent_accepted = ?,
+        telemetry_opted_out = ?,
+        telemetry_consent_date = NOW()
+       WHERE id = ?`,
+      [
+        accepted ? 1 : 0,
+        optOut ? 1 : 0,
+        req.userId,
+      ]
+    );
+
+    console.log(`[Telemetry] User ${req.userId} consent: accepted=${accepted}, optOut=${!!optOut}`);
+
+    return res.json({
+      success: true,
+      consent: {
+        accepted,
+        optedOut: !!optOut,
+      },
+    });
+  } catch (error) {
+    console.error('Telemetry consent update error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to update telemetry consent' });
   }
 });
 
@@ -716,7 +806,7 @@ router.post('/:assistantId/recategorize', async (req, res) => {
 router.post('/chat', checkAssistantStatus, async (req, res) => {
   try {
     const validatedData = chatRequestSchema.parse(req.body);
-    const { assistantId, message, conversationHistory } = validatedData;
+    const { assistantId, message, conversationHistory, image } = validatedData;
 
     // Look up assistant from database
     const row = await db.queryOne<AssistantRow>(
@@ -802,22 +892,53 @@ Remember: You represent ${assistant.name} and should respond as if you work for 
 
     // Stream response back to client as Server-Sent Events
     // Fallback chain — Free: GLM → Ollama | Paid: GLM → OpenRouter → Ollama
+    // Vision chain — Free: Ollama qwen2.5vl | Paid: OpenRouter gpt-4o → gemini-flash → Ollama
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // disable nginx/apache proxy buffering
     res.flushHeaders();
 
-    const { stream, model: resolvedModel, provider } = await chatCompletionStream(
-      tier,
-      messages as any,
-      {
-        temperature: getTemperatureForPersonality(assistant.personality),
-        top_p: 0.9,
-        top_k: 40,
-        max_tokens: 2048,
-      },
-    );
+    const hasImage = !!image && image.startsWith('data:image/');
+    let stream: ReadableStream<Uint8Array>;
+    let resolvedModel: string;
+    let provider: string;
+
+    if (hasImage) {
+      // Vision path — build multimodal messages
+      const visionMessages: VisionChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        ...(conversationHistory.slice(-10).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))),
+        { role: 'user', content: message, images: [image!] },
+      ];
+      const visionResult = await chatCompletionStreamWithVision(
+        tier,
+        visionMessages,
+        {
+          temperature: getTemperatureForPersonality(assistant.personality),
+          top_p: 0.9,
+          max_tokens: 2048,
+        },
+      );
+      stream = visionResult.stream;
+      resolvedModel = visionResult.model;
+      provider = visionResult.provider;
+    } else {
+      // Text-only path — existing fallback chain
+      const textResult = await chatCompletionStream(
+        tier,
+        messages as any,
+        {
+          temperature: getTemperatureForPersonality(assistant.personality),
+          top_p: 0.9,
+          top_k: 40,
+          max_tokens: 2048,
+        },
+      );
+      stream = textResult.stream;
+      resolvedModel = textResult.model;
+      provider = textResult.provider;
+    }
 
     console.log(`[Assistant ${assistantId}] Provider: ${provider}, Model: ${resolvedModel}`);
 
@@ -855,7 +976,7 @@ Remember: You represent ${assistant.name} and should respond as if you work for 
                   }
                 }
               } catch (_e) { /* skip malformed */ }
-            } else if (provider === 'openrouter') {
+            } else if (provider === 'openrouter' || provider === 'openrouter-fallback') {
               // OpenAI-compatible SSE format: data: {...}
               if (!trimmed.startsWith('data: ')) continue;
               const payload = trimmed.slice(6);
@@ -916,6 +1037,19 @@ Remember: You represent ${assistant.name} and should respond as if you work for 
             console.error(`[Assistant ${assistantId}] Tool execution failed:`, toolError);
           }
         }
+
+        // ── Anonymized telemetry (fire-and-forget) ──
+        try {
+          const ownerRow = await db.queryOne<{ telemetry_opted_out: number }>(
+            'SELECT u.telemetry_opted_out FROM users u JOIN assistants a ON a.userId = u.id WHERE a.id = ?',
+            [assistantId]
+          );
+          if (!ownerRow || !ownerRow.telemetry_opted_out) {
+            logAnonymizedChat(assistantId, message, fullResponse, {
+              source: 'assistant', model: resolvedModel, provider,
+            });
+          }
+        } catch (_e) { /* non-fatal */ }
 
         res.write(`data: ${JSON.stringify({ done: true, model: resolvedModel, provider })}\n\n`);
         res.end();

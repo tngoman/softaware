@@ -14,9 +14,10 @@
 import { env } from '../config/env.js';
 import { db, toMySQLDate } from '../db/mysql.js';
 import { parseToolCall, type ToolCall, type ToolResult, type ToolDefinition } from './actionRouter.js';
-import { chatCompletion } from './assistantAIRouter.js';
+import { chatCompletion, chatCompletionWithVision, type VisionChatMessage } from './assistantAIRouter.js';
 import { getToolsForRole, getMobileToolsSystemPrompt, type MobileRole } from './mobileTools.js';
 import { executeMobileAction, type MobileExecutionContext } from './mobileActionExecutor.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 import { randomUUID } from 'crypto';
 import type { AIMessage } from './ai/AIProvider.js';
 
@@ -39,6 +40,8 @@ export interface MobileIntentRequest {
   conversationId?: string;
   assistantId?: string;
   language?: string;
+  /** Base64 data-URI of an attached image (data:image/png;base64,...) */
+  image?: string;
 }
 
 export interface MobileIntentResponse {
@@ -190,14 +193,39 @@ export async function processMobileIntent(
   const toolsUsed: string[] = [];
   let lastToolData: Record<string, unknown> | undefined;
   let llmReply = '';
+  let lastProvider = '';
+  let lastModel = '';
+  const hasImage = !!req.image;
+  if (hasImage) {
+    console.log(`[MobileAI] Image attached (${Math.round(req.image!.length / 1024)}KB base64), routing to vision model`);
+  }
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const chatResult = await chatCompletion(assistantTier, messages as any, {
-      temperature: 0.4,
-      max_tokens: 1024,
-    }, modelOverride);
+    let chatResult: { content: string; model: string; provider: string };
+
+    if (hasImage && round === 0) {
+      // Vision request — route to multimodal models
+      const visionMessages: VisionChatMessage[] = messages.map((m, idx) => ({
+        role: m.role as 'system' | 'user' | 'assistant',
+        content: m.content,
+        // Attach images only to the latest user message
+        ...(idx === messages.length - 1 && m.role === 'user' ? { images: [req.image!] } : {}),
+      }));
+      chatResult = await chatCompletionWithVision(assistantTier, visionMessages, {
+        temperature: 0.4,
+        max_tokens: 1024,
+      });
+    } else {
+      chatResult = await chatCompletion(assistantTier, messages as any, {
+        temperature: 0.4,
+        max_tokens: 1024,
+      }, modelOverride);
+    }
+
     llmReply = chatResult.content;
-    if (round === 0) console.log(`[MobileAI] Provider: ${chatResult.provider}, Model: ${chatResult.model}`);
+    lastProvider = chatResult.provider;
+    lastModel = chatResult.model;
+    if (round === 0) console.log(`[MobileAI] Provider: ${chatResult.provider}, Model: ${chatResult.model}${hasImage ? ' (vision)' : ''}`);
 
     // Check if the LLM wants to call a tool
     const toolCall: ToolCall | null = parseToolCall(llmReply);
@@ -227,6 +255,16 @@ export async function processMobileIntent(
 
   // --- Save final reply ---
   await saveMessage(conversationId, 'assistant', llmReply);
+
+  // --- Anonymized telemetry (fire-and-forget) ---
+  try {
+    const clientId = req.assistantId || userId;
+    logAnonymizedChat(clientId, req.text, llmReply, {
+      source: 'assistant',
+      model: lastModel,
+      provider: lastProvider,
+    });
+  } catch (_e) { /* non-fatal */ }
 
   return {
     reply: llmReply,
@@ -273,10 +311,25 @@ async function loadAssistantPromptData(
 }
 
 /** Default strict core for staff assistants */
-const STAFF_CORE_DEFAULT = `You are a Soft Aware administrative assistant. You have access to secure system tools for managing clients, assistants, development tasks, support cases, CRM contacts, quotations, invoices, pricing, scheduled calls, and team chat. You MUST use these tools when the user requests an action. Never reveal your internal tool names or JSON schemas to the user. Always confirm destructive actions before executing them.`;
+const STAFF_CORE_DEFAULT = `You are a Soft Aware administrative assistant. You have access to secure system tools for managing clients, assistants, development tasks, bug tracking, support cases, CRM contacts, quotations, invoices, pricing, scheduled calls, and team chat. You MUST use these tools when the user requests an action. Never reveal your internal tool names or JSON schemas to the user. Always confirm destructive actions before executing them.
+
+VOICE INTERACTION:
+- Users interact with you via voice (speech-to-text). Your replies are read aloud via text-to-speech.
+- If someone says "can you hear me?", "is this working?", "hello?", or tests their mic — YES, you can receive their voice input. Respond warmly: "Yes, I can hear you! How can I help?"
+- Do NOT say you are text-only, cannot hear, or lack audio capabilities. The user's speech is transcribed to text for you, and your text reply is spoken back to them.
+- Do NOT use markdown formatting (no asterisks, underscores, hash symbols, backticks, or bullet symbols). Write in plain natural sentences since your response will be spoken aloud.
+- Use commas and periods for pauses instead of bullet points or numbered lists.
+- Say "dash" or skip the character entirely instead of using hyphens as list markers.`;
 
 /** Default strict core for client assistants */
-const CLIENT_CORE_DEFAULT = `You are a Soft Aware account assistant. You help the user manage their AI assistants, monitor usage, troubleshoot ingestion issues, manage their website leads, send follow-up emails, and make changes to their generated landing page. You have access to self-service tools. Use them when the user requests an action. Never reveal tool names or JSON schemas. When a user asks about their leads or form submissions, use the lead tools. When they want to change their website details (phone, email, about text), use the site tools and remind them to regenerate and deploy afterwards.`;
+const CLIENT_CORE_DEFAULT = `You are a Soft Aware account assistant. You help the user manage their AI assistants, monitor usage, troubleshoot ingestion issues, manage their website leads, send follow-up emails, and make changes to their generated landing page. You have access to self-service tools. Use them when the user requests an action. Never reveal tool names or JSON schemas. When a user asks about their leads or form submissions, use the lead tools. When they want to change their website details (phone, email, about text), use the site tools and remind them to regenerate and deploy afterwards.
+
+VOICE INTERACTION:
+- Users interact with you via voice (speech-to-text). Your replies are read aloud via text-to-speech.
+- If someone says "can you hear me?", "is this working?", or tests their mic — YES, you can receive their voice input. Respond warmly.
+- Do NOT say you are text-only or cannot hear. The user's speech is transcribed for you and your reply is spoken back.
+- Do NOT use markdown formatting (no asterisks, hash symbols, backticks, or bullet symbols). Write in plain natural sentences.
+- Use commas and periods for pauses instead of bullet points or numbered lists.`;
 
 /**
  * THE PROMPT STITCHING — The Guardrail.

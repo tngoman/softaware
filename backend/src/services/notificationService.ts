@@ -9,7 +9,10 @@ interface NotificationOptions {
   userId: string | number;
   title: string;
   message: string;
-  type?: 'info' | 'success' | 'warning' | 'error' | 'case_created' | 'case_assigned' | 'case_updated' | 'case_update' | 'case_comment' | 'case_resolved' | 'case_deleted' | 'system_alert';
+  type?: 'info' | 'success' | 'warning' | 'error'
+    | 'case_created' | 'case_assigned' | 'case_updated' | 'case_update' | 'case_comment' | 'case_resolved' | 'case_deleted'
+    | 'bug_created'  | 'bug_assigned'  | 'bug_updated'  | 'bug_comment'  | 'bug_resolved'  | 'bug_workflow'
+    | 'system_alert';
   data?: Record<string, any>;
 }
 
@@ -20,11 +23,17 @@ function mapNotificationType(type: NotificationOptions['type']): 'info' | 'succe
   switch (type) {
     case 'case_created':
     case 'case_comment':
+    case 'bug_created':
+    case 'bug_comment':
+    case 'bug_workflow':
       return 'info';
     case 'case_assigned':
     case 'case_updated':
     case 'case_update':
     case 'case_resolved':
+    case 'bug_assigned':
+    case 'bug_updated':
+    case 'bug_resolved':
       return 'success';
     case 'case_deleted':
     case 'system_alert':

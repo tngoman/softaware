@@ -65,12 +65,23 @@ export function useTasks({ softwareId }: UseTasksOptions = {}) {
         due_date: t.end_date || null,
         backgroundColor: t.color || '#667eea',
         time: t.external_created_at || t.created_at || null,
+        // Local enhancement fields
+        priority: t.priority || 'normal',
+        is_bookmarked: t.is_bookmarked || 0,
+        color_label: t.color_label || null,
+        local_tags: t.local_tags ? (typeof t.local_tags === 'string' ? JSON.parse(t.local_tags) : t.local_tags) : [],
+        kanban_order: t.kanban_order || 0,
+        view_count: t.view_count || 0,
+        last_viewed_at: t.last_viewed_at || null,
         // Keep source tracking
         _local_id: t.id,
         _source_id: t.source_id,
         _source_name: t.source_name,
         _local_dirty: t.local_dirty,
         _last_synced_at: t.last_synced_at,
+        // Billing fields
+        task_billed: t.task_billed || 0,
+        task_bill_date: t.task_bill_date || null,
       }));
 
       prevTasksRef.current = normalized;

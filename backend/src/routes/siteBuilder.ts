@@ -235,7 +235,16 @@ router.get('/:siteId/preview', async (req: Request, res) => {
     try {
       const decoded = jwt.verify(token, env.JWT_SECRET!) as { userId?: string; id?: string };
       const userId = decoded.userId || decoded.id;
-      if (!userId || site.user_id !== userId) return res.status(403).send('<h1>Access denied</h1>');
+      if (!userId) return res.status(403).send('<h1>Access denied</h1>');
+
+      // Allow site owner OR admin users
+      if (site.user_id !== userId) {
+        const adminRow = await db.queryOne<{ is_admin: number }>(
+          'SELECT is_admin FROM users WHERE id = ?',
+          [userId]
+        );
+        if (!adminRow || !adminRow.is_admin) return res.status(403).send('<h1>Access denied</h1>');
+      }
     } catch {
       return res.status(401).send('<h1>Invalid or expired token</h1>');
     }

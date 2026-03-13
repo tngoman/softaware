@@ -1,7 +1,7 @@
 # Assistants Module — File Inventory
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-09
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine.
 
@@ -11,39 +11,41 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total files** | 24 (17 source + 2 migration + 3 static widget + 2 new frontend) |
-| **Total LOC** | ~10,830 (source) |
-| **Backend route files** | 5 (~2,220 LOC) |
-| **Backend service files** | 8 (~3,940 LOC) |
-| **Backend migration files** | 2 (77 + 62 LOC) |
-| **Frontend files** | 5 (~3,830 LOC) + models ~800 LOC |
+| **Total files** | 26 (18 source + 3 migration + 3 static widget + 2 new frontend) |
+| **Total LOC** | ~12,106 (source) |
+| **Backend route files** | 5 (~2,620 LOC) |
+| **Backend service files** | 9 (~4,600 LOC) |
+| **Backend migration files** | 3 (77 + 62 + 45 LOC) |
+| **Frontend files** | 5 (~4,266 LOC) + models ~630 LOC |
 | **Static widget files** | 3 (widget.js, chat-widget.js, embed.js) |
 
 ### Directory Tree
 
 ```
 Backend:
-  src/routes/assistants.ts                 (846 LOC)  ⭐ widget.js endpoint branded
+  src/routes/assistants.ts                 (1108 LOC) ⭐ vision-aware SSE streaming + telemetry consent
   src/routes/assistantIngest.ts            (224 LOC)
   src/routes/myAssistant.ts                (~340 LOC) ⭐ NEW — unified assistant CRUD (staff + clients)
   src/routes/staffAssistant.ts             (382 LOC)  ⚠️ DEPRECATED — use myAssistant.ts
-  src/routes/mobileIntent.ts               (241 LOC)  ⭐ updated — conversation preview, primary auto-select
+  src/routes/mobileIntent.ts               (338 LOC)  ⭐ updated — image validation, conversation preview
   src/services/vectorStore.ts              (263 LOC)  ⭐ sqlite-vec deep-dive
   src/services/knowledgeCategorizer.ts     (367 LOC)
   src/services/ingestionWorker.ts          (405 LOC)
   src/services/ingestionAIRouter.ts        (138 LOC)  ⭐ updated — GLM-first AI cleaning
-  src/services/assistantAIRouter.ts         (435 LOC)  ⭐ REWRITTEN — 3-tier routing (GLM→OpenRouter→Ollama)
+  src/services/assistantAIRouter.ts         (751 LOC)  ⭐ EXTENDED — 3-tier text + vision routing
+  src/utils/analyticsLogger.ts             (~160 LOC) ⭐ NEW — PII-sanitized telemetry logging
   src/services/mobileTools.ts              (1211 LOC) ⭐ updated — 41 tools, system prompt rules
-  src/services/mobileAIProcessor.ts        (385 LOC)  ⭐ updated — tier-based routing via assistantAIRouter
+  src/services/mobileAIProcessor.ts        (387 LOC)  ⭐ updated — tier-based + vision routing
   src/services/mobileActionExecutor.ts     (2127 LOC) ⭐ updated — 41 executors, collation fix, actionable errors
   src/db/migrations/012_staff_sandbox_prompts.ts (77 LOC)  migration
   src/db/migrations/013_unified_assistant_primary.ts (62 LOC) ⭐ NEW migration
+  src/db/migrations/026_ai_telemetry.ts    (45 LOC)  ⭐ NEW migration — telemetry consent columns
 
 Frontend:
   src/pages/portal/Dashboard.tsx           (564 LOC)  ⭐ recently modified
   src/pages/portal/AssistantsPage.tsx      (592 LOC)  ⭐ ENHANCED (v1.7.0) — SSE fixes, per-assistant chat persistence, trash icon
-  src/pages/portal/CreateAssistant.tsx     (1193 LOC) ⭐ 4-step creation wizard
-  src/pages/general/Profile.tsx            (1858 LOC) ⭐ ENHANCED (v1.9.0) — chat history sidebar, conversation loading, delete, AI flare helper
+  src/pages/portal/CreateAssistant.tsx     (1259 LOC) ⭐ 4-step creation wizard + telemetry consent modal
+  src/pages/general/Profile.tsx            (2227 LOC) ⭐ ENHANCED (v2.0.0) — image attachment, voice, chat history sidebar
   src/components/KnowledgeHealthBadge.tsx  (107 LOC)
   src/components/KnowledgeHealthScore.tsx  (275 LOC)
   src/models/SystemModels.ts               (~625 LOC) ⭐ updated — MobileConversation.preview, MyAssistantModel class
@@ -66,9 +68,9 @@ Brand Assets:
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/assistants.ts` |
-| **LOC** | 846 |
-| **Purpose** | Full CRUD, knowledge health, chat (SSE + RAG), widget delivery, admin model management, delete with KB option |
-| **Dependencies** | express, zod, axios, db/mysql, services/vectorStore, services/knowledgeCategorizer, config/personaTemplates, services/actionRouter, middleware/statusCheck |
+| **LOC** | ~1,108 |
+| **Purpose** | Full CRUD, knowledge health, chat (SSE + RAG + vision), widget delivery, admin model management, delete with KB option, **telemetry consent API + chat analytics logging** |
+| **Dependencies** | express, zod, axios, db/mysql, services/vectorStore, services/knowledgeCategorizer, config/personaTemplates, services/actionRouter, middleware/statusCheck, **utils/analyticsLogger** |
 | **Exports** | `assistantsRouter`, `unloadAssistantModel()` |
 
 #### Interfaces
@@ -104,6 +106,8 @@ Brand Assets:
 | GET | /:assistantId/knowledge-health | None | L516-532 |
 | POST | /:assistantId/recategorize | None | L539-553 |
 | POST | /chat | None | L560-777 |
+| GET | /telemetry-consent | JWT | ⭐ NEW (v2.2.0) |
+| POST | /telemetry-consent | JWT | ⭐ NEW (v2.2.0) |
 
 ---
 
@@ -286,55 +290,88 @@ Return only the cleaned text, no commentary.
 
 ---
 
-### 2.6b `src/services/assistantAIRouter.ts` — Tier-Based Chat Routing ⭐ NEW (v1.8.0)
+### 2.6b `src/services/assistantAIRouter.ts` — Tier-Based Chat + Vision Routing ⭐ EXTENDED (v2.0.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/services/assistantAIRouter.ts` |
-| **LOC** | ~130 |
-| **Purpose** | Routes assistant chat (both SSE streaming and non-streaming) through Ollama (free) or OpenRouter (paid) based on the assistant's tier. Mirrors the `ingestionAIRouter.ts` pattern. |
+| **LOC** | ~751 |
+| **Purpose** | Centralized routing for ALL assistant chat — text (GLM→OpenRouter→Ollama) and vision (GPT-4o→Gemini Flash→Ollama qwen2.5vl). Handles both streaming and non-streaming for portal SSE and mobile intent. |
 | **Dependencies** | config/env, services/credentialVault |
-| **Exports** | `chatCompletion()`, `chatCompletionStream()`, `shouldUseOpenRouter()` |
+| **Exports** | `chatCompletion()`, `chatCompletionStream()`, `shouldUseOpenRouter()`, `chatCompletionWithVision()`, `chatCompletionStreamWithVision()`, `VisionChatMessage`, `ContentBlock`, `VisionProvider` |
 
-#### Functions
+#### Types
+
+| Type | Description |
+|------|-------------|
+| `ChatMessage` | `{ role: 'system'\|'user'\|'assistant', content: string }` |
+| `VisionChatMessage` | Extends `ChatMessage` with `images?: string[]` — base64 data-URIs |
+| `ContentBlock` | `{type:'text', text}` \| `{type:'image_url', image_url:{url}}` — OpenAI content array format |
+| `VisionProvider` | `'openrouter' \| 'openrouter-fallback' \| 'ollama-vision'` |
+| `PaidProvider` | `'glm' \| 'openrouter' \| 'ollama'` |
+
+#### Text Routing Functions
 
 | Function | Params | Returns | Description |
 |----------|--------|---------|-------------|
-| `shouldUseOpenRouter(tier)` | `'free'\|'paid'` | `Promise<boolean>` | Returns `true` if tier is `paid` AND an OpenRouter API key is available (via credentialVault or env) |
-| `chatCompletion(tier, messages, opts?, ollamaModel?)` | tier, messages array, options, model override | `Promise<string>` | Non-streaming chat — used by `mobileAIProcessor.ts`. Routes to OpenRouter or Ollama. Returns assistant text. |
-| `chatCompletionStream(tier, messages, opts?, ollamaModel?)` | tier, messages array, options, model override | `Promise<Response>` | Streaming chat — used by `assistants.ts` POST /chat. Returns raw `fetch()` Response for the caller to stream. |
+| `shouldUseOpenRouter(tier)` | `'free'\|'paid'` | `Promise<boolean>` | `true` if tier `paid` AND OpenRouter key available |
+| `chatCompletion(tier, messages, opts?, ollamaModel?)` | — | `Promise<{content, model, provider}>` | Non-streaming, 3-tier fallback: GLM→OpenRouter→Ollama (paid) or GLM→Ollama (free) |
+| `chatCompletionStream(tier, messages, opts?, ollamaModel?)` | — | `Promise<{stream, provider}>` | Streaming, same 3-tier fallback. Returns raw fetch `Response`. |
+
+#### Vision Routing Functions
+
+| Function | Params | Returns | Description |
+|----------|--------|---------|-------------|
+| `chatCompletionWithVision(tier, messages, opts?)` | — | `Promise<{content, model, provider}>` | Non-streaming vision. Paid: GPT-4o→Gemini Flash→Ollama qwen2.5vl. Free: Ollama qwen2.5vl. |
+| `chatCompletionStreamWithVision(tier, messages, opts?)` | — | `Promise<{stream, provider}>` | Streaming vision with same tier-based fallback chain. |
 
 #### Internal Helpers
 
 | Function | Description |
 |----------|-------------|
-| `ollamaChat(messages, model, opts)` | Non-streaming POST to `{OLLAMA_BASE_URL}/api/chat` with `stream: false` |
-| `openRouterChat(messages, opts)` | Non-streaming POST to `https://openrouter.ai/api/v1/chat/completions` |
-| `ollamaChatStream(messages, model, opts)` | Streaming POST to Ollama, returns `Response` |
-| `openRouterChatStream(messages, opts)` | Streaming POST to OpenRouter with `stream: true`, returns `Response` |
+| `buildGLMBody(messages, opts)` | Extracts system message into top-level `system` field (Anthropic format) |
+| `glmChat()` / `glmStream()` | GLM via Anthropic Messages API at `api.z.ai` |
+| `ollamaChat()` / `ollamaChatStream()` | Local Ollama native API |
+| `openRouterChat()` / `openRouterChatStream()` | OpenRouter OpenAI-compatible API |
+| `stripDataUri(dataUri)` | Removes `data:image/*;base64,` prefix for Ollama (expects raw base64) |
+| `buildOpenRouterVisionMessages(messages)` | Converts to OpenAI `content[]` array format with `image_url` blocks |
+| `buildOllamaVisionMessages(messages)` | Converts to Ollama format with separate `images[]` field |
+| `openRouterVisionChat()` / `openRouterVisionStream()` | OpenRouter calls with vision-capable models |
+| `ollamaVisionChat()` / `ollamaVisionStream()` | Ollama calls with local vision model |
 
-#### Tier Routing
+#### Text Routing
 
-| Tier | Provider | Model | Streaming Format | Fallback |
-|------|----------|-------|-----------------|----------|
-| `paid` | OpenRouter | `ASSISTANT_OPENROUTER_MODEL` (default: `google/gemma-3-4b-it:free`) | SSE (`data: {...}`) | Ollama (if no API key) |
-| `free` | Ollama (local) | `ASSISTANT_OLLAMA_MODEL` or `ollamaModel` param | NDJSON (one JSON object per line) | None |
+| Tier | Fallback Chain | Model |
+|------|----------------|-------|
+| `paid` | GLM → OpenRouter → Ollama | glm-4.6 → gpt-4o-mini → qwen2.5:1.5b-instruct |
+| `free` | GLM → Ollama | glm-4.6 → qwen2.5:1.5b-instruct |
+
+#### Vision Routing
+
+| Tier | Fallback Chain | Model |
+|------|----------------|-------|
+| `paid` | OpenRouter → OpenRouter fallback → Ollama | openai/gpt-4o → google/gemini-2.0-flash-001 → qwen2.5vl:7b |
+| `free` | Ollama (direct) | qwen2.5vl:7b |
 
 #### Configuration
 
 | Env Variable | Purpose | Default |
 |-------------|---------|---------|
-| `OPENROUTER_API_KEY` | OpenRouter auth (checked via credentialVault → env fallback) | — |
-| `ASSISTANT_OPENROUTER_MODEL` | Paid-tier assistant chat model | `google/gemma-3-4b-it:free` |
-| `ASSISTANT_OLLAMA_MODEL` | Free-tier assistant chat model | `qwen2.5:1.5b-instruct` |
+| `OPENROUTER_API_KEY` | OpenRouter auth | — |
+| `ASSISTANT_OPENROUTER_MODEL` | Paid text chat model | `google/gemma-3-4b-it:free` |
+| `ASSISTANT_OLLAMA_MODEL` | Free text chat model | `qwen2.5:1.5b-instruct` |
+| `VISION_OPENROUTER_MODEL` | Paid vision primary | `openai/gpt-4o` |
+| `VISION_OPENROUTER_FALLBACK` | Paid vision fallback | `google/gemini-2.0-flash-001` |
+| `VISION_OLLAMA_MODEL` | Free vision + last resort | `qwen2.5vl:7b` |
 | `OLLAMA_BASE_URL` | Local Ollama endpoint | — |
 
 #### Key Design Decisions
 
-- **OpenRouter API key is cached** — first retrieval from `credentialVault.getSecret()` is stored in module-level `cachedApiKey` to avoid repeated vault lookups.
-- **Falls back to Ollama gracefully** — if tier is `paid` but no OpenRouter key exists, routes to Ollama instead of failing.
-- **Model override support** — `ollamaModel` parameter allows callers to override the default (used by staff assistants with `preferred_model`).
-- **Dual-format streams** — callers must handle both Ollama NDJSON and OpenRouter SSE formats; `assistants.ts` implements a unified stream parser.
+- **GLM bypassed for vision** — GLM (glm-4.6) is text-only; vision requests skip directly to OpenRouter/Ollama vision models.
+- **OpenRouter API key is cached** — first retrieval from `credentialVault.getSecret()` stored in module-level `cachedApiKey`.
+- **Falls back gracefully** — each tier step catches errors silently and falls to next provider.
+- **Image format conversion** — OpenRouter expects `content[]` array with `image_url` blocks (data-URI preserved); Ollama expects `images[]` with raw base64 (prefix stripped via `stripDataUri()`).
+- **Dual-format streams** — callers must handle OpenAI SSE (`openrouter`/`openrouter-fallback`) and Ollama NDJSON (`ollama-vision`) formats.
 
 ---
 
@@ -380,13 +417,13 @@ Return only the cleaned text, no commentary.
 
 ---
 
-### 2.8 `src/routes/mobileIntent.ts` — Mobile Intent Route (updated v1.4.0)
+### 2.8 `src/routes/mobileIntent.ts` — Mobile Intent Route (updated v2.0.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/mobileIntent.ts` |
-| **LOC** | 228 |
-| **Purpose** | Mobile AI voice intent processing, conversation management, assistant listing |
+| **LOC** | 338 |
+| **Purpose** | Mobile AI voice intent processing, image attachment validation, conversation management, assistant listing |
 | **Dependencies** | express, db/mysql, middleware/auth, services/mobileAIProcessor, utils/httpErrors |
 | **Mount** | `/api/v1/mobile` |
 | **Exports** | `default` (Express router) |
@@ -448,13 +485,13 @@ Return only the cleaned text, no commentary.
 
 ---
 
-### 2.10 `src/services/mobileAIProcessor.ts` — AI Processor with Prompt Stitching (updated v1.8.0)
+### 2.10 `src/services/mobileAIProcessor.ts` — AI Processor with Prompt Stitching (updated v2.0.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/services/mobileAIProcessor.ts` |
-| **LOC** | ~390 |
-| **Purpose** | Tier-based AI conversation workflow with two-part prompt stitching, conversation persistence, tool-call loop. Routes through `assistantAIRouter` for Ollama/OpenRouter selection. |
+| **LOC** | ~418 |
+| **Purpose** | Tier-based AI conversation workflow with two-part prompt stitching, conversation persistence, tool-call loop, **vision routing for image attachments**. Routes through `assistantAIRouter` for Ollama/OpenRouter selection. |
 | **Dependencies** | config/env, db/mysql, services/actionRouter, services/mobileTools, services/mobileActionExecutor, **services/assistantAIRouter**, crypto |
 | **Exports** | `processMobileIntent()`, `resolveUserRole()`, `MobileIntentRequest`, `MobileIntentResponse` |
 
@@ -476,6 +513,24 @@ Return only the cleaned text, no commentary.
 | **`tier` in SQL** | `loadAssistantPromptData()` now SELECTs `COALESCE(tier,'free') AS tier` from the `assistants` table |
 | **`AssistantPromptRow`** | Interface extended with `tier: string` field |
 
+#### Changes in v2.0.0
+
+| Change | Description |
+|--------|-------------|
+| **Vision routing** | On round 0, if `image` present in request, routes to `chatCompletionWithVision()` instead of text `chatCompletion()` |
+| **`MobileIntentRequest`** | Added `image?: string` field for base64 data-URI image payloads |
+| **Debug logging** | `[MobileAI] Image attached (XXkB base64), routing to vision model` |
+| **Subsequent rounds** | Tool-call rounds 1+ use text-only `chatCompletion()` (image only analyzed once) |
+
+#### Changes in v2.3.0
+
+| Change | Description |
+|--------|-------------|
+| **`STAFF_CORE_DEFAULT`** | Added `VOICE INTERACTION:` section (6 rules) — voice awareness, no markdown, natural pause formatting |
+| **`CLIENT_CORE_DEFAULT`** | Added matching `VOICE INTERACTION:` section (5 rules) — voice awareness, no markdown |
+| **Bug fix: "can't hear"** | AI no longer claims it is text-only when user tests mic via speech |
+| **Bug fix: asterisks in TTS** | Model instructed to avoid markdown; stray `*` no longer read as "asterisk" by TTS |
+
 #### Prompt Stitching Architecture
 
 ```
@@ -483,6 +538,10 @@ Return only the cleaned text, no commentary.
 │  core_instructions (hidden, backend-managed)     │
 │  ─ falls back to STAFF_CORE_DEFAULT or           │
 │    CLIENT_CORE_DEFAULT if not set                │
+│  ─ includes VOICE INTERACTION section (v2.3.0):  │
+│    • STT/TTS awareness (never say "can't hear") │
+│    • No markdown formatting in responses         │
+│    • Commas/periods for pauses, not bullets       │
 ├─────────────────────────────────────────────────┤
 │  Identity: "You are {name}..."                   │
 ├─────────────────────────────────────────────────┤
@@ -553,6 +612,65 @@ mobileActionExecutor.ts                     External Software API
 | 2 | ALTER mobile_conversations: add `assistant_id` |
 | 3 | CREATE TABLE `staff_software_tokens` |
 | 4 | ADD INDEX `idx_staff_agent` on assistants |
+
+---
+
+### 2.13 `src/db/migrations/013_unified_assistant_primary.ts` — Migration ⭐ NEW (v1.5.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/backend/src/db/migrations/013_unified_assistant_primary.ts` |
+| **LOC** | 62 |
+| **Purpose** | Adds `is_primary` column to assistants table for default mobile assistant selection |
+| **Exports** | `up()`, `down()` |
+
+---
+
+### 2.14 `src/utils/analyticsLogger.ts` — PII-Sanitized Telemetry ⭐ NEW (v2.2.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/backend/src/utils/analyticsLogger.ts` |
+| **LOC** | ~160 |
+| **Purpose** | POPIA-compliant anonymized chat logging — strips PII from prompts/responses, writes to SQLite analytics table. Used by all 3 chat routes. |
+| **Dependencies** | better-sqlite3 |
+| **Exports** | `sanitizeText()`, `logAnonymizedChat()` |
+
+#### Functions
+
+| Function | Params | Returns | Description |
+|----------|--------|---------|-------------|
+| `sanitizeText(text)` | `string` | `string` | Strips PII via 6 regex patterns: emails, SA phones, SA IDs, credit cards, account numbers, street addresses |
+| `logAnonymizedChat(clientId, rawPrompt, rawResponse, options?)` | `string, string, string, LogOptions?` | `void` | Fire-and-forget INSERT into `ai_analytics_logs` SQLite table. Options: `source`, `model`, `provider`, `durationMs` |
+
+#### Internal Details
+
+| Detail | Description |
+|--------|-------------|
+| **Table auto-creation** | `ai_analytics_logs` table created on first `logAnonymizedChat()` call via `CREATE TABLE IF NOT EXISTS` |
+| **Database path** | `/var/opt/backend/data/vectors.db` (shared with knowledge vectors) |
+| **Error handling** | All errors caught in try/catch — never propagated. Logs error to console but never throws. |
+| **Sync writes** | Uses better-sqlite3 synchronous API (not async mysql2) |
+
+---
+
+### 2.15 `src/db/migrations/026_ai_telemetry.ts` — Migration ⭐ NEW (v2.2.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/backend/src/db/migrations/026_ai_telemetry.ts` |
+| **LOC** | ~45 |
+| **Purpose** | Adds telemetry consent columns to MySQL `users` table: `telemetry_consent_accepted`, `telemetry_opted_out`, `telemetry_consent_date` |
+| **Exports** | `up()`, `down()` |
+| **Runner** | `src/scripts/run_migration_026.ts` |
+
+#### Migration Steps (up)
+
+| Step | Action |
+|------|--------|
+| 1 | ALTER users: add `telemetry_consent_accepted` TINYINT(1) DEFAULT 0 |
+| 2 | ALTER users: add `telemetry_opted_out` TINYINT(1) DEFAULT 0 |
+| 3 | ALTER users: add `telemetry_consent_date` DATETIME DEFAULT NULL |
 
 ---
 
@@ -679,14 +797,14 @@ mobileActionExecutor.ts                     External Software API
 
 ---
 
-### 3.3 `src/pages/general/Profile.tsx` — StaffAssistantTab Component ⭐ ENHANCED (v1.6.0)
+### 3.3 `src/pages/general/Profile.tsx` — StaffAssistantTab Component ⭐ ENHANCED (v2.0.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/general/Profile.tsx` |
-| **LOC** | 1,524 (full file) / ~550 (StaffAssistantTab only, lines 55–605) |
-| **Purpose** | Staff AI assistant management with customization UI, capabilities awareness, webhook info |
-| **Dependencies** | react, @heroicons/react (29 icons), StaffAssistantModel, sweetalert2 |
+| **LOC** | 2,227 (full file) / ~550 (StaffAssistantTab only, lines 55–605) |
+| **Purpose** | Staff AI assistant management with customization UI, **image attachment**, **chat history sidebar**, capabilities awareness, webhook info |
+| **Dependencies** | react, @heroicons/react (31 icons), StaffAssistantModel, sweetalert2 |
 | **Exports** | Component embedded in Profile page (not standalone export) |
 
 #### State (StaffAssistantTab)

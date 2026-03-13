@@ -2796,6 +2796,20 @@ Deletes a software portal token by ID. **Staff role required.**
 
 ## 14. Changelog
 
+### Version 1.3.0 (2026-03-12)
+- Added Admin Audit Log feature (SQLite-backed, separate from MySQL)
+- New file: `adminAuditLog.ts` — 6 endpoints at `/api/admin/audit-log`
+  - GET `/admin/audit-log` — Paginated, filterable log list
+  - GET `/admin/audit-log/stats` — Dashboard statistics
+  - GET `/admin/audit-log/filters` — Available filter values
+  - POST `/admin/audit-log/trim` — Trim entries older than N days
+  - DELETE `/admin/audit-log/bulk` — Delete specific entries by ID
+  - DELETE `/admin/audit-log/purge` — Purge ALL entries
+- New middleware: `auditLogger.ts` — Logs all admin actions automatically
+- New DB module: `db/auditLog.ts` — SQLite storage with WAL mode
+- Frontend: `AuditLog.tsx` page at `/admin/audit-log` with filtering, stats, and trim UI
+- Total endpoints updated from 116 to 122
+
 ### Version 1.2.0 (2026-03-05)
 - Added System Settings routes (settings.ts: 7 endpoints — `/api/settings`)
 - Added System Users routes (systemUsers.ts: 5 endpoints — `/api/users`)

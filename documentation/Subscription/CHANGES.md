@@ -3,6 +3,8 @@
 **Version:** 1.0.0  
 **Last Updated:** 2026-03-04
 
+> ⚠️ **DEPRECATION NOTICE (June 2025)**: The team-scoped credit system has been superseded by the [Packages module](../Packages/README.md). Legacy routes and tables are retained for backward compatibility but are no longer the active billing path. New credit operations flow through `services/packages.ts` and `middleware/packages.ts`. See [Packages CHANGES.md](../Packages/CHANGES.md) for the replacement system.
+
 ---
 
 ## 1. Overview
@@ -12,6 +14,29 @@ This document tracks version history, known issues, and migration notes for the 
 ---
 
 ## 2. Version History
+
+### Version 1.1.0 — Superseded by Packages (June 2025)
+
+**Status:** ⚠️ Legacy — Superseded  
+**Release Notes:**
+
+The team-scoped credit model has been replaced by the contact-scoped [Packages system](../Packages/README.md):
+
+| Legacy Concept | New Equivalent | Notes |
+|---------------|---------------|-------|
+| `teams` credit owner | `contacts` (via `contact_packages`) | Billing scoped per-contact, not per-team |
+| `credit_balances` | `contact_packages.credits_balance` | Per-subscription balance |
+| `credit_transactions` | `package_transactions` | Full audit trail with `balance_after` |
+| `credit_packages` (purchase tiers) | `packages` (subscription tiers) | 7 seeded packages (Free → Staff) |
+| `middleware/credits.ts` | `middleware/packages.ts` | New middleware chain: requirePackage → requireCredits → deductCreditsAfterResponse |
+| `CREDIT_COSTS` config | `REQUEST_PRICING` config | Renamed with `baseCost`, `perToken`, `perMultiplier` |
+| `adminCredits.ts` routes | `adminPackages.ts` routes | New admin API at `/admin/packages/*` |
+| `AICredits.tsx` frontend | `AIPackages.tsx` frontend | 4-tab interface (Packages, Subscriptions, Transactions, User Links) |
+
+**Migration**: `023_packages_system.ts` — creates 4 new tables, seeds 7 packages, links Soft Aware (contact 1) to Staff package.
+
+**Legacy tables retained** (not dropped): `credit_packages`, `credit_balances`, `credit_transactions`, `teams`, `team_members`  
+**Legacy routes retained** (not removed): `/admin/credits/*`, `/v1/credits/*`
 
 ### Version 1.0.0 — Current (2026-03-04)
 

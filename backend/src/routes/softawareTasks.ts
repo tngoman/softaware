@@ -10,12 +10,15 @@
  * All external tasks-api endpoints from TASKS_API.md are supported.
  */
 
-import { Router, Request, Response } from 'express';
-import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { Router, Request, Response, NextFunction } from 'express';
+import { AuthRequest } from '../middleware/auth.js';
 import { db } from '../db/mysql.js';
 import { createNotificationWithPush } from '../services/firebaseService.js';
 
 export const softawareTasksRouter = Router();
+
+// No-op auth — local-only tool, no login required
+const requireAuth = (_req: Request, _res: Response, next: NextFunction) => next();
 
 /**
  * Forward a request to the external tasks-api using source-level API key auth.
@@ -237,6 +240,22 @@ softawareTasksRouter.post('/', requireAuth, async (req: Request, res: Response) 
   }
 });
 
+/**
+ * Convert a decimal hours value (e.g. "2.50", 2.5) to HH:MM string.
+ * Also accepts HH:MM pass-through if already in that format.
+ */
+function toHHMM(val: any): string {
+  if (val == null || val === '') return '00:00';
+  const s = String(val).trim();
+  // Already HH:MM format
+  if (/^\d+:\d{2}$/.test(s)) return s;
+  const num = parseFloat(s);
+  if (isNaN(num)) return '00:00';
+  const h = Math.floor(Math.abs(num));
+  const m = Math.round((Math.abs(num) - h) * 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 // ─── PUT /softaware/tasks ──────────────────────────────────────
 softawareTasksRouter.put('/', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -250,6 +269,27 @@ softawareTasksRouter.put('/', requireAuth, async (req: AuthRequest, res: Respons
     const updatePayload = { ...task };
     delete updatePayload.task_id;
     delete updatePayload.id;
+
+    // ── Handle hours separately via the dedicated hours endpoint ──
+    // The generic PUT ignores task_hours; must use PUT /{id}/hours
+    const rawHours = updatePayload.task_hours ?? updatePayload.hours;
+    delete updatePayload.task_hours;
+    delete updatePayload.hours;
+
+    if (rawHours != null && rawHours !== '') {
+      const hhmm = toHHMM(rawHours);
+      // Fire hours update in parallel (don't block the main update)
+      proxyToExternal(baseUrl, `/api/tasks-api/${taskId}/hours`, 'PUT', apiKey, { hours: hhmm }).catch(err => {
+        console.error(`[Task Update] Hours update failed for task ${taskId}:`, err);
+      });
+    }
+
+    // ── Normalise empty-string date fields to null so the API clears them ──
+    for (const field of ['actual_start', 'actual_end', 'task_start', 'task_end']) {
+      if (updatePayload[field] === '') {
+        updatePayload[field] = null;
+      }
+    }
 
     // Update the task on the external API
     const result = await proxyToExternal(baseUrl, `/api/tasks-api/${taskId}`, 'PUT', apiKey, updatePayload);
@@ -279,10 +319,23 @@ softawareTasksRouter.put('/', requireAuth, async (req: AuthRequest, res: Respons
 // ─── DELETE /softaware/tasks/:id ───────────────────────────────
 softawareTasksRouter.delete('/:id', requireAuth, async (req: Request, res: Response) => {
   try {
-    const { baseUrl, apiKey } = await resolveTaskSource(req);
+    const { baseUrl, apiKey, sourceId } = await resolveTaskSource(req);
     const { id } = req.params;
 
     const result = await proxyToExternal(baseUrl, `/api/tasks-api/${id}`, 'DELETE', apiKey);
+
+    // Also soft-delete in local cache so the task disappears immediately
+    if (result.status >= 200 && result.status < 300) {
+      try {
+        await db.execute(
+          'UPDATE local_tasks SET task_deleted = 1, updated_at = NOW() WHERE external_id = ? AND task_deleted = 0',
+          [String(id)]
+        );
+      } catch (localErr) {
+        console.error('[Task Delete] Local soft-delete failed:', localErr);
+      }
+    }
+
     res.status(result.status).json(result.data);
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message });

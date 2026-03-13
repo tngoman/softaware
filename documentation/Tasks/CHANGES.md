@@ -1,759 +1,561 @@
-# Tasks Module — Changelog & Known Issues
+# Tasks Module — Changelog
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-04
-
----
-
-## 1. Version History
-
-| Date | Version | Description |
-|------|---------|-------------|
-| 2026-03-04 | 1.5.0 | Billed/invoiced task filtering with toggle, dashboard exclusion |
-| 2026-03-04 | 1.4.0 | Drawing fixes, comment positioning, task creation feedback, reorder feedback |
-| 2026-03-04 | 1.3.0 | Dashboard integration, last comment display, internal comments, prominent comment UI |
-| 2026-03-04 | 1.2.0 | Workflow management, task associations, rich text editor, date controls, push notifications, view-as role |
-| 2026-03-03 | 1.0.0 | Initial documentation — per-software auth, Excalidraw integration, proxy architecture |
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-10
 
 ---
 
-## 1.5 v1.5.0 — Billed Task Filtering
+## v2.3.0 — Image Gallery Lightbox & Last Comment Enhancements
 
-**Date:** 2026-03-04  
-**Scope:** Hide billed/invoiced tasks from all views and dashboard counts with optional toggle
+**Release Type:** Minor — New features for image viewing and comment display. No breaking changes.
 
 ### Summary
 
-Implemented comprehensive filtering system to automatically hide billed/invoiced tasks from active work views while maintaining ability to view them when needed:
-
-**Feature — Billed/Invoiced Task Filtering:**
-- All billed/invoiced tasks now hidden from task list and dashboard by default
-- Added toggle button in TasksPage header to show/hide billed tasks
-- Toggle displays "Show Billed" in normal state, "Showing Billed" with green highlight when active
-- Toast feedback when toggling: "Now showing only billed/invoiced tasks" or "Now showing only unbilled tasks"
-- Uses consistent billed detection logic: `task_bill_date && task_bill_date !== '0' && String(task_bill_date).length > 5`
-- **Toggle behavior:** Shows ONLY billed tasks when active (mutually exclusive filter)
-- **Filter bypass:** When showing billed tasks, status/type/phase/module filters are ignored (only search applies)
-- Dashboard now excludes billed tasks from all counts:
-  - Total task count
-  - Active task count
-  - Bug task list
-  - Workflow phase counts
-  - Role task counts
-  - Recent tasks list
-  - Status breakdown
-  - Total unbilled hours calculation simplified (all tasks are unbilled)
-- Prevents confusion between active billable work and completed billed/invoiced tasks
-- Default behavior: billed tasks archived from view (business requirement)
-- Explicit user action required to view billed tasks via toggle
-
-### Changes — Backend
-
-No backend changes in this version. All enhancements are frontend-only.
-
-### Changes — Frontend
-
-#### Modified: `src/pages/general/TasksPage.tsx` (2,241 LOC, +13 from v1.4)
-
-| Change | Detail |
-|--------|--------|
-| Added `showBilled` state | Boolean filter state (default: `false`) to control billed task visibility |
-| Modified `filteredTasks` memo | Mutually exclusive filter: shows ONLY billed when true, ONLY unbilled when false |
-| Added billed detection logic | Checks `task_bill_date && task_bill_date !== '0' && String(task_bill_date).length > 5` |
-| Filter bypass logic | When `showBilled` is true, ignores status/type/phase/module filters, only applies search |
-| Added toggle button | Invoice icon button in header, green highlight when active |
-| Added toast feedback | Success toast on toggle: "Now showing only billed/invoiced tasks" or "Now showing only unbilled tasks" |
-| Button visual feedback | Normal state: "Show Billed", active state: "Showing Billed" with green background |
-| Added tooltip | Button shows "Hide billed/invoiced tasks" or "Show billed/invoiced tasks" |
-| Updated memo dependencies | Added `showBilled` to `filteredTasks` dependency array |
-
-#### Modified: `src/pages/admin/Dashboard.tsx` (955 LOC, +27 from v1.4)
-
-| Change | Detail |
-|--------|--------|
-| Added `unbilledTasks` filter | Filters all tasks at start of stats calculation to exclude billed |
-| Updated total count | Uses `unbilledTasks.length` instead of `tasks.length` |
-| Updated active tasks | Derived from `unbilledTasks` instead of `tasks` |
-| Updated bug task list | Filters from `activeTasks` (already unbilled) |
-| Updated role tasks | Uses unbilled active tasks |
-| Updated phase tasks | Uses unbilled active tasks |
-| Updated status breakdown | Iterates over `unbilledTasks` |
-| Updated recent list | Sorts and slices from `unbilledTasks` |
-| Simplified total hours | No longer needs billed check since all tasks are unbilled |
-| Simplified completed count | Filters `unbilledTasks` by status instead of double-checking billed |
-
-### File Statistics
-
-| File | LOC Before | LOC After | Change |
-|------|------------|-----------|--------|
-| TasksPage.tsx | 2,228 | 2,241 | +13 |
-| Dashboard.tsx | 928 | 955 | +27 |
-| **Total** | 3,156 | 3,196 | +40 |
-
-### Technical Notes
-
-**Billed Task Detection:**
-- Uses existing field: `task_bill_date`
-- Detection formula: `task_bill_date && task_bill_date !== '0' && String(task_bill_date).length > 5`
-- Also checks `task_billed` field in some contexts: `Number(task_billed) === 1`
-- Applied consistently across both TasksPage and Dashboard
-- Filter applied at memo level for optimal performance
-
-**Dashboard Impact:**
-- All stats derived from `unbilledTasks` array created at start of useMemo
-- Single filter pass eliminates need for repeated billed checks
-- Cleaner code with single source of truth
-- Bug counts, phase counts, and workflow stats all exclude billed
-- Total hours calculation simplified (no conditional logic needed)
-
-**User Experience:**
-- Default view shows only active unbilled work
-- Reduces cognitive load by hiding completed billed tasks
-- Toggle switches between two mutually exclusive views: unbilled OR billed (not both)
-- When viewing billed tasks, other filters (status/type/phase/module) are ignored to show all billed work
-- Search filter still applies in billed view to help locate specific billed tasks
-- Toast feedback confirms which view is active
-- Visual feedback (green highlight) clearly indicates when viewing billed tasks
-- Consistent behavior across all views (task list, dashboard, all counts)
-
-**Business Rationale:**
-- Billed/invoiced tasks represent completed, paid work
-- Showing them alongside active tasks causes confusion about billable hours
-- Default hidden behavior aligns with accounting separation requirements
-- Explicit toggle ensures intentional viewing of historical billed work
+Adds a full-featured image gallery lightbox for navigating all task images with prev/next arrows, thumbnails, zoom, and keyboard shortcuts. Enhances the last comment display on task cards with improved visibility, a styled visual container, and comment metadata (author name + relative date).
 
 ---
 
-## 1.4 v1.4.0 — Drawing Fixes + UX Improvements
+### 🖼️ New Feature: Image Gallery Lightbox
 
-**Date:** 2026-03-04  
-**Scope:** Excalidraw canvas sizing fix, comment section positioning, task creation feedback, action feedback improvements
+**Problem:** Clicking a task image opened a simple full-screen overlay showing a single image. To view other images from the same task, users had to close the overlay and click each image individually.
 
-### Summary
+**Solution:** New `TaskImageLightbox` component (181 LOC) provides a navigable gallery of all images attached to the same task.
 
-Fixed critical Excalidraw drawing functionality and enhanced user experience with better feedback and intuitive layout:
+**Features:**
+- **Prev/Next navigation** arrows to browse all task images in sequence
+- **Thumbnail strip** at the bottom for quick jumping between images
+- **Zoom** via mouse wheel, +/- buttons, or double-click (up to 5×)
+- **Pan** by clicking and dragging when zoomed in
+- **Keyboard shortcuts:** Escape (close), ← / → (navigate), +/- (zoom)
+- **Download button** for the current image
+- **Image counter** ("2 / 5") and filename display
 
-**Feature 1 — Excalidraw Drawing Fixes:**
-- Fixed "Canvas exceeds max size" error by ensuring container has pixel dimensions before rendering
-- Added `readyToRender` state with 2-frame RAF + 50ms timeout delay for layout settlement
-- Fixed click propagation issue — clicks inside drawing UI no longer close the drawer
-- Added `stopPropagation` for click, pointerDown, and mouseDown events on drawer overlay
-- Hidden Library button via CSS (no official UIOptions prop exists in v0.18)
-- Removed image tool from toolbar via `UIOptions.tools.image: false`
-- Used `react-app-rewired build` to apply webpack override for roughjs ESM resolution
-- Container uses `position: absolute; inset: 0` for explicit pixel dimensions
+**Image Collection Strategy:**
 
-**Feature 2 — Comment Section UX:**
-- Moved "Add Comment" section to bottom of task view modal
-- Comment History now appears first (natural reading order)
-- Add Comment section appears after history (action at bottom)
-- Follows common UX patterns (GitHub, Slack, Discord, etc.)
-- Maintains prominent blue styling for input section
+In the **TaskDetailPanel**, a `useMemo` (`allImages`) collects images from two sources:
+1. Task-level attachments (from `GET /api/softaware/tasks/:id/attachments`)
+2. Comment-level attachments (from inline comment data)
 
-**Feature 3 — Task Creation Feedback:**
-- Toast confirmation: "Task created" when new task is saved
-- Auto-opens newly created task in view modal after 300ms delay
-- TaskDialog `onSaved` callback now accepts optional `createdTaskId` parameter
-- Response from POST captures created task ID
-- Main page finds and opens the new task after `loadTasks()` completes
-- Edit operations continue to show "Task updated" toast without auto-open
+All image-bearing elements (description inline `<img>`, attachment grid, comment inline images, comment attachments) call `openGallery(url)` which finds the clicked image's index in `allImages` and opens the lightbox at that position.
 
-**Feature 4 — Reorder Action Feedback:**
-- Toast success: "Task reordered" on successful reorder
-- Toast error: "Failed to reorder task" on failure
-- Previous version silently failed with no user feedback
+In the **main TasksPage** (list and kanban views), `TaskAttachmentsInline` provides image list via the new `onGalleryOpen` callback, which passes all image URLs + the clicked index upstream.
 
-### Changes — Backend
-
-No backend changes in this version. All enhancements are frontend-only.
-
-### Changes — Frontend
-
-#### Modified: `src/components/ExcalidrawDrawer.tsx` (219 LOC, +52 from v1.3)
-
-| Change | Detail |
-|--------|--------|
-| Added `readyToRender` state | Boolean to control when Excalidraw component renders |
-| Added `useEffect` for render delay | Two `requestAnimationFrame` + 50ms timeout ensures layout is settled |
-| Added click event handlers | `onClick`, `onPointerDown`, `onMouseDown` with `stopPropagation()` on root div |
-| Added CSS for library hiding | `<style>` tag with selectors for `.sidebar-trigger`, `.library-button`, `[aria-label="Library"]`, `.default-sidebar-trigger` |
-| Disabled image tool | `UIOptions.tools.image: false` |
-| Container structure change | Outer div: `flex: 1, position: relative, overflow: hidden, minHeight: 0, width: 100%` |
-| Inner wrapper added | Conditional render based on `readyToRender`, wraps Excalidraw with `width/height: 100%` |
-| Loading indicator | Shows "Loading drawing editor…" while `readyToRender` is false |
-
-#### Modified: `src/pages/general/TasksPage.tsx` (2,228 LOC, +52 from v1.3)
-
-| Change | Detail |
-|--------|--------|
-| Swapped comment sections | Comment History now renders before Add Comment section |
-| Modified `TaskDialog` signature | `onSaved` parameter changed to `onSaved: (createdTaskId?: number) => void` |
-| Capture created task ID | `response.data?.task?.id` extracted after POST request |
-| Pass ID to callback | `onSaved(createdTaskId)` called with ID or undefined |
-| Auto-open logic | Main page setTimeout with 300ms delay, finds new task, opens in view mode |
-| Added reorder feedback | `toast.success('Task reordered')` and `toast.error('Failed to reorder task')` |
-| Improved error handling | Changed `catch { /* silently fail */ }` to proper error toast |
-
-### File Statistics
-
-| File | LOC Before | LOC After | Change |
-|------|------------|-----------|--------|
-| ExcalidrawDrawer.tsx | 167 | 219 | +52 |
-| TasksPage.tsx | 2,176 | 2,228 | +52 |
-
-### Technical Notes
-
-**Excalidraw Canvas Sizing:**
-- Excalidraw's `bootstrapCanvas` reads container dimensions during initialization
-- Without explicit pixel dimensions, reads 0×0 or absurdly large virtual sizes
-- Browser layout engine needs time to compute `position: absolute; inset: 0` dimensions
-- Solution: delay Excalidraw render until after 2 animation frames + 50ms
-- This ensures the fixed overlay (`z-[60]`) has completed layout calculations
-
-**Webpack Override for roughjs:**
-- Excalidraw v0.18 depends on roughjs which uses extensionless ESM imports
-- CRA's webpack 5 enforces `fullySpecified: true` for ESM packages
-- `config-overrides.js` sets `fullySpecified: false` for `.mjs` files
-- Must use `react-app-rewired build` instead of `react-scripts build`
-- Without this, build fails with "Can't resolve 'roughjs/bin/rough'" error
-
-**Library Button Hiding:**
-- No official `UIOptions` prop exists to hide Library button in v0.18
-- CSS is the only reliable method: target multiple selectors for resilience
-- Scoped to `.excalidraw` to avoid affecting other components
-- Uses `!important` to override Excalidraw's inline styles
-
-**Task Creation Auto-Open:**
-- 300ms delay allows `loadTasks()` to fetch and update task list
-- Without delay, `tasks` array doesn't include newly created task yet
-- `setTimeout` ensures task is available before searching by ID
-- Only applies when `editingTask` is null (new task, not edit)
+**Prop Threading (onGalleryOpen):**
+```
+TasksPage → KanbanBoard → KanbanColumn → SortableCard → TaskCard → TaskAttachmentsInline
+TasksPage → TaskCard (list variant) → TaskAttachmentsInline
+```
 
 ---
 
-## 1.3 v1.3.0 — Dashboard Integration + Comment Enhancements
+### 💬 Enhanced Feature: Last Comment Display
 
-**Date:** 2026-03-04  
-**Scope:** Dashboard task access, last comment display in task list, internal comment checkbox, prominent comment input section
+Three incremental improvements to the last comment preview on task cards:
 
-### Summary
+#### 1. Text Visibility
+- Increased character limit from 60 to 200 characters
+- Changed from `line-clamp-1` to `line-clamp-2` for more visible text
+- Improved color contrast: `text-gray-600` (was `text-gray-400/500`)
+- Uses `FS_DESC` font size map instead of `FS_META` for better readability
+- Removed italic styling
 
-Enhanced user experience with quick task access from Dashboard and improved comment system visibility:
+#### 2. Visual Distinction
+- Comments now render in a styled container with `border-l-2 border-indigo-300 bg-indigo-50/50`
+- Uppercase "LAST COMMENT" label header distinguishes comments from descriptions
+- Clear visual boundary between task description and last comment
 
-**Feature 1 — Dashboard Task Integration:**
-- Clickable bugfix list in Dashboard "Active Bugs" card
-- Workflow Pipeline phase popovers showing all tasks in selected phase
-- Direct navigation to Tasks page with auto-opened task details (no confirmation dialog)
-- Uses localStorage.openTaskId for seamless task opening
-- Phase cards show task count and are only clickable when tasks exist
+#### 3. Comment Metadata (Author + Date)
 
-**Feature 2 — Last Comment Display:**
-- Fetches last comment for each task when tasks are loaded
-- Displays in gray workflow phase row below task card
-- Shows up to 60 characters with "..." truncation
-- HTML tags stripped from comment content
-- Chat bubble icon indicates comment presence
-- Only fetches for first 50 tasks (performance optimization)
-- Asynchronous loading without blocking task display
+**Data model change:** `lastComments` state changed from `Record<number, string>` to `Record<number, { text: string; author: string; date: string | null }>`.
 
-**Feature 3 — Internal Comment System:**
-- Checkbox below comment input: "Internal comment (not visible to clients)"
-- Sends `is_internal: 1` flag when checked
-- Amber "Internal" badge shown on internal comments in history
-- Shield icon (ShieldCheckIcon) next to checkbox label
-- State resets after posting comment
-
-**Feature 4 — Prominent Comment Input Section:**
-- Blue background box (bg-blue-50/dark:bg-blue-900/20) with 2px border
-- "Add Comment" header with ChatBubbleLeftIcon
-- Larger input field with enhanced focus states (blue-300 border, blue-500 focus)
-- Bigger buttons: "Post Comment" instead of just "Post"
-- Drawing button with larger icon (h-5 w-5)
-- Separated from "Comment History" section below
-- Dark mode support throughout
-
-### Changes — Backend
-
-No backend changes in this version. All enhancements are frontend-only.
-
-### Changes — Frontend
-
-#### Modified: `src/pages/admin/Dashboard.tsx` (~928 LOC)
-
-| Change | Detail |
-|--------|--------|
-| Added state | `phasePopoverOpen`, `selectedPhase` for workflow phase popover |
-| Modified `handleTaskClick()` | Now directly stores task ID and navigates without confirmation dialog |
-| Added `handlePhaseClick()` | Opens popover with all tasks in selected phase |
-| Added `phaseTasksForPopover` memo | Filters and sorts tasks for selected phase |
-| Made bugfix items clickable | onClick calls `handleTaskClick(task)` |
-| Made workflow phases clickable | onClick calls `handlePhaseClick(phase)` with cursor-pointer and hover effects |
-| Added Phase Tasks Popover | Headless UI Dialog with task list, clicking task navigates to Tasks page |
-| Removed task detail dialog | Eliminated intermediate confirmation step |
-| Updated imports | Added Dialog, Transition, Fragment from @headlessui/react |
-
-#### Modified: `src/pages/general/TasksPage.tsx` (~2,176 LOC)
-
-| Change | Detail |
-|--------|--------|
-| Added `lastComments` state | Record<number, string> to store last comment for each task |
-| Added comment fetch effect | Fetches last comments for first 50 tasks in parallel |
-| Comment truncation | Strips HTML tags, limits to 60 chars with "..." |
-| Modified workflow phase row | Now shows last comment below phase info with border-top separator |
-| Added `isInternalComment` state | Boolean for internal comment checkbox |
-| Modified `handlePostComment()` | Includes `is_internal` flag when checkbox checked, resets state after post |
-| Enhanced comment input section | Blue background box with prominent styling and larger inputs |
-| Added internal checkbox | Shield icon + "Internal comment (not visible to clients)" label |
-| Separated comment history | "Comment History" header with distinct section below input |
-| Dark mode support | Added dark mode classes throughout comment UI |
-
-### File Statistics
-
-| File | LOC Before | LOC After | Change |
-|------|------------|-----------|--------|
-| Dashboard.tsx | 606 | 928 | +322 |
-| TasksPage.tsx | 2,136 | 2,176 | +40 |
-
-### Dependencies
-
-No new dependencies added. Uses existing:
-- @headlessui/react (already installed for modals)
-- @heroicons/react/24/outline (already installed)
+- The `fetchLastComments` function now extracts author name (`user_name` / `username` / `created_by` field fallback) and `created_at` from the most recent comment
+- Author name rendered in bold indigo text
+- Relative date (e.g., "5m ago", "3d ago") right-aligned in the comment header
+- Both metadata fields displayed in the comment container header alongside the "LAST COMMENT" label
 
 ---
 
-## 1.2 v1.2.0 — Complete Workflow System + Notifications + Associations
+### 🆕 New Files
 
-**Date:** 2026-03-04  
-**Scope:** Full workflow management, task associations, WYSIWYG editor, date/time pickers, attachment management, push notifications, user notification preferences, view-as role for staff
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/components/TaskImageLightbox.tsx` | 181 | Standalone gallery lightbox with navigation, zoom, pan, thumbnails, keyboard shortcuts, download |
+
+**Exports:** `default` (TaskImageLightbox component), `LightboxImage` interface (`{ url: string; name?: string }`)
+
+---
+
+### 🔄 Modified Files
+
+| File | Old LOC | New LOC | Changes |
+|------|---------|---------|---------|
+| `TasksPage.tsx` | 2,605 | 2,652 | TaskDetailPanel: `galleryImages`/`galleryIndex` state replacing `expandedImage`, `allImages` useMemo, `openGallery` callback, `TaskImageLightbox` rendering. Main page: `cardGalleryImages`/`cardGalleryIndex` state, `onGalleryOpen` handlers for kanban + list views. `lastComments` state type changed to object with `text`/`author`/`date`, `fetchLastComments` extracts metadata |
+| `TaskAttachmentsInline.tsx` | 109 | 125 | Added `onGalleryOpen` prop, `imageList` computation from attachments, `handleImageClick` preferring gallery over single image click |
+| `TaskCard.tsx` | 568 | 588 | Added `onGalleryOpen` prop to interface + destructuring, passed to both `TaskAttachmentsInline` instances (kanban + list variants). Last comment rendering: styled container, metadata display, increased text visibility |
+| `KanbanBoard.tsx` | 340 | 346 | `onGalleryOpen` prop threaded through `CardActionProps` → `SortableCard` → `KanbanColumn` → `KanbanBoardProps` → column rendering |
+
+---
+
+### 📊 By the Numbers
+
+| Metric | v2.2.1 | v2.3.0 | Delta |
+|--------|--------|--------|-------|
+| Frontend component files | 10 | 11 | +1 (TaskImageLightbox) |
+| Frontend component LOC | ~1,830 | ~2,050 | +220 |
+| TasksPage LOC | 2,605 | 2,652 | +47 |
+| TaskAttachmentsInline LOC | 109 | 125 | +16 |
+| TaskCard LOC | 568 | 588 | +20 |
+| KanbanBoard LOC | 340 | 346 | +6 |
+| Total Frontend LOC | ~6,100 | ~6,400 | +300 |
+
+---
+
+## v2.2.1 — Attachment URL Fix
+
+**Release Type:** Patch — Bug fix for attachment image/file display. No breaking changes.
 
 ### Summary
 
-Major enhancement of the Tasks module with five complete features and notification infrastructure:
+Fixes attachment thumbnails and file links not rendering on task cards, task detail panels, and comments. The `buildFileUrl()` and `buildAttachmentUrl()` functions were constructing incorrect URLs instead of using the `download_url` returned by the external API.
 
-**Feature 1 — Attachment Management:**
-- Delete attachment button (trash icon) for each attachment
-- Backend: none needed (deletes handled by external API)
-- Frontend: UI controls in TaskDialog attachments tab and TaskDetailsDialog
+---
 
-**Feature 2 — Workflow Management (WorkflowDialog):**
-- Complete workflow assignment system with role-based filtering
-- Users filtered by phase-role mapping (intake→client_manager, QA→qa_specialist, dev→developer)
-- Module assignment for QA→Development transition
-- "Send back to intake" option for QA/triage phase
-- Permission system (`canUserAssignTask`) blocks unauthorized assignments
-- Permission error alerts when user can't assign from current phase
-- Exclude admins from assignment user lists
-- Exclude current user (assigner) from available assignees
-- Internal comment field for workflow notes
+### 🐛 Bug Fix: Attachment URLs
 
-**Feature 3 — Task Associations (TaskAssociationDialog):**
-- 5 association types: blocker, duplicate, child, related, follow-up
-- Searchable task picker with title/ID filtering
-- Association notes field
-- View existing associations with type badges and delete buttons
-- Backend proxy routes: GET/POST/DELETE `/:id/associations`
+**Problem:** All attachment images and file links failed to display across the entire Tasks UI (card thumbnails, detail panel grid, edit dialog, comment attachments).
 
-**Feature 4 — Rich Text Editor + Date Controls:**
-- Installed `react-quill@2.0.0` for WYSIWYG description editing
-- Installed `react-datepicker@8.8.0` and `date-fns@2.30.0`
-- Created `RichTextEditor.tsx` component (111 LOC)
-- TaskDialog rewritten with 3-tab layout: General / Timing / Attachments
-- General tab: Title, description (WYSIWYG), status, type, priority, severity, hours, attachments
-- Timing tab: Start Date, Due Date, Completion Date (all DatePickers)
-- Attachments tab: Full attachment management with upload, paste, preview, delete
+**Root Cause:** The external API returns each attachment with a `download_url` field pointing to the public static file path (`/uploads/development/{file}`). Both `buildFileUrl()` (in `TaskAttachmentsInline.tsx`) and `buildAttachmentUrl()` (in `TasksPage.tsx`) were **ignoring** this field and instead constructing URLs like `{origin}/uploads/{folder}/{file_path}`. While this happened to work for direct file access, the functions never checked `download_url` first — and the API's canonical URL is the authoritative path.
 
-**Feature 5 — Push Notifications:**
-- Database: Added 3 columns to `users` table: `notifications_enabled`, `push_notifications_enabled`, `web_notifications_enabled`
-- Backend `sendTaskAssignmentNotification()` in softawareTasks.ts PUT endpoint
-- Looks up assigned user in local system, sends notification with task title and phase
-- `createNotificationWithPush()` in firebaseService.ts respects user preferences
-- Profile UI: Blue "Notification Preferences" card with 3 checkboxes (master, web, push)
-- GET/PUT /profile endpoints return and accept notification preference fields
+**Fix:** Both URL-building functions now prefer `att.download_url` when present, with graceful fallback to the constructed path for backward compatibility.
 
-**Feature 6 — View-As Role (Staff Override):**
-- Staff/admin users can select a role to experience the app as that role
-- `getViewAsRole()` / `setViewAsRole()` in workflowPermissions.ts
-- localStorage key: `softaware_view_as_role`
-- `getEffectiveRole()` returns view-as role for staff, actual role otherwise
-- Profile.tsx: Amber "Staff: View As Role" card with dropdown
-- Active badge in profile header when view-as is active
-- Permission system uses effective role (except admins bypass with direct `is_admin` check when no view-as active)
+**URL Resolution Order (v2.2.1):**
+1. `att.download_url` — preferred (public static path from external API, no auth required)
+2. `att.file_path` starting with `http` — already a full URL
+3. Constructed `{origin}/uploads/{folder}/{file_path}` — legacy fallback
 
-### Changes — Backend
+**Affected locations (all 4 use `buildAttachmentUrl` or `buildFileUrl`):**
+- Task card inline thumbnails (`TaskAttachmentsInline`)
+- Task detail panel attachment grid
+- Task edit dialog attachment grid
+- Comment attachment images and file links
 
-#### Modified: `src/routes/softawareTasks.ts`
+---
 
-| Change | Detail |
-|--------|--------|
-| Added `sendTaskAssignmentNotification()` | Helper function to send notifications when tasks are assigned |
-| Modified PUT / handler | After successful task update, checks if `assigned_to` changed and fires notification (fire & forget) |
-| Notification content | "X assigned you: Task Title (phase)" with task_id and workflow_phase in data payload |
-| Added association routes | GET/POST/DELETE `/:id/associations` — proxy to external API `/api/tasks/:id/associated` and `/api/tasks/:id/associate` |
+### 🔄 Modified Files
 
-#### Modified: `src/services/firebaseService.ts`
+| File | Changes |
+|------|---------|
+| `TaskAttachmentsInline.tsx` | Added `download_url?: string` to `Attachment` interface; `buildFileUrl()` now checks `att.download_url` first |
+| `TasksPage.tsx` | `buildAttachmentUrl()` now checks `att.download_url` first |
 
-| Change | Detail |
-|--------|--------|
-| Enhanced `createNotificationWithPush()` | Now checks user notification preferences before sending |
-| Master toggle | If `notifications_enabled = false`, skip all notifications |
-| Web toggle | If `web_notifications_enabled = false`, skip in-app notification insert |
-| Push toggle | If `push_notifications_enabled = false`, skip FCM push |
-| Default values | All preferences default to `true` if user row doesn't have values |
+---
 
-#### Modified: `src/routes/profile.ts`
+### 📝 Key Detail: download_url
 
-| Change | Detail |
-|--------|--------|
-| GET / handler | Added notification preference fields to SELECT and response: `notifications_enabled`, `push_notifications_enabled`, `web_notifications_enabled` |
-| PUT / handler | UpdateProfileSchema now accepts 3 new boolean fields |
-| PUT / handler | Updates user table with new preference values |
-| Response | Returns updated preference values after save |
-
-#### Database Migration: `users` table
-
-| Column | Type | Default | Description |
-|--------|------|---------|-------------|
-| `notifications_enabled` | BOOLEAN | TRUE | Master toggle for all notifications |
-| `push_notifications_enabled` | BOOLEAN | TRUE | Enable/disable FCM push notifications |
-| `web_notifications_enabled` | BOOLEAN | TRUE | Enable/disable web in-app notifications |
-
-### Changes — Frontend
-
-#### New File: `src/components/RichTextEditor.tsx` (111 LOC)
-
-| Feature | Detail |
-|---------|--------|
-| WYSIWYG | react-quill with custom toolbar |
-| Toolbar | Bold, Italic, Underline, Strike, Lists (ordered/unordered), Link, Clean |
-| Image paste | Captures clipboard images and embeds as base64 |
-| Height | 250px with scroll |
-| Styling | Blue border on focus, gray border default |
-
-#### New File: `src/utils/workflowPermissions.ts` (174 LOC)
-
-| Function | Description |
-|----------|-------------|
-| `getViewAsRole()` | Reads `softaware_view_as_role` from localStorage |
-| `setViewAsRole(roleSlug)` | Writes view-as role or clears if null |
-| `getEffectiveRole(user)` | Returns view-as role for staff, actual role otherwise |
-| `userHasRole(user, ...roles)` | Checks effective role against role list |
-| `canUserAssignTask(user, task)` | Permission check: admins can always assign (unless view-as active), effective role must match PHASE_ROLE_MAP |
-| `getRequiredRoleForPhase(phase)` | Returns role needed to assign from a phase |
-| `getRoleLabel(role)` | Human-friendly role names |
-| `isBackwardAssignment(fromPhase, toPhase)` | Checks if assignment goes backward in workflow |
-| `getPermissionErrorMessage(user, task)` | Returns user-friendly error with view-as context |
-
-**PHASE_ROLE_MAP:**
-```typescript
+The external API (`GET /api/tasks-api/{id}/attachments`) returns:
+```json
 {
-  intake: 'client_manager',
-  quality_review: 'qa_specialist',
-  triage: 'qa_specialist',
-  development: 'developer',
-  verification: 'qa_specialist',
-  resolution: 'qa_specialist',
+  "download_url": "https://portal.silulumanzi.com/uploads/development/task_132_...png"
 }
 ```
 
-#### Modified: `src/pages/TasksPage.tsx` (→ 2,110 LOC)
+This points to the **public static file path** served by Apache — no API key or session required. Safe for `<img src>`, `<a href>`, and direct browser access.
 
-| Change | Detail |
-|--------|--------|
-| **Added 3 dialogs** | WorkflowDialog (170 LOC), TaskAssociationDialog (140 LOC), both embedded |
-| **TaskDialog rewrite** | 3-tab layout with General/Timing/Attachments tabs |
-| **RichTextEditor** | Replaced plain textarea for description field |
-| **DatePicker** | 3 date fields with react-datepicker component |
-| **Attachment delete** | Trash icon button for each attachment in TaskDialog and TaskDetailsDialog |
-| **WorkflowDialog** | Role-based user filtering with `getUserRole()` helper that handles `roles` array from `/api/users` |
-| **User fetch** | Changed from `/softaware/users` (non-existent) to `/users` (local Softaware users) |
-| **Assign button** | Conditionally shown based on `canUserAssignTask(user, task)` |
-| **Phase badge** | Shown instead of Assign button when user can't assign from current phase |
-| **Association button** | "Link" button on cards and detail dialog to open TaskAssociationDialog |
-| **Assign/Link handlers** | `handleAssign(task)`, `handleLink(task)` set state and open respective dialogs |
-
-#### Modified: `src/pages/Profile.tsx` (→ 385 LOC)
-
-| Change | Detail |
-|--------|--------|
-| **Added notification prefs** | Blue card with 3 checkboxes: master toggle, web notifications, push notifications |
-| **Icons** | BellIcon, ComputerDesktopIcon, DevicePhoneMobileIcon |
-| **View-As Role UI** | Amber card with dropdown (Client Manager / QA Specialist / Developer) for staff/admin only |
-| **Active badge** | Shows amber "Viewing as X" badge in profile header when view-as role is active |
-| **Form integration** | Notification preferences included in profile form submission |
-
-### New Dependencies
-
-| Package | Version | Purpose | Install Flags |
-|---------|---------|---------|---------------|
-| `react-quill` | 2.0.0 | WYSIWYG editor for task descriptions | — |
-| `@types/react-quill` | 2.0.0 | TypeScript types for react-quill | —  |
-| `react-datepicker` | 8.8.0 | Date picker components for start/due/completion dates | — |
-| `@types/react-datepicker` | 8.8.0 | TypeScript types for react-datepicker | — |
-| `date-fns` | 2.30.0 | Date formatting utilities | — |
-
-### Files Changed
-
-| File | Change Type | LOC | Summary |
-|------|------------|-----|---------|
-| `backend/src/routes/softawareTasks.ts` | Modified | ~320 | Task assignment notifications, association proxy routes |
-| `backend/src/services/firebaseService.ts` | Modified | 235 | User preference checks in createNotificationWithPush |
-| `backend/src/routes/profile.ts` | Modified | ~370 | GET/PUT notification preferences |
-| `frontend/src/utils/workflowPermissions.ts` | **New** | 174 | Permission checks + view-as role |
-| `frontend/src/components/RichTextEditor.tsx` | **New** | 111 | WYSIWYG editor component |
-| `frontend/src/pages/TasksPage.tsx` | Modified | 2,110 | WorkflowDialog, TaskAssociationDialog, 3-tab TaskDialog, RichTextEditor, DatePickers, Assign/Link buttons |
-| `frontend/src/pages/Profile.tsx` | Modified | 385 | Notification preferences UI, View-As Role dropdown |
-
-### Verification
-
-- ✅ Zero TypeScript errors across all modified/new files
-- ✅ Backend compiled cleanly with `npm run build`
-- ✅ Backend restarted via `pm2 restart 0`
-- ✅ Database migration applied manually (3 notification preference columns added to `users` table)
-- ✅ All workflow permission logic ported from desktop app
-- ✅ Role filtering handles both `roles: []` array (from `/api/users`) and `role: {}` object (from auth)
-- ⚠️ Frontend build NOT run (per user instruction: "do not build unless I say so")
-- ⚠️ Runtime testing pending
+> **Note:** The `/api/tasks-api/attachments/{filename}` download endpoint requires `X-API-Key` authentication and is intended for programmatic/CLI access, not browser `<img>` tags.
 
 ---
 
-## 1.0 v1.0.0 — Per-Software Auth + Excalidraw Drawing Integration
+## v2.2.0 — AI Assistant Integration, Deprecation & Testing
 
-**Date:** 2026-03-03  
-**Scope:** Backend softawareTasks.ts proxy router, frontend TasksPage.tsx rewiring, new ExcalidrawDrawer component, new softwareAuth utility
+**Release Type:** Minor — New integration surface, official deprecation of legacy auth, and comprehensive test suite. No breaking changes.
 
 ### Summary
 
-Major rewiring of the Tasks module with two work streams:
-
-**Work Stream A — Authentication Fix:**
-- Fixed 500 error on `PUT /api/softaware/software` (backend expected `id` in body, frontend sent it as query param)
-- Replaced global `software_token` localStorage key with per-software `software_token_{id}` pattern
-- Added inline authentication flow with OTP support directly on TasksPage (no more navigating to Software Management edit modal)
-- Filtered software dropdown to only show products with complete external integration configuration
-- All task/comment requests now use per-software auth headers via `softwareAuthHeaders(softwareId)`
-
-**Work Stream B — Excalidraw Integration:**
-- Installed `@excalidraw/excalidraw@0.18.0`
-- Created `ExcalidrawDrawer.tsx` — lazy-loaded, full-screen overlay for drawing
-- Added backend `POST /:id/comments/with-attachment` route — two-step: create comment + upload base64 PNG
-- Added "Draw" button in TaskDetailsDialog header and paperclip icon next to comment input
-- Enhanced comment rendering with image support, clickable images, attachment display, and image lightbox
-- Fixed Express route ordering: `with-attachment` registered before generic `/:id/comments` to prevent shadowing
-
-### Changes — Backend
-
-#### New File: `src/routes/softawareTasks.ts` (Rewired)
-
-| Change | Detail |
-|--------|--------|
-| Added `POST /:id/comments/with-attachment` | Two-step: create comment → extract comment_id → upload base64 as FormData to external `/api/attachments/development/{taskId}` |
-| Enhanced `POST /:id/comments` | Now supports both `{ comment }` (legacy) and explicit `{ content, is_internal, time_spent }` field shapes |
-| Added `POST /authenticate` | Proxies to external `/api/auth_login` with OTP support (`otp`, `otpToken` fields) |
-| Route ordering fix | `/:id/comments/with-attachment` registered BEFORE generic `/:id/comments` POST to prevent Express route shadowing |
-| All routes use `requireAuth` | Internal JWT validation on every endpoint |
-
-**Route registration order (critical):**
-
-```
-1. GET  /                              — list tasks
-2. POST /                              — create task
-3. PUT  /                              — update task
-4. DELETE /:id                         — delete task
-5. POST /reorder                       — reorder tasks
-6. GET  /:id/comments                  — list comments
-7. POST /:id/comments/with-attachment  — comment + attachment (BEFORE generic)
-8. POST /:id/comments                  — post comment (AFTER with-attachment)
-9. POST /authenticate                  — external API auth
-```
-
-#### Modified: `src/routes/updSoftware.ts`
-
-| Change | Detail |
-|--------|--------|
-| PUT handler | Now accepts `id` from `req.query.id` OR `req.body.id` (fixes 500 error when frontend sends id as query param) |
-
-### Changes — Frontend
-
-#### New File: `src/utils/softwareAuth.ts` (32 LOC)
-
-| Function | Description |
-|----------|-------------|
-| `getSoftwareToken(id)` | Reads `software_token_{id}` from localStorage |
-| `setSoftwareToken(id, token)` | Writes per-software token |
-| `removeSoftwareToken(id)` | Deletes per-software token |
-| `hasSoftwareToken(id)` | Boolean check for token existence |
-| `softwareAuthHeaders(id)` | Returns `{ 'X-Software-Token': token }` headers object |
-
-#### New File: `src/components/ExcalidrawDrawer.tsx` (168 LOC)
-
-| Feature | Detail |
-|---------|--------|
-| Lazy loading | `@excalidraw/excalidraw` loaded via dynamic `import()` only on first open |
-| Export | PNG blob → base64 data URL + scene JSON |
-| UI | Full-screen overlay (z-60), custom toolbar with "Save as Comment" button |
-| Props | `open`, `onClose`, `onSave`, `initialData`, `taskTitle` |
-
-#### Modified: `src/pages/TasksPage.tsx` (→ 1,008 LOC)
-
-| Change | Detail |
-|--------|--------|
-| **Added imports** | `ExcalidrawDrawer`, `PaperClipIcon`, `hasSoftwareToken`, `setSoftwareToken`, `softwareAuthHeaders`, `ShieldCheckIcon`, `ShieldExclamationIcon` |
-| **Filtered software dropdown** | `taskSoftware = softwareList.filter(sw => sw.has_external_integration && sw.external_username && sw.external_password && ...)` |
-| **Inline auth flow** | New states: `authLoading`, `authStatus`, `authMessage`, `authOtp`, `authOtpToken`, `authOtpUserId`, `authVersion` |
-| **Auth panel** | Replaces task list when not authenticated — shows shield icon, environment info, OTP input when needed |
-| **Per-software headers** | All `api.get/post/put/delete` calls now pass `softwareAuthHeaders(selectedSoftware?.id)` |
-| **TaskDetailsDialog: drawing** | New states: `drawingOpen`, `expandedImage`. New functions: `refetchComments()`, `handleDrawingSave()` |
-| **TaskDetailsDialog: "Draw" button** | Added to header row (PaperClipIcon + "Draw") and comment input row (paperclip icon) |
-| **Comment rendering** | Enhanced with `[&_img]` Tailwind classes, click-to-expand images, attachment thumbnails/links |
-| **ExcalidrawDrawer portal** | Rendered inside TaskDetailsDialog |
-| **Image lightbox** | z-70 overlay with click-to-close |
-| **Software ✓ indicator** | `{hasSoftwareToken(sw.id) ? ' ✓' : ''}` in dropdown option text |
-
-#### Modified: `src/pages/SoftwareManagement.tsx`
-
-| Change | Detail |
-|--------|--------|
-| Token storage | Changed `localStorage.setItem('software_token', ...)` to `setSoftwareToken(software.id, ...)` |
-| Token check | Changed global `isAuthenticated` boolean to per-software `hasSoftwareToken(sw.id)` |
-| PUT fix | Changed from `api.put('/softaware/software?id=${software.id}', form)` to `api.put('/softaware/software', { ...form, id: software.id })` |
-
-#### Modified: `src/hooks/useTasks.ts`
-
-| Change | Detail |
-|--------|--------|
-| Added `softwareId` option | New field in `UseTasksOptions` interface |
-| Per-software headers | Replaced `localStorage.getItem('software_token')` with `softwareAuthHeaders(softwareId)` |
-| Callback deps | Added `softwareId` to `useCallback` dependency array |
-
-### New Dependency
-
-| Package | Version | Purpose | Install Flags |
-|---------|---------|---------|---------------|
-| `@excalidraw/excalidraw` | 0.18.0 | Drawing canvas for task comments | `--legacy-peer-deps` (React 18 compatibility) |
-
-### Files Changed
-
-| File | Change Type | LOC | Summary |
-|------|------------|-----|---------|
-| `backend/src/routes/softawareTasks.ts` | Modified | 285 | Added with-attachment route, authenticate endpoint, route ordering fix |
-| `backend/src/routes/updSoftware.ts` | Modified | 188 | PUT accepts id from query or body |
-| `frontend/src/utils/softwareAuth.ts` | **New** | 32 | Per-software token management |
-| `frontend/src/components/ExcalidrawDrawer.tsx` | **New** | 168 | Lazy-loaded Excalidraw drawing overlay |
-| `frontend/src/pages/TasksPage.tsx` | Modified | 1,008 | Inline auth, filtered dropdown, drawing integration, per-SW tokens |
-| `frontend/src/pages/SoftwareManagement.tsx` | Modified | 698 | Per-software tokens, PUT body fix |
-| `frontend/src/hooks/useTasks.ts` | Modified | 72 | softwareId option, per-SW headers |
-
-### Verification
-
-- ✅ Zero TypeScript errors across all modified/new files (confirmed via `get_errors`)
-- ✅ Route ordering: `with-attachment` registered before generic `/:id/comments`
-- ✅ Per-software tokens: each software uses `software_token_{id}` key in localStorage
-- ✅ Excalidraw lazy-loads only when drawer opens
-- ⚠️ Build NOT run (user instruction: "do not build unless I say so")
-- ⚠️ Runtime testing pending (backend PM2 stopped)
+Adds full task management via the Staff AI Assistant (22 tool handlers), officially deprecates `staff_software_tokens`, and introduces an 80-test vitest suite covering all assistant task tool executors.
 
 ---
 
-## 2. Known Issues
+### 🤖 AI Assistant Task Tools (22 tools)
 
-### 2.1 🟡 WARNING — No External Token Expiration Handling
+Staff can now manage the entire task lifecycle via voice/text through the AI assistant. The assistant dispatches task operations through **22 dedicated tool handlers** in `mobileActionExecutor.ts`, using the same dual-path architecture as the HTTP routes.
 
-- **Status:** OPEN
-- **Module Files:** `frontend/src/utils/softwareAuth.ts`, `frontend/src/pages/TasksPage.tsx`
-- **Description:** External API tokens stored in localStorage never expire or get refreshed. If the external token expires, task requests will fail silently with 401 errors, but the UI will still show the user as "authenticated" (the ✓ checkmark remains in the dropdown).
-- **Impact:** Users will see task loading errors without understanding they need to re-authenticate.
-- **Recommended Fix:** Intercept 401 responses on task/comment requests, call `removeSoftwareToken(softwareId)`, increment `authVersion` to trigger re-render, and show "Session expired — please re-authenticate" message.
-- **Effort:** LOW (~15 lines)
+#### Write Path Tools (proxied to external APIs via `taskProxyV2`)
 
-### 2.2 🟡 WARNING — Comments Typed as `any[]`
+| Tool | Method | External Endpoint | Description |
+|------|--------|-------------------|-------------|
+| `exec_task_create` | POST | `/api/tasks-api` | Create a new task |
+| `exec_task_update` | PUT | `/api/tasks-api/{id}` | Update task fields |
+| `exec_task_delete` | DELETE | `/api/tasks-api/{id}` | Delete a task |
+| `exec_task_start` | POST | `/api/tasks-api/{id}/start` | Start task workflow |
+| `exec_task_complete` | POST | `/api/tasks-api/{id}/complete` | Complete task |
+| `exec_task_approve` | POST | `/api/tasks-api/{id}/approve` | Approve task |
+| `exec_task_reorder` | POST | `/api/tasks-api/reorder` | Reorder tasks |
+| `exec_task_comment_add` | POST | `/api/tasks-api/{id}/comments` | Add comment |
+| `exec_task_comment_delete` | DELETE | `/api/tasks-api/comments/{id}` | Delete comment |
+| `exec_task_attachment_upload` | POST | `/api/tasks-api/{id}/attachments` | Upload attachment |
+| `exec_task_attachment_delete` | DELETE | `/api/tasks-api/attachments/{path}` | Delete attachment |
+| `exec_task_association_add` | POST | `/api/tasks-api/{id}/associate` | Link tasks |
+| `exec_task_association_remove` | DELETE | `/api/tasks-api/{id}/associate` | Unlink tasks |
+| `exec_task_time_update` | PUT | `/api/tasks-api/time` | Update time tracking |
+| `exec_task_invoice` | POST | `/api/tasks-api/invoice-tasks` | Invoice tasks |
+| `exec_task_bill` | POST | `/api/tasks-api/bill` | Bill tasks |
 
-- **Status:** OPEN
-- **Module File:** `frontend/src/pages/TasksPage.tsx` (TaskDetailsDialog)
-- **Description:** No `Comment` interface exists. Comments are `any[]` throughout — field access (`c.user_name`, `c.comment_id`, `c.attachments`) has no compile-time safety.
-- **Impact:** Typos in comment field names will not be caught until runtime.
-- **Recommended Fix:** Define `Comment` and `Attachment` interfaces in `types/index.ts`.
-- **Effort:** LOW (~20 lines)
+#### Read Path Tools (local MySQL via `resolveLocalTask`)
 
-### 2.3 🟡 WARNING — Base64 Drawing Payload Size
+| Tool | Source | Description |
+|------|--------|-------------|
+| `exec_task_list` | `local_tasks` table | List/filter tasks with pagination |
+| `exec_task_get` | `local_tasks` table | Get single task by ID |
+| `exec_task_comments` | External API (GET) | List task comments |
+| `exec_task_attachments` | External API (GET) | List task attachments |
+| `exec_task_stats` | External API (GET) | Task statistics |
+| `exec_task_associations` | External API (GET) | List task associations |
 
-- **Status:** OPEN
-- **Module Files:** `frontend/src/pages/TasksPage.tsx`, `backend/src/routes/softawareTasks.ts`
-- **Description:** Excalidraw drawings are exported as base64 PNG and sent as a JSON string field in the request body. Detailed drawings can be 2-5MB base64, which may exceed Express's default JSON body limit (100KB-1MB depending on config).
-- **Impact:** Large drawings may fail with 413 "Payload Too Large".
-- **Recommended Fix:** Either (A) increase Express JSON body limit for the `with-attachment` route, or (B) send the image as multipart/form-data from the frontend instead of base64 in JSON.
-- **Effort:** LOW (option A: ~3 lines) / MEDIUM (option B: ~30 lines)
+#### Key Helper Functions
 
-### 2.4 🟡 WARNING — Credentials in GET /softaware/software Response
+| Function | Purpose |
+|----------|---------|
+| `resolveTaskSourceForTools(softwareId)` | Looks up `task_sources` by `software_id` — returns `{ baseUrl, apiKey, sourceId }` |
+| `taskProxyV2(baseUrl, path, method, apiKey, body?)` | Proxy gateway for AI assistant tool calls (same pattern as `proxyToExternal` in HTTP routes) |
+| `resolveLocalTask(taskId, softwareId)` | Resolve task from `local_tasks` table for read-path tools |
 
-- **Status:** OPEN
-- **Module File:** `backend/src/routes/updSoftware.ts`
-- **Description:** `GET /softaware/software` returns `external_username` and `external_password` to the frontend. These are then stored in `localStorage.selectedTasksSoftware` as a JSON object.
-- **Impact:** External API credentials visible in browser dev tools.
-- **Recommended Fix:** Omit `external_password` from GET responses. Have the backend read credentials from DB during authentication instead of receiving them from the frontend.
-- **Effort:** MEDIUM
+#### Auth Flow
 
-### 2.5 🟡 WARNING — dangerouslySetInnerHTML on Comments
-
-- **Status:** OPEN
-- **Module File:** `frontend/src/pages/TasksPage.tsx` (TaskDetailsDialog comment rendering)
-- **Description:** Comment content and task descriptions are rendered via `dangerouslySetInnerHTML`. If the external API returns unsanitized HTML, this is an XSS vector.
-- **Impact:** Malicious comment content could execute JavaScript in the context of the Soft Aware app.
-- **Recommended Fix:** Sanitize HTML content before rendering using `DOMPurify`:
-  ```typescript
-  import DOMPurify from 'dompurify';
-  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(c.content || '') }}
-  ```
-- **Effort:** LOW (~5 lines + dependency)
-
-### 2.6 🟢 INFO — TasksPage.tsx is 1,008 Lines
-
-- **Status:** OPEN (tech debt)
-- **Module File:** `frontend/src/pages/TasksPage.tsx`
-- **Description:** Three components (`TasksPage`, `TaskDialog`, `TaskDetailsDialog`) are defined in a single file. The file is difficult to navigate and will continue growing.
-- **Recommended Fix:** Extract `TaskDialog` and `TaskDetailsDialog` into separate files under `components/tasks/`.
-- **Effort:** MEDIUM
-
-### 2.7 🟢 INFO — No Task Data Caching
-
-- **Status:** OPEN (by design)
-- **Module Files:** `frontend/src/hooks/useTasks.ts`
-- **Description:** Every software selection change or refresh triggers a full re-fetch of all tasks. No client-side caching (React Query, SWR, or custom cache).
-- **Impact:** Slightly slower UX on software switching; unnecessary API load on frequent refreshes.
-- **Recommended Fix:** Add React Query or SWR with a short TTL (30-60s) cache.
-- **Effort:** MEDIUM
-
-### 2.8 🟢 INFO — Excalidraw Scene JSON Not Stored
-
-- **Status:** OPEN (partial implementation)
-- **Module File:** `frontend/src/components/ExcalidrawDrawer.tsx`
-- **Description:** The `sceneJson` is serialized during export but only stored in the comment's HTML content as an embedded `<img>` tag. There's no mechanism to re-open a saved drawing for editing. The `initialData` prop exists but is never used.
-- **Recommended Fix:** Store `sceneJson` as a metadata field on the attachment or as a second file. Support re-opening drawings from saved scene data.
-- **Effort:** HIGH
-
-### 2.9 🟢 INFO — No Loading Progress for Excalidraw
-
-- **Status:** OPEN
-- **Module File:** `frontend/src/components/ExcalidrawDrawer.tsx`
-- **Description:** When Excalidraw is lazy-loading (~2-3s on first open), only a plain "Loading drawing editor…" text is shown. No spinner or progress indicator.
-- **Recommended Fix:** Add an `ArrowPathIcon` spinner animation during the loading phase.
-- **Effort:** LOW (~5 lines)
+The AI assistant uses the **same source-level API-key authentication** as the HTTP routes — `resolveTaskSourceForTools()` mirrors `resolveTaskSource()`, reading `task_sources.api_key` and forwarding it as `X-API-Key` to external APIs. No per-user tokens involved.
 
 ---
 
-## 3. Future Enhancements
+### ⚠️ staff_software_tokens — Official Deprecation
 
-| Enhancement | Priority | Effort | Description |
-|-------------|----------|--------|-------------|
-| External token refresh / expiry handling | 🔴 HIGH | LOW | Detect 401 on task requests, clear stale token, prompt re-auth |
-| HTML sanitization (DOMPurify) | 🔴 HIGH | LOW | Sanitize comment and task HTML before `dangerouslySetInnerHTML` |
-| Comment/Attachment TypeScript interfaces | 🟡 MEDIUM | LOW | Define proper types for compile-time safety |
-| Exclude credentials from GET response | 🟡 MEDIUM | MEDIUM | Don't send external_password to frontend |
-| Extract TaskDialog / TaskDetailsDialog | 🟡 MEDIUM | MEDIUM | Split 1,008-line file into 3 focused files |
-| React Query / SWR caching | 🟡 MEDIUM | MEDIUM | Cache task lists with short TTL for faster UX |
-| Multipart upload from frontend | 🟡 MEDIUM | MEDIUM | Avoid base64-in-JSON for drawings |
-| Re-open saved drawings | 🟢 LOW | HIGH | Store Excalidraw scene JSON, support re-editing |
-| Bulk task actions | 🟢 LOW | MEDIUM | Select multiple tasks for status change or deletion |
-| Task search on external API | 🟢 LOW | LOW | Pass search query to external API instead of client-side filter |
-| WebSocket for real-time updates | 🟢 LOW | HIGH | Live task updates when other users modify tasks |
-| Loading spinner for Excalidraw | 🟢 LOW | LOW | Better UX during lazy load |
+The `staff_software_tokens` table and all associated endpoints/utilities have been officially deprecated:
+
+| Item | File | Status |
+|------|------|--------|
+| `staff_software_tokens` table creation | `012_staff_sandbox_prompts.ts` | ⚠️ DEPRECATED (v2.2.0) |
+| `POST /authenticate` endpoint | `myAssistant.ts` | ⚠️ DEPRECATED — returns stub |
+| `POST /authenticate` endpoint | `staffAssistant.ts` | ⚠️ DEPRECATED — returns stub |
+| `softwareAuth.ts` utility | Frontend | ⚠️ DEPRECATED (v2.2.0) |
+
+**Reason:** Source-level API keys in `task_sources` have fully replaced per-user external tokens since v2.0. The old table, endpoints, and utilities are no longer needed by any active feature.
+
+---
+
+### 🧪 Test Suite (80 tests)
+
+New comprehensive test suite using **vitest** covering all 22 AI assistant task tool executors:
+
+| Category | Tests | Coverage |
+|----------|-------|----------|
+| Write-path tools (16 executors) | 48 | All proxy tools: create, update, delete, start, complete, approve, reorder, comment, attachment, association, time, invoice, bill |
+| Read-path tools (6 executors) | 18 | List, get, comments, attachments, stats, associations |
+| Role guard tests | 8 | Permission enforcement for admin-only and staff-only tools |
+| Edge cases | 6 | Missing params, invalid IDs, empty results |
+| **Total** | **80** | **All pass in ~1.2s** |
+
+**Files:**
+- `tests/task-tools.test.ts` — 80 tests
+- `vitest.config.ts` — Test framework configuration
+
+**Run:** `npm test` or `npx vitest`
+
+---
+
+### 🆕 New Files
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/services/mobileActionExecutor.ts` | ~2,845 | 22 task tool executors + helpers (shared file with other modules) |
+| `src/services/mobileTools.ts` | ~1,500 | 22 task tool definitions in `staffTaskTools` array (shared file) |
+| `tests/task-tools.test.ts` | ~400 | 80 vitest unit tests for task tool executors |
+| `vitest.config.ts` | ~15 | Vitest configuration |
+
+> **Note:** `mobileActionExecutor.ts` and `mobileTools.ts` are shared files serving multiple modules (Assistants, Tasks). Only the task-related portions (~700 LOC) are part of the Tasks module surface.
+
+---
+
+### 📊 By the Numbers
+
+| Metric | v2.1 | v2.2 | Delta |
+|--------|------|------|-------|
+| Task tool handlers | 0 | 22 | +22 |
+| Unit tests | 0 | 80 | +80 |
+| Backend LOC (task-related in shared files) | — | ~700 | +700 |
+| Test LOC | 0 | ~400 | +400 |
+| Deprecated items | 3 (informal) | 7 (official) | +4 |
+
+---
+
+## v2.1.0 — UX Refinements & Stats Overhaul
+
+**Release Type:** Minor — New features, bug fixes, and UI improvements. No breaking changes.
+
+### Summary
+
+UX polish release adding a font size picker, same-column kanban reorder, stats bar overhaul, sync status toggle with case creation, and toolbar icon grouping.
+
+---
+
+### 🆕 New Features
+
+#### Font Size Picker (S / M / L)
+
+- **TaskToolbar** gains a 3-button toggle (S / M / L) that sets `TaskFontSize` (`'sm' | 'md' | 'lg'`).
+- Choice persisted in `localStorage.tasksFontSize`.
+- `TaskCard` defines 6 inline-style maps (`FS_TITLE`, `FS_META`, `FS_BADGE`, `FS_DESC`, `FS_ACTION`, `FS_PAD`) that replace all hardcoded Tailwind text sizes.
+- `fontSize` prop threaded through: `TasksPage → KanbanBoard → KanbanColumn → SortableCard → TaskCard`.
+- Works consistently in **both list and kanban** variants.
+
+#### Same-Column Kanban Reorder
+
+- Dragging a card **within the same column** now reorders via `arrayMove` from `@dnd-kit/sortable`.
+- `KanbanBoard.handleDragEnd` has a new else-branch for same-column drops.
+- New `onReorder` callback prop on `KanbanBoard` fires with `{ id, kanban_order }[]`.
+- `TasksPage.handleReorder` applies **optimistic UI update** → persists via `PATCH /local-tasks/bulk`.
+- On failure, reverts by calling `loadTasks()`.
+
+#### Sync Status Toggle
+
+- New **SignalIcon / SignalSlashIcon** indicator in toolbar shows whether sync is enabled.
+- Click toggles sync on/off globally.
+- **Disable flow:** SweetAlert2 dialog with reason selection (Performance, Testing, Maintenance, Data Issues, Other + detail field). Creates a **support case** via `POST /sync/disable`.
+- **Enable flow:** `POST /sync/enable` re-enables all sources silently.
+- 3 new backend endpoints: `GET /sync/enabled`, `POST /sync/disable`, `POST /sync/enable`.
+
+#### Toolbar Icon Grouping
+
+- Sync status indicator, Sync button (ArrowPathIcon), and Refresh button grouped into a unified `button-group` with shared border rounding.
+
+---
+
+### 🐛 Bug Fixes
+
+#### Stats Bar Overhaul
+
+- **Removed "Overdue" metric** — `end_date` is a scheduling time block, not a deadline. All 182 tasks had an `end_date`, making 66 non-completed ones appear falsely "overdue".
+- **Added Completed** (emerald, CheckCircleIcon) and **Pending** (gray, ClockIcon, conditional — only shows when count > 0).
+- Stats bar now receives `unbilledTasks` instead of `tasks`, so billed tasks are excluded from counts.
+- Count denominator (e.g., "96 / 96 tasks") now uses `unbilledTasks.length` instead of `tasks.length`.
+
+#### Font Size Kanban Bug
+
+- `fontSize` prop was only applied to the **list** variant of `TaskCard`. The kanban variant had hardcoded Tailwind sizes (`text-[10px]`, `text-[11px]`, `text-sm`).
+- Fix: replaced all hardcoded sizes in the kanban variant with `style={FS_*[fs]}` inline styles.
+
+---
+
+### 🔄 Modified Files
+
+| File | Old LOC | New LOC | Changes |
+|------|---------|---------|---------|
+| `TaskCard.tsx` | 532 | 568 | Font size style maps (FS\_*), fontSize prop, inline styles for both variants |
+| `KanbanBoard.tsx` | 312 | 340 | onReorder callback, arrayMove import, same-column reorder logic, fontSize threading |
+| `TaskToolbar.tsx` | 247 | 276 | Font size picker (S/M/L), sync status toggle, icon button grouping, TaskFontSize export |
+| `TaskStatsBar.tsx` | 47 | 45 | Replaced Overdue with Completed + Pending, new icon imports |
+| `TasksPage.tsx` | 2,535 | 2,605 | unbilledTasks memo, taskFontSize state, handleReorder, handleSyncStatusToggle, fontSize prop passing |
+| `localTasks.ts` | 860 | 862 | sync/enabled + sync/enable + sync/disable endpoints (added earlier in v2.0 cycle) |
+
+---
+
+### 📊 By the Numbers
+
+| Metric | v2.0 | v2.1 | Delta |
+|--------|------|------|-------|
+| Frontend LOC (Tasks components) | ~1,730 | ~1,830 | +100 |
+| TasksPage LOC | 2,535 | 2,605 | +70 |
+| Backend LOC (localTasks) | 860 | 862 | +2 |
+| New localStorage keys | — | `tasksFontSize` | +1 |
+| New backend endpoints | — | 3 (sync toggle) | +3 |
+
+---
+
+## v2.0.0 — Dual-Path Architecture
+
+**Release Type:** Major — Breaking changes to auth model, data flow, and API surface.
+
+### Summary
+
+Complete architectural overhaul from a pure proxy model (v1.x) to a dual-path architecture with local database caching, a sync engine, source-level API-key authentication, and a rich local enhancement layer.
+
+---
+
+### ⚡ Architecture Changes
+
+| Aspect | v1.x | v2.0 |
+|--------|------|------|
+| **Read path** | Proxy → external API | Local MySQL database |
+| **Write path** | Proxy → external API | Proxy → external API (unchanged) |
+| **Auth model** | Per-user, per-software OTP tokens | Source-level API keys |
+| **Token storage** | `localStorage: software_token_{id}` | `task_sources.api_key` (DB) |
+| **Auth header** | `X-Software-Token` | `X-API-Key` (configurable) |
+| **Data source** | External API (live) | Local cache (synced) |
+| **Enrichments** | None | Priority, bookmarks, tags, colour labels, kanban order, view tracking |
+| **Frontend hook** | `useTasks` → `GET /api/softaware/tasks` | `useTasks` → `GET /api/local-tasks` |
+
+---
+
+### 🆕 New Files
+
+#### Backend
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/routes/localTasks.ts` | 860 | Local tasks router — CRUD, sources, sync, enhancements, invoicing |
+| `src/services/taskSyncService.ts` | 687 | Sync engine — adapters, hashing, upsert, push-back |
+| `src/db/migrations/021_local_tasks.ts` | 200 | Migration: `task_sources`, `local_tasks`, `task_sync_log` tables |
+| `src/db/migrations/022_task_enhancements.ts` | 96 | Migration: priority, bookmarks, tags, kanban, views columns |
+
+#### Frontend
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/hooks/useLocalTasks.ts` | 181 | Hook for source management, sync, and local enhancements |
+| `src/models/LocalTasksModel.ts` | 206 | API client for all `/api/local-tasks` endpoints |
+| `src/components/Tasks/TaskCard.tsx` | 532 | Rich task card with priority badge, bookmark, tags, colour label |
+| `src/components/Tasks/KanbanBoard.tsx` | 312 | Kanban board with @dnd-kit drag-and-drop |
+| `src/components/Tasks/TaskToolbar.tsx` | 247 | Filter toolbar (status, type, priority, bookmarked, tags) |
+| `src/components/Tasks/TagInput.tsx` | 148 | Freeform tag input with autocomplete |
+| `src/components/Tasks/ColorLabelPicker.tsx` | 56 | Colour label selector dropdown |
+| `src/components/Tasks/TaskStatsBar.tsx` | 47 | Status distribution bar chart |
+| `src/components/Tasks/PriorityBadge.tsx` | 34 | Priority indicator (urgent/high/normal/low) |
+| `src/components/Tasks/index.ts` | 8 | Barrel exports |
+| `src/components/TaskAttachmentsInline.tsx` | 105 | Inline attachment thumbnails on cards |
+
+#### Database
+
+| Table | Columns | Purpose |
+|-------|---------|---------|
+| `task_sources` | 18 | External source registry with API keys |
+| `local_tasks` | 42+ | Cached tasks with enhancement columns |
+| `task_sync_log` | 12 | Sync run history |
+
+---
+
+### 🔄 Modified Files
+
+#### `softawareTasks.ts` (778 LOC)
+
+**Breaking changes:**
+- Replaced `softwareAuth` middleware with no-op `requireAuth`
+- Replaced `X-Software-Token` auth with `resolveTaskSource()` → `X-API-Key`
+- Removed per-user OTP authentication flow
+
+**New endpoints added:**
+- `POST /:id/start` — Start task workflow
+- `POST /:id/complete` — Complete task workflow
+- `POST /:id/approve` — Approve task
+- `GET /pending-approval` — List pending approvals
+- `GET /stats` — Task statistics
+- `POST /sync` — External sync
+- `POST /invoice-tasks` — Invoice tasks
+- `POST /bill` — Bill tasks
+- `PUT /time` — Update time
+- `GET /statement` — Get statement
+- `GET /orders/latest` — Latest orders
+- `GET /orders/budgets` — All budgets
+- `GET /orders/:orderNumber/budget` — Budget for order
+- `GET /:id/parent` — Get parent task
+- `DELETE /comments/:commentId` — Delete comment
+- `POST /comments/:commentId/convert-to-task` — Convert comment to task
+- `GET /attachments/:filename` — Stream attachment binary
+- `POST /:id/comments/with-attachment` — Comment with Excalidraw drawing
+
+**Notifications added:**
+- `sendTaskAssignmentNotification()` — fires on task update with `assigned_to` change
+- `sendTaskPhaseChangeNotification()` — fires on `workflow_phase` change
+
+#### `useTasks.ts` (99 LOC)
+
+**Breaking change:** Now fetches from `GET /api/local-tasks` instead of `GET /api/softaware/tasks`.
+
+- Added normalisation of `local_tasks` columns → `Task` interface
+- Added `_local_id`, `_source_id`, `_source_name`, `_local_dirty`, `_last_synced_at` metadata fields
+- Retained `useCallback` memoisation and `isLoading`/`error` state
+
+#### `TasksPage.tsx` (2,535 LOC, was ~2,241)
+
+**New features:**
+- Kanban board view (toggle between list and kanban)
+- Invoice staging panel (stage/unstage/process)
+- Priority, bookmark, and tag management in task dialogs
+- Colour label picker
+- Comment deletion and comment-to-task conversion
+- Attachment streaming (inline image viewing)
+- Billing mode with staged task counts
+- View tracking (auto-increment on task open)
+
+#### `types/index.ts`
+
+Added to `Task` interface:
+- `priority`, `is_bookmarked`, `color_label`, `local_tags`, `kanban_order`, `view_count`, `last_viewed_at`
+- `_local_id`, `_source_id`, `_source_name`, `_local_dirty`, `_last_synced_at`
+
+---
+
+### 🗑️ Deprecated / Legacy
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `softwareAuth.ts` middleware | **Unused** by Tasks | Still exists (32 LOC), may be used by other modules |
+| `software_token_{id}` localStorage | **Ignored** | No longer set or read by Tasks module |
+| `POST /authenticate` endpoint | **Stub** | Always returns `{ success: true, token: null }` |
+| Per-user external auth flow | **Removed** | Replaced by source-level API keys |
+
+---
+
+### 📦 New Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `@dnd-kit/core` | — | Drag-and-drop primitives for kanban |
+| `@dnd-kit/sortable` | — | Sortable preset for kanban columns |
+| `@dnd-kit/utilities` | — | CSS utilities for drag-and-drop |
+| `@excalidraw/excalidraw` | 0.18.0 | Whiteboard drawing in comments |
+| `react-quill` | 2.0.0 | Rich text editor for descriptions/comments |
+| `react-datepicker` | 8.8.0 | Date selection |
+| `date-fns` | 2.30.0 | Date formatting and manipulation |
+| `@headlessui/react` | — | Accessible UI components (dropdowns, dialogs) |
+| `sweetalert2` | — | Confirmation dialogs |
+| `react-hot-toast` | — | Toast notifications |
+
+> **Note:** Node.js 18+ native `fetch`, `FormData`, and `Blob` are used directly — no `axios`, `node-fetch`, or `form-data` packages needed.
+
+---
+
+### 🛣️ Migration Guide
+
+#### For Administrators
+
+1. **Run migrations** — Execute `021_local_tasks` and `022_task_enhancements` to create the three new tables.
+2. **Register sources** — `POST /api/local-tasks/sources` for each external API, providing `name`, `base_url`, and `api_key`.
+3. **Initial sync** — `POST /api/local-tasks/sync` to populate the `local_tasks` cache.
+4. **Verify** — `GET /api/local-tasks?page=1&limit=10` should return cached tasks.
+
+#### For Frontend Developers
+
+- The `useTasks` hook API is **unchanged** — it still returns `{ tasks, isLoading, error, fetchTasks }`.
+- Task `id` values now come from `external_id` (the remote system's ID), not the local DB `id`.
+- Use `_local_id` for local enhancement endpoints (bookmark, priority, tags, etc.).
+- The software selector still works — pass `software_id` to filter by source.
+- `localStorage.software_token_{id}` is no longer needed — remove any code that sets it.
+
+#### For API Consumers
+
+- All proxy endpoints still work at `/api/softaware/tasks/*`.
+- Include `software_id` in query params or request body to resolve the correct source.
+- The `/authenticate` endpoint is a no-op — safe to call but unnecessary.
+- New local endpoints at `/api/local-tasks/*` provide cached reads and local enhancements.
+
+---
+
+### 📊 By the Numbers
+
+| Metric | v1.x | v2.0 | Delta |
+|--------|------|------|-------|
+| Backend files | 1 | 4 | +3 |
+| Frontend files | ~4 | ~15 | +11 |
+| Backend LOC | ~400 | ~2,325 | +1,925 |
+| Frontend LOC | ~2,500 | ~4,600 | +2,100 |
+| API endpoints | ~15 | ~61 | +46 |
+| Database tables | 0 | 3 | +3 |
+| Database columns | 0 | ~72 | +72 |
+| Migrations | 0 | 2 | +2 |

@@ -229,37 +229,6 @@ function normalizeProvider(provider?: DesktopAIProvider): DesktopAIProvider {
   return (provider || 'softaware').toLowerCase() as DesktopAIProvider;
 }
 
-
-async function maybeChargeCredits(params: {
-  req: any;
-  endpoint: string;
-  provider: DesktopAIProvider;
-  kind: 'simple' | 'chat';
-}) {
-  const teamId = await getTeamIdFromApiKey(params.req);
-  if (!teamId) return;
-
-  // Ollama is explicitly exempt (user-hosted)
-  if (params.provider === 'ollama') return;
-
-  const { deductCredits } = await import('../services/credits.js');
-
-  if (params.provider === 'softaware') {
-    await deductCredits(teamId, params.kind === 'chat' ? 'TEXT_CHAT' : 'TEXT_SIMPLE', {
-      userId: params.req.apiKey?.userId,
-      endpoint: params.endpoint,
-    });
-    return;
-  }
-
-  // External providers: minimal processing fee
-  await deductCredits(teamId, 'AI_BROKER', {
-    userId: params.req.apiKey?.userId,
-    endpoint: params.endpoint,
-    provider: params.provider,
-  });
-}
-
 function requireModel(model?: string, provider?: DesktopAIProvider): string {
   const trimmed = model?.trim();
   if (!trimmed) {
@@ -717,9 +686,6 @@ aiRouter.post('/api/chat', requireApiKey, async (req: Request, res: Response, ne
     
     const teamId = await getTeamIdFromApiKey(req as any);
     console.log('[/api/chat] Team ID:', teamId);
-    
-    await maybeChargeCredits({ req: req as any, endpoint: '/ai/api/chat', provider, kind: 'chat' });
-    console.log('[/api/chat] Credits checked/charged');
 
     const messages = body.messages as Array<{ 
       role: AIMessage['role']; 
@@ -762,7 +728,6 @@ aiRouter.post('/api/simple', requireApiKey, async (req: Request, res: Response, 
       SimpleChatRequestSchema.parse(req.body);
     const provider = normalizeProvider(providerRaw as DesktopAIProvider | undefined);
     const teamId = await getTeamIdFromApiKey(req as any);
-    await maybeChargeCredits({ req: req as any, endpoint: '/ai/api/simple', provider, kind: 'simple' });
 
     const messages: Array<{ 
       role: AIMessage['role']; 

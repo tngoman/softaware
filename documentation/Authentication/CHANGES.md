@@ -1,7 +1,7 @@
 # Authentication Module - Changelog & Known Issues
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-06
+**Version:** 1.9.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,12 +9,536 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-13 | 1.9.0 | PIN Quick Login — 4-digit PIN as alternative credential, `user_pins` table, 5 new endpoints, returning user detection, PinSetup.tsx component |
+| 2026-03-13 | 1.8.0 | Alternative auth methods (`send-alt-otp` endpoint), universal TOTP validation, push-to-approve in AuthPage.tsx, human-friendly short codes for mobile QR, MobileAuthQR always-visible component |
+| 2026-03-12 | 1.7.0 | Push-to-approve 2FA for mobile app (FCM push notifications), 3 new endpoints, `mobile_auth_challenges` table extended with `source` and `denied` status |
+| 2026-03-07 | 1.6.0 | Direct admin/staff detection via `users.is_admin`/`is_staff` columns — replaces role-slug-based derivation across entire stack |
 | 2026-03-06 | 1.5.0 | 2FA bug fixes (timezone, JSON.parse crash, method switching, resend UX), profile update fix, SMS service integration |
 | 2026-03-05 | 1.4.0 | Multi-method 2FA (TOTP/email/SMS), centralized email service, SMTP admin UI |
 | 2026-03-03 | 1.3.0 | Masquerade banner in PortalLayout + login email auto-append |
 | 2026-03-02 | 1.2.0 | Admin masquerade (login-as-user) feature |
 | 2026-03-02 | 1.1.0 | Migrated role detection from team_members to user_roles |
 | 2026-03-02 | 1.0.0 | Initial documentation of existing authentication system |
+
+---
+
+## 1.9 v1.9.0 — PIN Quick Login
+
+**Date:** 2026-03-13  
+**Scope:** Backend (auth.ts), Frontend (AuthPage.tsx, AuthModel.ts, PinSetup.tsx, AccountSettings.tsx, PortalSettings.tsx), Database (user_pins)
+
+### Summary
+
+Added **PIN Quick Login** as an alternative credential for returning users. Users can set a 4-digit PIN in their account settings and use it instead of their password on subsequent logins. PIN login follows the same security model as password login — if 2FA is enabled, the user must still complete 2FA verification after entering their PIN. The feature is entirely additive and does not modify any existing authentication flows.
+
+### Motivation
+
+Returning users on trusted devices must enter their full email and password every login. For frequent users (e.g., staff checking in multiple times daily), this creates unnecessary friction. A 4-digit PIN provides a faster login alternative without compromising security, especially when combined with the existing 2FA enforcement for staff/admin accounts.
+
+### New Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/auth/pin/status` | requireAuth | Check if current user has a PIN set |
+| POST | `/auth/pin/set` | requireAuth | Set or update 4-digit PIN (requires password verification) |
+| DELETE | `/auth/pin` | requireAuth | Remove user's PIN |
+| POST | `/auth/pin/verify` | None | Login with email + PIN → JWT or 2FA temp_token |
+| GET | `/auth/pin/check/:email` | None | Check if an email address has PIN login enabled |
+
+### New Database Table
+
+| Table | Engine | Purpose |
+|-------|--------|---------|
+| `user_pins` | InnoDB | Stores bcrypt-hashed PINs, per-user failed attempt counters, and lockout timestamps |
+
+**Schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INT AUTO_INCREMENT | Primary key |
+| `user_id` | VARCHAR(36) | FK → users.id (UNIQUE, CASCADE delete) |
+| `pin_hash` | VARCHAR(255) | bcrypt hash (10 rounds) of 4-digit PIN |
+| `failed_attempts` | INT DEFAULT 0 | Consecutive failed PIN attempts |
+| `locked_until` | DATETIME NULL | Lockout expiry (set after 5 failed attempts) |
+| `created_at` | DATETIME | Auto-set on creation |
+| `updated_at` | DATETIME | Auto-updated on modification |
+
+**Auto-migration:** Table is created automatically via `ensurePinTable()` called on module load. Uses explicit `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` on the `user_id` column to match the `users.id` collation (prevents FK mismatch on MySQL 8.0 where default collation is `utf8mb4_0900_ai_ci`).
+
+### New Frontend Files
+
+| File | LOC | Description |
+|------|-----|-------------|
+| `src/components/PinSetup.tsx` | 308 | Reusable PIN setup/change/remove component. 4-digit input boxes with auto-focus and backspace navigation. 2-step entry (enter → confirm). Password verification before setting PIN. Used in AccountSettings.tsx and PortalSettings.tsx. |
+
+### Updated Backend Files
+
+| File | Change |
+|------|--------|
+| `src/routes/auth.ts` | **976 → 1253 LOC (+277).** Added `ensurePinTable()` auto-migration. Added constants `PIN_MAX_ATTEMPTS = 5`, `PIN_LOCKOUT_MINUTES = 15`. Added 5 PIN endpoints: `GET /pin/status`, `POST /pin/set` (Zod validation, bcrypt password verify, UPSERT), `DELETE /pin`, `POST /pin/verify` (email lookup, lockout check, bcrypt compare, 2FA integration with push + OTP auto-send), `GET /pin/check/:email` (doesn't reveal email existence). |
+
+### Updated Frontend Files
+
+| File | Change |
+|------|--------|
+| `src/pages/public/AuthPage.tsx` | **887 → 1047 LOC (+160).** Added PIN login mode: `loginMode` state ('password' \| 'pin'), returning user detection via `AuthModel.getLastEmail()`, PIN availability check via `checkPinByEmail()`, 4-digit PIN pad with individual input boxes, auto-submit on 4th digit, "Use password instead" and "Not you?" links, stores email in localStorage on successful login. |
+| `src/models/AuthModel.ts` | **398 → 464 LOC (+66).** Added 7 PIN methods: `getPinStatus()`, `setPin(pin, password)`, `removePin()`, `checkPinByEmail(email)`, `loginWithPin(email, pin)`, `setLastEmail(email)`, `getLastEmail()`. Last two use localStorage for returning user detection. |
+| `src/pages/general/AccountSettings.tsx` | **246 → 279 LOC (+33).** Added `<PinSetup />` component in Security section below the 2FA card. Imports PinSetup. |
+| `src/pages/portal/Settings.tsx` | **193 → 244 LOC (+51).** Added `<PinSetup />` component in Security tab below the 2FA card. Imports PinSetup. |
+
+### PIN Login Flow
+
+```
+Returning User          AuthPage.tsx              Backend
+     │                      │                        │
+     │── visit /login ─────▶│                        │
+     │                      │── getLastEmail()       │
+     │                      │   (localStorage)       │
+     │                      │── GET /pin/check/      │
+     │                      │   :email ─────────────▶│
+     │                      │◀── { has_pin: true } ──│
+     │                      │                        │
+     │◀── PIN pad UI ───────│                        │
+     │   (4 digit boxes)    │                        │
+     │                      │                        │
+     │── enter PIN ────────▶│                        │
+     │   (auto-submit on    │                        │
+     │    4th digit)        │── POST /pin/verify ───▶│
+     │                      │   { email, pin }       │── lookup user
+     │                      │                        │── check lockout
+     │                      │                        │── bcrypt compare
+     │                      │                        │── check 2FA
+     │                      │                        │
+     │                      │  (no 2FA)              │
+     │                      │◀── { token, user } ────│
+     │◀── /dashboard ───────│                        │
+     │                      │                        │
+     │                      │  (has 2FA)             │
+     │                      │◀── { requires_2fa,     │
+     │                      │   temp_token,          │
+     │                      │   challenge_id? } ─────│
+     │◀── 2FA screen ───────│                        │
+     │   (same as password  │                        │
+     │    login 2FA flow)   │                        │
+```
+
+### Security Notes
+
+- PIN is hashed with bcrypt (10 rounds) — same algorithm as passwords
+- 4-digit PIN has 10,000 combinations — acceptable given 5-attempt lockout (brute force would take 45+ minutes with lockouts)
+- Lockout is **per-user in the database** — survives server restarts, not bypassable by switching IPs or clearing cookies
+- Error messages are deliberately vague — "Invalid email or PIN" for all failure modes (wrong email, no PIN set, wrong PIN, locked out uses 429 status instead)
+- `GET /pin/check/:email` returns `{ has_pin: false }` for non-existent emails — does not reveal email existence
+- PIN does **NOT** bypass 2FA — if 2FA is enabled, PIN login triggers the exact same 2FA flow (push + OTP auto-send) as password login
+- PIN set/change requires current password verification — prevents unauthorized PIN changes on an unattended session
+- `ensurePinTable()` uses explicit `utf8mb4_unicode_ci` collation on `user_id` — fixes MySQL 8.0 FK compatibility issue discovered during implementation
+
+### Bug Fixes During Implementation
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| `user_pins` table never created | MySQL 8.0 default collation `utf8mb4_0900_ai_ci` incompatible with `users.id` column's `utf8mb4_unicode_ci` for FK constraint | Added explicit `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` to `user_id` column and table definition |
+| `POST /pin/set` returning 500 | SQL queried `SELECT password FROM users` but column is named `passwordHash` | Changed to `SELECT passwordHash FROM users` and `user.passwordHash` |
+| PinSetup buttons submitting parent form | Buttons without `type="button"` defaulted to `type="submit"`, triggering parent form submission | Added `type="button"` to all 5 buttons in PinSetup.tsx |
+
+### Verification Status
+
+- ✅ `ensurePinTable()` creates table on module load with correct collation
+- ✅ `POST /pin/set` hashes PIN and stores via UPSERT
+- ✅ `POST /pin/set` verifies current password before allowing PIN change
+- ✅ `DELETE /pin` removes PIN record
+- ✅ `GET /pin/status` returns correct has_pin boolean
+- ✅ `POST /pin/verify` validates PIN and returns JWT (no 2FA) or temp_token (with 2FA)
+- ✅ `POST /pin/verify` increments failed_attempts and locks after 5 failures
+- ✅ `GET /pin/check/:email` returns has_pin without revealing email existence
+- ✅ PinSetup.tsx renders in both AccountSettings and PortalSettings
+- ✅ AuthPage.tsx shows PIN pad for returning users with PIN enabled
+- ✅ AuthPage.tsx auto-submits on 4th digit entry
+- ✅ Existing password login flow unaffected (backward compatible)
+- ✅ 2FA flows work correctly after PIN verification
+
+---
+
+## 1.8 v1.8.0 — Alternative Auth Methods, Universal TOTP Validation, Short Codes, Push-to-Approve in AuthPage
+
+**Date:** 2026-03-13  
+**Scope:** Backend (twoFactor.ts), Frontend (AuthPage.tsx, Login.tsx, LoginPage.tsx, AuthModel.ts, MobileAuthQR.tsx), Database (mobile_auth_challenges)
+
+### Summary
+
+Multi-faceted improvement release addressing authentication flexibility, web login UX for push-to-approve, and mobile QR code usability. Five major changes:
+
+1. **Alternative auth methods endpoint** (`POST /auth/2fa/send-alt-otp`) — When a user's preferred 2FA method is unavailable (e.g., no mobile app for TOTP push, or phone not available for SMS), they can request an OTP via an alternative method (email or SMS). The frontend dynamically shows the two alternative methods that are not the user's preferred method.
+
+2. **Universal TOTP validation** — The `POST /auth/2fa/verify` endpoint now **always** attempts TOTP code validation regardless of the user's `preferred_method`. Previously, TOTP validation was only tried when `preferred_method === 'totp'`. Now, a user with email as their preferred method can still enter a TOTP code from their authenticator app and it will be accepted. This provides a reliable fallback when OTP delivery fails.
+
+3. **Push-to-approve in AuthPage.tsx** — The primary login page (`AuthPage.tsx`) now has full push-to-approve support: saves `challenge_id` from login response, polls `POST /auth/2fa/push-status` every 3 seconds, auto-completes login on approval, shows denial/expiry states, and provides alternative method links. Previously, AuthPage.tsx had zero push-to-approve logic despite being the main login page.
+
+4. **6-digit numeric codes for mobile QR** — Mobile auth challenges now include a `short_code` column (e.g., `482916`) for manual entry when QR scanning fails. The previous `challenge_secret` was a 64-character hex hash — unusable for manual entry. The 6-digit format matches what the mobile app expects.
+
+5. **MobileAuthQR always visible** — The `MobileAuthQR.tsx` component now always renders (previously returned `null` when no challenge was pending). Shows a "waiting for mobile app" message when no active challenge, and displays the short code below the QR code when a challenge is active.
+
+### New Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/auth/2fa/send-alt-otp` | None (temp_token) | Send OTP via an alternative method (email or SMS) when the user's preferred method is unavailable |
+
+### Modified Endpoints
+
+| Endpoint | Change |
+|----------|--------|
+| POST `/auth/2fa/verify` | Now **always** attempts TOTP validation first (regardless of `preferred_method`), then tries email/SMS OTP if TOTP didn't match, then tries backup codes. Previously, TOTP was only tried when `preferred_method === 'totp'`. |
+| GET `/auth/2fa/mobile-qr` | Response now includes `challenge_code` field containing the 6-digit numeric code (e.g., `482916`) for manual entry. SELECT query updated to include `short_code` column. |
+
+### New Backend Function
+
+| Function | File | Description |
+|----------|------|-------------|
+| `generateShortCode()` | `twoFactor.ts` | Generates a 6-digit numeric code (e.g., `482916`) using `crypto.randomBytes()`. Used for `short_code` column in `mobile_auth_challenges`. Mobile app accepts this as manual entry when QR scanning fails. |
+
+### Database Changes
+
+| Table | Change | Detail |
+|-------|--------|--------|
+| `mobile_auth_challenges` | Added `short_code` column | `VARCHAR(10) NULL` — Human-friendly code for manual entry when QR scanning fails. Generated by `generateShortCode()` and stored on challenge creation (both push and QR sources). |
+| `mobile_auth_challenges` | Auto-migration | `ensureMobileChallengeTable()` runs `ALTER TABLE ADD COLUMN short_code VARCHAR(10) NULL` if column doesn't exist |
+
+### Updated Backend Files
+
+| File | Change |
+|------|--------|
+| `src/routes/twoFactor.ts` | **1228 → 1304 LOC.** Added `generateShortCode()` function. Added `POST /auth/2fa/send-alt-otp` endpoint (validates temp_token, sends OTP via requested alternative method). Modified verify endpoint to always try TOTP validation first. Updated `ensureMobileChallengeTable()` to add `short_code` column. Push and QR challenge creation now generate and store `short_code`. `GET /mobile-qr` SELECT now includes `short_code`, returned as `challenge_code` in response. |
+
+### Updated Frontend Files
+
+| File | Change |
+|------|--------|
+| `src/pages/public/AuthPage.tsx` | **631 → 887 LOC.** Added full push-to-approve flow: `challengeId`, `pushStatus`, `showManualCode`, `sendingAltOtp` state variables. Save `challenge_id` from login response. Push polling useEffect (3s interval, auto-login on approval). `resetToLogin()` helper. Push waiting/denied/expired UI screens. `handleSendAltOtp(method)` handler. Alternative method buttons (email/SMS/authenticator) on both push and manual code screens. Manual code entry with "Back to push approval" link. |
+| `src/pages/auth/Login.tsx` | **296 → 570 LOC.** Changed `handleSendEmailOtp` → `handleSendAltOtp(method)`. Push screen now shows email + SMS + backup code alternatives dynamically. Manual code screen shows the other 2 methods dynamically. |
+| `src/pages/public/LoginPage.tsx` | **~300 → 475 LOC.** Same alternative method changes as Login.tsx. |
+| `src/models/AuthModel.ts` | **280 → 398 LOC.** Added `sendAltOtp(tempToken, method: 'email' \| 'sms')` method. Added `pollPushStatus(tempToken, challengeId)` method. Updated `getMobileAuthQR()` return type to include `challenge_code?: string`. Added `getMobileAuthStatus(challengeId)` method. |
+| `src/components/MobileAuthQR.tsx` | **New file (208 LOC).** Previously not documented. QR code display for mobile app authentication on web profile pages. Now always renders (previously returned `null` when no challenge pending — shows "waiting for mobile app" message). Displays `challengeCode` (short code) below QR for manual entry. Clears state on completion/expiry. |
+| `src/components/TwoFactorSetup.tsx` | **325 → 503 LOC.** Auto-verify TOTP setup: after scanning QR, component generates TOTP codes client-side and auto-submits verification. Added browser-based TOTP generation using `totp.ts` utility. |
+| `src/utils/totp.ts` | **New file (64 LOC).** Browser-side TOTP code generation utility using Web Crypto API (HMAC-SHA1). Decodes base32 secrets, computes time-based codes with 30-second period. Used by TwoFactorSetup.tsx for auto-verify. |
+
+### Push-to-Approve Flow in AuthPage.tsx
+
+```
+User                AuthPage.tsx              Backend                Mobile App
+  │                    │                         │                      │
+  │── login ──────────▶│                         │                      │
+  │                    │── POST /auth/login ────▶│                      │
+  │                    │                         │── createPushChallenge()
+  │                    │                         │── FCM push ─────────▶│
+  │                    │◀── { requires_2fa,      │                      │
+  │                    │   challenge_id,         │                      │
+  │                    │   temp_token } ─────────│                      │
+  │                    │                         │                      │
+  │◀── "Waiting for    │                         │                      │
+  │   approval..."    │                         │                      │
+  │                    │── poll push-status ────▶│                      │
+  │                    │   (every 3 seconds)     │                      │
+  │                    │◀── { status: 'pending' }│                      │
+  │                    │                         │                      │
+  │                    │                         │  POST /push-approve  │
+  │                    │                         │◀── { approve } ──────│
+  │                    │                         │                      │
+  │                    │── poll push-status ────▶│                      │
+  │                    │◀── { token, user } ─────│                      │
+  │                    │                         │                      │
+  │                    │── storeAuth(token) ─────│                      │
+  │◀── /dashboard ────│                         │                      │
+```
+
+### Alternative Auth Method Flow
+
+```
+User                AuthPage.tsx              Backend
+  │                    │                         │
+  │  (on push screen   │                         │
+  │   or manual code   │                         │
+  │   screen)          │                         │
+  │                    │                         │
+  │── "Use Email       │                         │
+  │   Instead" ───────▶│                         │
+  │                    │── POST /auth/2fa/       │
+  │                    │   send-alt-otp          │
+  │                    │   { temp_token,         │
+  │                    │     method: 'email' }  ▶│
+  │                    │                         │── generate OTP
+  │                    │                         │── send email
+  │                    │◀── { success: true,     │
+  │                    │   message: "..." } ─────│
+  │                    │                         │
+  │◀── "Enter the code │                         │
+  │   sent to email"  │                         │
+  │                    │                         │
+  │── enter code ─────▶│                         │
+  │                    │── POST /auth/2fa/verify │
+  │                    │   { temp_token, code } ▶│
+  │                    │                         │── TOTP check (always)
+  │                    │                         │── email OTP check
+  │                    │                         │── backup code check
+  │                    │◀── { token, user } ─────│
+  │                    │                         │
+  │◀── /dashboard ────│                         │
+```
+
+### Security Notes
+
+- The `send-alt-otp` endpoint validates the temp_token (same 5-minute TTL, `purpose: '2fa'`)
+- Alternative methods are limited to email and SMS — TOTP cannot be "sent" as an alternative (it requires the authenticator app)
+- Universal TOTP validation means a TOTP code entered on the email/SMS verification screen will be accepted — this is intentional for users who have both an authenticator app and email/SMS configured
+- Short codes use a 6-digit numeric format compatible with the mobile app's input field
+- Push polling in AuthPage.tsx stops automatically when: challenge is approved (login completes), challenge is denied, challenge expires, user navigates away (useEffect cleanup), or user switches to manual code entry
+
+### Verification Status
+
+- ✅ Backend compiles clean
+- ✅ `send-alt-otp` endpoint sends email/SMS OTP correctly
+- ✅ Verify endpoint accepts TOTP codes regardless of preferred method
+- ✅ AuthPage.tsx push-to-approve polling works end-to-end
+- ✅ AuthPage.tsx alternative method buttons render correctly
+- ✅ MobileAuthQR shows short code below QR
+- ✅ MobileAuthQR always visible (no more `null` return)
+- ✅ Short codes generate as 6-digit numeric codes
+- ✅ Existing 2FA flows unaffected (backward compatible)
+
+---
+
+## 1.7 v1.7.0 — Push-to-Approve 2FA for Mobile App
+
+**Date:** 2026-03-12  
+**Scope:** Backend (twoFactor.ts, auth.ts), Mobile wiring guide, Documentation
+
+### Summary
+
+Added **push-to-approve** as a parallel 2FA verification path for users with the TOTP method and a registered mobile app. When a TOTP user logs in from the web, the backend now sends an FCM push notification to all registered mobile devices. The user can approve or deny the login directly from the mobile app — no code entry required. The existing TOTP code entry flow remains fully functional as a fallback.
+
+This is a **non-breaking, additive change.** All existing 2FA flows (TOTP code entry, email OTP, SMS OTP, backup codes) continue to work exactly as before. Push-to-approve is an additional convenience layer that runs in parallel.
+
+### Motivation
+
+The TOTP code entry flow requires users to open their authenticator app, read a 6-digit code, switch back to the browser, and type it in — all within 30 seconds. Push-to-approve reduces this to a single tap on a notification or in-app approval screen.
+
+### New Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/auth/2fa/push-approve` | JWT (requireAuth) | Mobile app approves or denies a push challenge |
+| POST | `/auth/2fa/push-status` | None (temp_token) | Web frontend polls for push challenge completion |
+
+### Modified Endpoints
+
+| Endpoint | Change |
+|----------|--------|
+| POST `/auth/login` | When 2FA method is TOTP and user has FCM devices, creates a push challenge via `createPushChallenge()` and includes `challenge_id` in response. Non-fatal — login proceeds normally if FCM fails or no devices registered. |
+
+### New Exported Function
+
+| Function | File | Params | Returns | Description |
+|----------|------|--------|---------|-------------|
+| `createPushChallenge(userId, rememberMe, userEmail, userName?)` | `twoFactor.ts` | userId: string, rememberMe: boolean, userEmail: string, userName?: string | `string \| null` (challengeId or null) | Creates a push challenge in `mobile_auth_challenges` with `source='push'`, sends FCM notification with `type: 'login_approval'` to all user devices. Returns null if no FCM devices registered. |
+
+### Database Changes
+
+| Table | Change | Detail |
+|-------|--------|--------|
+| `mobile_auth_challenges` | Added `source` column | `ENUM('qr','push') DEFAULT 'qr'` — distinguishes QR-scan challenges from push-to-approve challenges |
+| `mobile_auth_challenges` | Extended `status` ENUM | Added `'denied'` to existing `ENUM('pending','completed','expired')` → now `ENUM('pending','completed','expired','denied')` |
+| `mobile_auth_challenges` | Auto-migration | `ensureMobileChallengeTable()` runs `ALTER TABLE` statements on startup to add `source` column and extend `status` ENUM if table already exists |
+
+### FCM Payload Structure
+
+```json
+{
+  "type": "login_approval",
+  "challenge_id": "abc123...",
+  "user_email": "user@example.com",
+  "title": "Login Approval Request",
+  "body": "Tap to approve login for user@example.com"
+}
+```
+
+### Push-to-Approve Flow
+
+```
+Web Browser                    Backend                     Mobile App
+     │                            │                            │
+     │  POST /auth/login          │                            │
+     │  { email, password }       │                            │
+     │ ──────────────────────────>│                            │
+     │                            │  password OK + 2FA=TOTP    │
+     │                            │                            │
+     │                            │  createPushChallenge()     │
+     │                            │  INSERT mobile_auth_challenges
+     │                            │  (source='push')           │
+     │                            │                            │
+     │                            │  FCM push notification ──>│
+     │                            │  { type: login_approval }  │
+     │                            │                            │
+     │  { requires_2fa: true,     │                            │
+     │    challenge_id: "abc..",  │                            │
+     │    temp_token: "..." }     │                            │
+     │ <──────────────────────────│                            │
+     │                            │                            │
+     │                            │  POST /auth/2fa/push-approve
+     │                            │  { challenge_id, action:   │
+     │                            │    'approve' }             │
+     │                            │ <──────────────────────────│
+     │                            │                            │
+     │                            │  { success: true }         │
+     │                            │ ──────────────────────────>│
+     │                            │                            │
+     │  POST /auth/2fa/push-status│                            │
+     │  { temp_token,             │                            │
+     │    challenge_id }          │                            │
+     │ ──────────────────────────>│                            │
+     │                            │  challenge.status =        │
+     │                            │  'completed' → issue JWT   │
+     │  { success: true,          │                            │
+     │    data: { token, user } } │                            │
+     │ <──────────────────────────│                            │
+```
+
+### Updated Backend Files
+
+| File | Change |
+|------|--------|
+| `src/routes/twoFactor.ts` | **674 → ~1228 LOC.** Added `sendPushToUser` import from `firebaseService.ts`. Modified `ensureMobileChallengeTable()` to add `source ENUM('qr','push')` column and `'denied'` to status ENUM with auto-migration. Created exported `createPushChallenge()` function. Added `POST /auth/2fa/push-approve` endpoint (JWT auth). Added `POST /auth/2fa/push-status` endpoint (temp_token auth). Updated existing mobile-challenge INSERT to include `source = 'qr'`. |
+| `src/routes/auth.ts` | **283 → ~955 LOC (includes other non-auth changes).** Added `createPushChallenge` import from `twoFactor.ts`. Modified login handler: when method is TOTP, calls `createPushChallenge()` in try/catch (non-fatal). Login response now includes `challenge_id` when push challenge created. Updated TOTP message to "Approve the login on your mobile app, or enter your authenticator code." |
+
+### New Documentation
+
+| File | Purpose |
+|------|---------|
+| `/var/opt/documentation/Mobile/MOBILE_PUSH_2FA_WIRING_GUIDE.md` | Complete implementation guide for mobile app developer — API docs, FCM payload, screen designs, code samples, implementation checklist |
+
+### Security Notes
+
+- Push challenges expire after **5 minutes** (same as temp_token)
+- Challenge can only be approved/denied by the **owning user** (JWT userId must match challenge user_id)
+- Only challenges with `source = 'push'` can be approved via push-approve endpoint (QR challenges use a different flow)
+- Challenge must be in `'pending'` status — no replay of completed/expired/denied challenges
+- Push challenge creation is **non-fatal** — if FCM fails or no devices are registered, login proceeds with standard TOTP code entry only
+- The `push-status` endpoint issues a full JWT using the same `buildFrontendUser()` + `signAccessToken()` pattern as the existing `/auth/2fa/verify` endpoint
+- Denied challenges return `{ status: 'denied' }` to the web frontend, which should show an appropriate message
+
+### Verification Status
+
+- ✅ Backend compiles clean (`npx tsc --noEmit` — 0 errors in both twoFactor.ts and auth.ts)
+- ✅ Existing 2FA flows unaffected (TOTP code, email OTP, SMS OTP, backup codes)
+- ✅ Mobile wiring guide created with full API docs, FCM payload, and reference implementation
+
+---
+
+## 1.6 v1.6.0 — Direct Admin/Staff Detection via DB Columns
+
+**Date:** 2026-03-07  
+**Scope:** Database schema, Backend (13+ files), Frontend (Layout.tsx, AdminRoute.tsx, api.ts)
+
+### Summary
+
+**Breaking architectural change.** Admin and staff status is now determined by **direct columns on the `users` table** (`is_admin TINYINT(1)`, `is_staff TINYINT(1)`) instead of being derived from role slugs via `user_roles` JOIN `roles`. This eliminates the fragile dependency on role slug naming conventions and fixes a critical bug where deleting the "admin" role entry broke all admin detection across the platform.
+
+Every backend file that previously queried `user_roles JOIN roles WHERE slug IN ('admin', 'super_admin')` was rewritten to use `SELECT is_admin FROM users WHERE id = ?`. The frontend was updated to hide admin-only navigation items from non-admin users and to show a toast notification on 403 errors.
+
+### Motivation
+
+The previous approach derived `is_admin` and `is_staff` at runtime by joining `user_roles` → `roles` and checking the role's `slug` value. This had several problems:
+1. **Fragile:** Deleting or renaming a role broke admin detection silently
+2. **Inconsistent:** Different files used slightly different slug lists (e.g., some checked `'admin'` only, others checked `'admin', 'super_admin'`)
+3. **Performance:** Required a JOIN on every admin check instead of a direct column read
+4. **Unclear ownership:** Admin status was a side-effect of role assignment, not an explicit user property
+
+### Database Migration
+
+```sql
+ALTER TABLE users
+  ADD COLUMN is_admin TINYINT(1) NOT NULL DEFAULT 0 AFTER isActive,
+  ADD COLUMN is_staff TINYINT(1) NOT NULL DEFAULT 0 AFTER is_admin;
+
+-- Backfill from existing role assignments
+UPDATE users u
+  JOIN user_roles ur ON ur.user_id = u.id
+  JOIN roles r ON r.id = ur.role_id
+  SET u.is_admin = 1
+  WHERE r.slug IN ('admin', 'super_admin');
+
+UPDATE users u
+  JOIN user_roles ur ON ur.user_id = u.id
+  JOIN roles r ON r.id = ur.role_id
+  SET u.is_staff = 1
+  WHERE r.slug IN ('developer', 'client_manager', 'qa_specialist', 'deployer');
+```
+
+### Updated Backend Files
+
+| File | Change |
+|------|--------|
+| `src/middleware/requireAdmin.ts` | **Rewritten.** Now queries `SELECT is_admin FROM users WHERE id = ?` instead of joining user_roles + roles. Error message: "Administrator access required. You do not have permission to perform this action." |
+| `src/middleware/requireDeveloper.ts` | **Rewritten.** Now queries `SELECT is_admin, is_staff FROM users WHERE id = ?`. Allows both admin and staff users. |
+| `src/routes/auth.ts` | `buildFrontendUser()` reads `is_admin, is_staff` directly from users table SELECT. No longer derives from role slug. Masquerade exit checks `users.is_admin` instead of role-slug JOIN. |
+| `src/routes/systemUsers.ts` | `mapUser()` reads `is_admin`/`is_staff` from DB row. SELECT queries include `is_admin, is_staff` columns. Create/update write `is_admin`/`is_staff` to users table. Still syncs `user_roles` for legacy compatibility. |
+| `src/routes/siteBuilder.ts` | Admin check uses `SELECT is_admin FROM users WHERE id = ?`. |
+| `src/routes/staffAssistant.ts` | Admin check uses `SELECT is_admin FROM users WHERE id = ?`. |
+| `src/routes/myAssistant.ts` | Admin check uses `SELECT is_admin FROM users WHERE id = ?`. |
+| `src/routes/cases.ts` | 3 admin checks converted from role-slug JOINs to `users.is_admin` column reads. |
+| `src/routes/bugs.ts` | `getAdminUsers` uses `WHERE is_admin = 1` instead of role-slug subquery. |
+| `src/routes/systemPermissions.ts` | Wildcard permission check uses `SELECT is_admin, is_staff FROM users WHERE id = ?`. |
+| `src/routes/adminClientManager.ts` | Client list filtering uses `WHERE is_admin = 0 AND is_staff = 0` instead of role-slug subquery. |
+| `src/routes/twoFactor.ts` | `isStaffOrAdmin` check uses `SELECT is_admin, is_staff FROM users WHERE id = ?`. |
+| `src/services/healthMonitor.ts` | Admin notification recipients use `WHERE is_admin = 1` instead of role-slug JOIN. |
+| `src/services/mobileActionExecutor.ts` | Client/staff detection uses `users.is_admin` and `users.is_staff` columns. |
+
+### Updated Frontend Files
+
+| File | Change |
+|------|--------|
+| `src/components/Layout/Layout.tsx` | Added `adminOnly` flag to `NavItem` and `NavSection` interfaces. Marked admin-only items: Webmail, AI & Enterprise section (whole section + items), All Cases, Credentials, Client Monitor, Error Reports. `SidebarSection` filters items using `isStrictAdmin()` from `usePermissions` hook. |
+| `src/components/AdminRoute.tsx` | Changed from `isAdmin()` to `isStrictAdmin()` — now checks only `user.is_admin` (excludes staff). |
+| `src/services/api.ts` | Added 403 response interceptor: shows `react-hot-toast` with backend error message (e.g., "Administrator access required..."). Toast: `{ duration: 5000, id: 'permission-denied' }`. |
+
+### Frontend Permission Functions (unchanged, for reference)
+
+| Function | Hook | Logic |
+|----------|------|-------|
+| `isAdmin()` | `usePermissions` | `!!user?.is_admin \|\| !!user?.is_staff` — used for general permission bypass (admins+staff have all permissions) |
+| `isStrictAdmin()` | `usePermissions` | `!!user?.is_admin` — used for admin-only UI gating (excludes staff) |
+| `isStaff()` | `usePermissions` | `!!user?.is_staff` — used for staff-specific checks |
+
+### Admin-Only Navigation Items (hidden from non-admins)
+
+| Nav Item / Section | `adminOnly` |
+|-------------------|-------------|
+| Webmail | ✅ |
+| AI & Enterprise (entire section) | ✅ |
+| All Cases | ✅ |
+| Credentials | ✅ |
+| Client Monitor | ✅ |
+| Error Reports | ✅ |
+
+### Breaking Changes
+
+| Change | Impact |
+|--------|--------|
+| `requireAdmin` middleware no longer queries `user_roles`/`roles` | Any code that relied on the admin role being present in `user_roles` for admin detection must now ensure `users.is_admin = 1` is set instead |
+| `buildFrontendUser()` reads `is_admin`/`is_staff` from users table columns | The `is_admin`/`is_staff` fields in the frontend user object are now sourced directly from DB columns, not derived from role slugs |
+| `user_roles` table is now **supplementary** (not authoritative for admin/staff detection) | `user_roles` is still used for role display name and granular permission resolution, but admin/staff gating no longer depends on it |
+| Staff users can no longer see admin-only nav items | Staff users previously saw admin nav items if `isAdmin()` was used for gating (which included staff). Now uses `isStrictAdmin()`. |
+
+### Verification Status
+
+- ✅ Backend compiles clean (`npx tsc --noEmit` — 0 errors)
+- ✅ Frontend compiles clean (no TypeScript errors in modified files)
+- ✅ Admin user sees all navigation items
+- ✅ Staff user sees only non-admin navigation items
+- ✅ Client user sees only portal navigation
+- ✅ 403 errors show toast notification with backend message
+- ✅ `requireAdmin` middleware correctly blocks non-admin users
+- ✅ `requireDeveloper` middleware allows both admin and staff users
+- ✅ Masquerade exit checks `users.is_admin` column directly
 
 ---
 
@@ -404,10 +928,10 @@ Removed all dependency on `team_members` table for role detection. The `user_rol
 
 ### 2.6 🟡 WARNING — Collation Mismatch in user_roles Query
 
-- **Status:** OPEN
+- **Status:** OPEN (reduced impact since v1.6.0)
 - **Module File:** `backend/src/routes/auth.ts` — `buildFrontendUser()`
 - **Description:** Query uses explicit `COLLATE utf8mb4_unicode_ci` on both sides of the WHERE clause, indicating a collation mismatch between `users.id` and `user_roles.user_id`.
-- **Impact:** Prevents index usage on the join — forces full scan. Performance degrades with more users.
+- **Impact:** Prevents index usage on the join — forces full scan. Performance degrades with more users. **Note:** Since v1.6.0, `buildFrontendUser()` no longer uses user_roles to determine `is_admin`/`is_staff` (reads from `users` table columns directly), but the collation hack remains in the role name/slug lookup query.
 - **Recommended Fix:** `ALTER TABLE user_roles MODIFY user_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
 - **Effort:** LOW
 

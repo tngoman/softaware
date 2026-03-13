@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { db } from '../db/mysql.js';
+import { db, toMySQLDate } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 import type { Contact } from '../db/businessTypes.js';
@@ -9,23 +9,23 @@ export const contactsRouter = Router();
 
 // Validation schemas
 const createContactSchema = z.object({
-  company_name: z.string().optional(),
-  contact_name: z.string().optional(),
-  contact_person: z.string().optional(),
-  email: z.string().email().optional().or(z.literal('')),
-  contact_email: z.string().email().optional().or(z.literal('')),
-  phone: z.string().optional(),
-  contact_phone: z.string().optional(),
-  fax: z.string().optional(),
-  contact_alt_phone: z.string().optional(),
-  website: z.string().optional(),
-  location: z.string().optional(),
-  contact_address: z.string().optional(),
-  contact_code: z.string().optional(),
-  contact_vat: z.string().optional(),
-  contact_notes: z.string().optional(),
-  remarks: z.string().optional(),
-  contact_type: z.number().optional(),
+  company_name: z.string().nullish(),
+  contact_name: z.string().nullish(),
+  contact_person: z.string().nullish(),
+  email: z.string().email().nullish().or(z.literal('')),
+  contact_email: z.string().email().nullish().or(z.literal('')),
+  phone: z.string().nullish(),
+  contact_phone: z.string().nullish(),
+  fax: z.string().nullish(),
+  contact_alt_phone: z.string().nullish(),
+  website: z.string().nullish(),
+  location: z.string().nullish(),
+  contact_address: z.string().nullish(),
+  contact_code: z.string().nullish(),
+  contact_vat: z.string().nullish(),
+  contact_notes: z.string().nullish(),
+  remarks: z.string().nullish(),
+  contact_type: z.number().nullish(),
   active: z.number().default(1),
 });
 
@@ -33,19 +33,19 @@ const updateContactSchema = createContactSchema.partial();
 
 // ── SQL fragment that aliases contact columns to match the frontend Contact interface ──
 const CONTACT_SELECT = `
-  id            AS contact_id,
-  company_name  AS contact_name,
-  contact_person,
-  location      AS contact_address,
-  email         AS contact_email,
-  phone         AS contact_phone,
-  fax           AS contact_alt_phone,
-  remarks       AS contact_notes,
-  vat_number    AS contact_vat,
-  website,
-  contact_code,
-  active,
-  COALESCE(contact_type, 1) AS contact_type
+  c.id            AS contact_id,
+  c.company_name  AS contact_name,
+  c.contact_person,
+  c.location      AS contact_address,
+  c.email         AS contact_email,
+  c.phone         AS contact_phone,
+  c.fax           AS contact_alt_phone,
+  c.remarks       AS contact_notes,
+  c.vat_number    AS contact_vat,
+  c.website,
+  c.contact_code,
+  c.active,
+  COALESCE(c.contact_type, 1) AS contact_type
 `;
 
 /**
@@ -58,13 +58,26 @@ contactsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, nex
     const offset = (page - 1) * limit;
     const search = (req.query.search as string) || '';
 
-    let query = `SELECT ${CONTACT_SELECT} FROM contacts WHERE active = 1`;
-    let countQuery = 'SELECT COUNT(*) as count FROM contacts WHERE active = 1';
+    let query = `SELECT ${CONTACT_SELECT},
+            (SELECT GROUP_CONCAT(u.id) FROM users u WHERE u.contact_id = c.id) AS linked_user_ids,
+            (SELECT GROUP_CONCAT(u.email) FROM users u WHERE u.contact_id = c.id) AS linked_user_emails
+         FROM contacts c WHERE c.active = 1`;
+    let countQuery = 'SELECT COUNT(*) as count FROM contacts c WHERE c.active = 1';
     const params: any[] = [];
     const countParams: any[] = [];
 
+    // Filter by contact type (customers vs suppliers)
+    const type = req.query.type as string;
+    if (type === 'customers') {
+      query += ' AND COALESCE(c.contact_type, 1) = 1';
+      countQuery += ' AND COALESCE(c.contact_type, 1) = 1';
+    } else if (type === 'suppliers') {
+      query += ' AND c.contact_type = 2';
+      countQuery += ' AND c.contact_type = 2';
+    }
+
     if (search) {
-      const searchClause = ' AND (company_name LIKE ? OR contact_person LIKE ? OR email LIKE ?)';
+      const searchClause = ' AND (c.company_name LIKE ? OR c.contact_person LIKE ? OR c.email LIKE ?)';
       const searchVal = `%${search}%`;
       query += searchClause;
       countQuery += searchClause;
@@ -72,7 +85,7 @@ contactsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, nex
       countParams.push(searchVal, searchVal, searchVal);
     }
 
-    query += ' ORDER BY company_name ASC LIMIT ? OFFSET ?';
+    query += ' ORDER BY c.company_name ASC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const contacts = await db.query<any>(query, params);
@@ -99,7 +112,10 @@ contactsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, 
   try {
     const { id } = req.params;
     const contact = await db.queryOne<any>(
-      `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
+      `SELECT ${CONTACT_SELECT},
+            (SELECT GROUP_CONCAT(u.id) FROM users u WHERE u.contact_id = c.id) AS linked_user_ids,
+            (SELECT GROUP_CONCAT(u.email) FROM users u WHERE u.contact_id = c.id) AS linked_user_emails
+       FROM contacts c WHERE c.id = ?`,
       [id]
     );
     if (!contact) {
@@ -136,11 +152,11 @@ contactsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
       contact_type: data.contact_type || 1,
       remarks: data.remarks || data.contact_notes || null,
       active: data.active ?? 1,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: toMySQLDate(new Date()),
+      updated_at: toMySQLDate(new Date()),
     });
     const contact = await db.queryOne<any>(
-      `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
+      `SELECT ${CONTACT_SELECT} FROM contacts c WHERE c.id = ?`,
       [insertId]
     );
     res.status(201).json({ success: true, data: contact });
@@ -164,7 +180,7 @@ contactsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
     }
 
     // Map frontend fields to DB fields
-    const updateData: any = { updated_at: new Date().toISOString() };
+    const updateData: any = { updated_at: toMySQLDate(new Date()) };
     if (data.company_name || data.contact_name) updateData.company_name = data.company_name || data.contact_name;
     if (data.contact_person !== undefined) updateData.contact_person = data.contact_person;
     if (data.email || data.contact_email) updateData.email = data.email || data.contact_email;
@@ -184,7 +200,7 @@ contactsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
     );
 
     const updated = await db.queryOne<any>(
-      `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
+      `SELECT ${CONTACT_SELECT} FROM contacts c WHERE c.id = ?`,
       [id]
     );
     res.json({ success: true, data: updated });
@@ -209,7 +225,7 @@ contactsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Respons
     // Soft delete
     await db.execute(
       'UPDATE contacts SET active = 0, updated_at = ? WHERE id = ?',
-      [new Date().toISOString(), id]
+      [toMySQLDate(new Date()), id]
     );
 
     res.json({ success: true, message: 'Contact deleted' });
@@ -288,7 +304,7 @@ contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, 
     const { id } = req.params;
 
     const contact = await db.queryOne<any>(
-      `SELECT ${CONTACT_SELECT} FROM contacts WHERE id = ?`,
+      `SELECT ${CONTACT_SELECT} FROM contacts c WHERE c.id = ?`,
       [id]
     );
     if (!contact) {

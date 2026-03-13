@@ -27,6 +27,7 @@ import {
   RocketLaunchIcon,
   InformationCircleIcon,
   WrenchScrewdriverIcon,
+  BugAntIcon,
   CommandLineIcon,
   CogIcon,
   PaperAirplaneIcon,
@@ -39,6 +40,8 @@ import {
   SpeakerXMarkIcon,
   StopCircleIcon,
   PlayIcon,
+  PaperClipIcon,
+  PhotoIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { AuthModel } from '../../models';
@@ -48,6 +51,7 @@ import type { MailboxAccount, CreateMailboxInput, ConnectionTestResult } from '.
 import Swal from 'sweetalert2';
 import { notify } from '../../utils/notify';
 import { getViewAsRole, setViewAsRole, getEffectiveRole, getRoleLabel } from '../../utils/workflowPermissions';
+import RichTextEditor from '../../components/RichTextEditor';
 
 interface ProfileFormData {
   username: string;
@@ -86,8 +90,8 @@ const STAFF_TOOL_CATEGORIES = [
     icon: ClipboardDocumentListIcon,
     color: 'bg-blue-500',
     lightColor: 'bg-blue-50 text-blue-700 ring-blue-200',
-    tools: ['List Tasks', 'Create Task', 'Update Task', 'Add Comments'],
-    description: 'Create, track, and manage work tasks',
+    tools: ['List Tasks', 'Get Task', 'Create Task', 'Update Task', 'Delete Task', 'Comments', 'Bookmark', 'Priority', 'Tags', 'Colors', 'Start/Complete/Approve', 'Stats', 'Pending Approvals', 'Sync', 'Invoice Staging'],
+    description: 'Full task lifecycle — CRUD, workflow, local enhancements, sync & invoicing',
   },
   {
     name: 'Client Admin',
@@ -138,6 +142,14 @@ const STAFF_TOOL_CATEGORIES = [
     description: 'Internal team communication',
   },
   {
+    name: 'Bug Tracking',
+    icon: BugAntIcon,
+    color: 'bg-red-500',
+    lightColor: 'bg-red-50 text-red-700 ring-red-200',
+    tools: ['List Bugs', 'Bug Details', 'Create Bug', 'Update Bug', 'Add Comment', 'Workflow Phase', 'Bug Stats'],
+    description: 'Report, triage, and track bugs through Intake → QA → Development',
+  },
+  {
     name: 'Lead Management',
     icon: BoltIcon,
     color: 'bg-orange-500',
@@ -181,6 +193,11 @@ const StaffAssistantTab: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Image attachment state
+  const [attachedImage, setAttachedImage] = useState<string | null>(null); // base64 data-URI
+  const [attachedImageName, setAttachedImageName] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Voice state
   const [isListening, setIsListening] = useState(false);
@@ -410,28 +427,68 @@ const StaffAssistantTab: React.FC = () => {
     }
   };
 
+  // ── Image attachment handlers ──────────────────────────────────────
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate type
+    if (!file.type.startsWith('image/')) {
+      notify.error('Only image files are supported (PNG, JPG, GIF, WebP).');
+      return;
+    }
+    // Validate size (~10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      notify.error('Image too large. Maximum size is 10MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setAttachedImage(reader.result as string);
+      setAttachedImageName(file.name);
+    };
+    reader.readAsDataURL(file);
+
+    // Reset the input so the same file can be re-selected
+    e.target.value = '';
+  };
+
+  const removeAttachedImage = () => {
+    setAttachedImage(null);
+    setAttachedImageName('');
+  };
+
   const sendChatMessage = async (overrideText?: string) => {
     const text = overrideText || chatInput.trim();
-    if (!text || chatLoading || !assistant) return;
+    if ((!text && !attachedImage) || chatLoading || !assistant) return;
 
     // Stop any voice activity
     stopListening();
     stopSpeaking();
 
-    const userMsg = { id: `u-${Date.now()}`, role: 'user' as const, content: text };
+    // Capture image before clearing
+    const imageToSend = attachedImage;
+    const displayContent = imageToSend
+      ? (text ? `📎 ${attachedImageName}\n${text}` : `📎 ${attachedImageName}`)
+      : text;
+
+    const userMsg = { id: `u-${Date.now()}`, role: 'user' as const, content: displayContent };
     const aId = `a-${Date.now()}`;
     const assistantMsg = { id: aId, role: 'assistant' as const, content: '' };
 
     setChatMessages(prev => [...prev, userMsg, assistantMsg]);
     if (!overrideText) setChatInput('');
+    removeAttachedImage();
     setChatLoading(true);
 
     try {
       const isNew = !conversationId;
       const result = await MobileModel.sendIntent({
-        text,
+        text: text || 'What is in this image?',
         conversationId: conversationId || undefined,
         assistantId: assistant.id,
+        ...(imageToSend ? { image: imageToSend } : {}),
       });
       setConversationId(result.conversationId);
       setChatMessages(prev =>
@@ -684,7 +741,7 @@ const StaffAssistantTab: React.FC = () => {
                 <div className="text-center py-12">
                   <SparklesIcon className="h-12 w-12 text-gray-200 mx-auto mb-3" />
                   <p className="text-gray-400 text-sm">Send a message to start chatting with your assistant</p>
-                  <p className="text-gray-300 text-xs mt-1">Your assistant has access to 41 tools across 10 categories</p>
+                  <p className="text-gray-300 text-xs mt-1">Your assistant has access to 67 tools across 11 categories</p>
                 </div>
               )}
 
@@ -706,7 +763,19 @@ const StaffAssistantTab: React.FC = () => {
                           : 'bg-gray-100 text-gray-800 rounded-bl-md'
                       }`}
                     >
-                      {msg.content || (
+                      {msg.content ? (
+                        msg.role === 'user' && msg.content.startsWith('📎') ? (
+                          <div className="flex flex-col gap-1.5">
+                            <div className="flex items-center gap-1.5 text-xs opacity-80">
+                              <PhotoIcon className="h-3.5 w-3.5" />
+                              <span>{msg.content.split('\n')[0].replace('📎 ', '')}</span>
+                            </div>
+                            {msg.content.includes('\n') && (
+                              <span>{msg.content.split('\n').slice(1).join('\n')}</span>
+                            )}
+                          </div>
+                        ) : msg.content
+                      ) : (
                         <span className="inline-flex gap-1">
                           <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                           <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -748,6 +817,37 @@ const StaffAssistantTab: React.FC = () => {
 
             {/* Input */}
             <div className="border-t border-slate-100 p-4">
+              {/* Hidden file input for image attachment */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+
+              {/* Image preview */}
+              {attachedImage && (
+                <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-blue-50 rounded-xl border border-blue-100">
+                  <img
+                    src={attachedImage}
+                    alt={attachedImageName}
+                    className="h-12 w-12 object-cover rounded-lg border border-blue-200"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-blue-700 truncate">{attachedImageName}</p>
+                    <p className="text-[10px] text-blue-500">Image attached — ready to send</p>
+                  </div>
+                  <button
+                    onClick={removeAttachedImage}
+                    className="p-1 text-blue-400 hover:text-red-500 transition-colors"
+                    title="Remove image"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+
               {/* Listening indicator */}
               {isListening && (
                 <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-red-50 rounded-xl border border-red-100">
@@ -788,12 +888,25 @@ const StaffAssistantTab: React.FC = () => {
                 >
                   <MicrophoneIcon className="h-5 w-5" />
                 </button>
+                {/* Attach image button */}
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={chatLoading}
+                  title="Attach an image"
+                  className={`p-2.5 rounded-xl transition-all flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                    attachedImage
+                      ? 'bg-blue-500 text-white shadow-md shadow-blue-500/20'
+                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700'
+                  }`}
+                >
+                  <PaperClipIcon className="h-5 w-5" />
+                </button>
                 <textarea
                   ref={chatInputRef}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={handleChatKeyDown}
-                  placeholder={isListening ? 'Listening…' : 'Type or tap 🎤 to speak…'}
+                  placeholder={isListening ? 'Listening…' : attachedImage ? 'Add a message about this image…' : 'Type, 🎤 speak, or 📎 attach…'}
                   rows={1}
                   className={`flex-1 resize-none px-4 py-2.5 bg-white border rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:border-picton-blue transition-all ${
                     isListening ? 'border-red-300 ring-1 ring-red-200' : 'border-gray-300'
@@ -803,7 +916,7 @@ const StaffAssistantTab: React.FC = () => {
                 {/* Send button */}
                 <button
                   onClick={() => sendChatMessage()}
-                  disabled={!chatInput.trim() || chatLoading}
+                  disabled={(!chatInput.trim() && !attachedImage) || chatLoading}
                   className="p-2.5 bg-gradient-to-r from-picton-blue to-indigo-500 text-white rounded-xl hover:from-picton-blue/90 hover:to-indigo-500/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md shadow-picton-blue/20"
                 >
                   <PaperAirplaneIcon className="h-5 w-5" />
@@ -922,7 +1035,7 @@ const StaffAssistantTab: React.FC = () => {
             <h3 className="text-2xl font-bold text-white mb-3">Create Your Staff AI Assistant</h3>
             <p className="text-indigo-200 mb-6 leading-relaxed">
               Set up a personal AI assistant with a custom personality, voice style, and greeting.
-              Access 41 tools across 10 categories — from task management to finance — all via voice on mobile.
+              Access 67 tools across 11 categories — from task management to bug tracking — all via voice on mobile.
             </p>
             <button
               onClick={() => setIsEditing(true)}
@@ -964,7 +1077,7 @@ const StaffAssistantTab: React.FC = () => {
           <h4 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <CommandLineIcon className="h-4 w-4 text-picton-blue" />
             Available Capabilities
-            <span className="ml-auto text-xs font-normal text-gray-400">41 tools • 10 categories</span>
+            <span className="ml-auto text-xs font-normal text-gray-400">67 tools • 11 categories</span>
           </h4>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {STAFF_TOOL_CATEGORIES.map(cat => (
@@ -1470,15 +1583,18 @@ const StaffAssistantTab: React.FC = () => {
 // ============================================================================
 
 const MailboxesTab: React.FC = () => {
+  const { user } = useAppStore();
   const [mailboxes, setMailboxes] = useState<MailboxAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [testing, setTesting] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const [signatureMode, setSignatureMode] = useState<'visual' | 'code'>('visual');
   const [formData, setFormData] = useState<CreateMailboxInput>({
     display_name: '', email_address: '',
     password: '',
+    signature: '',
     is_default: false,
   });
 
@@ -1500,6 +1616,7 @@ const MailboxesTab: React.FC = () => {
     setFormData({
       display_name: '', email_address: '',
       password: '',
+      signature: '',
       is_default: false,
     });
     setEditingId(null);
@@ -1511,6 +1628,7 @@ const MailboxesTab: React.FC = () => {
     setFormData({
       display_name: m.display_name, email_address: m.email_address,
       password: '',
+      signature: m.signature || '',
       is_default: m.is_default,
     });
     setEditingId(m.id);
@@ -1525,7 +1643,7 @@ const MailboxesTab: React.FC = () => {
     }
     try {
       if (editingId) {
-        const updates: any = { display_name: formData.display_name, email_address: formData.email_address, is_default: formData.is_default };
+        const updates: any = { display_name: formData.display_name, email_address: formData.email_address, is_default: !!formData.is_default, signature: formData.signature ?? '' };
         if (formData.password) updates.password = formData.password;
         await WebmailAccountModel.update(editingId, updates);
       } else {
@@ -1609,12 +1727,13 @@ const MailboxesTab: React.FC = () => {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-gray-900 truncate">{m.display_name}</span>
-                  {m.is_default && <span className="text-xs bg-picton-blue/10 text-picton-blue px-2 py-0.5 rounded-full font-medium">Default</span>}
+                  {!!m.is_default && <span className="text-xs bg-picton-blue/10 text-picton-blue px-2 py-0.5 rounded-full font-medium">Default</span>}
                   {!m.is_active && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Disabled</span>}
                 </div>
                 <p className="text-sm text-gray-500 truncate">{m.email_address}</p>
                 {m.connection_error && <p className="text-xs text-red-500 mt-0.5 truncate">{m.connection_error}</p>}
                 {m.last_connected_at && !m.connection_error && <p className="text-xs text-green-600 mt-0.5">Last connected: {new Date(m.last_connected_at).toLocaleDateString()}</p>}
+                {m.signature && <p className="text-xs text-gray-400 mt-0.5">✏️ Signature configured</p>}
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
                 {!m.is_default && (
@@ -1677,6 +1796,63 @@ const MailboxesTab: React.FC = () => {
                 className="h-4 w-4 rounded border-gray-300 text-picton-blue focus:ring-picton-blue" />
               <span className="text-sm text-gray-700">Set as default sending account</span>
             </label>
+          </div>
+
+          {/* Email Signature */}
+          <div className="border-t pt-4">
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Email Signature
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const name = [user?.first_name, user?.last_name].filter(Boolean).join(' ') || 'Name';
+                    const email = formData.email_address || user?.email || 'your_email@softaware.co.za';
+                    const phone = (user as any)?.phone || '000000';
+                    const tpl = `<table border="0">\n<tbody>\n<tr>\n<td style="padding-right: 10px;"><img src="https://softaware.co.za/assets/images/logo_small.png" /></td>\n<td style="border-left: 1px solid #666; padding-left: 10px;"><strong>${name}</strong><br /><strong>E:</strong> ${email}<br /><strong>P:</strong> ${phone}</td>\n</tr>\n</tbody>\n</table>`;
+                    handleFieldChange('signature', tpl);
+                    setSignatureMode('code');
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-picton-blue border border-picton-blue/30 rounded hover:bg-picton-blue/5 transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" /></svg>
+                  Insert Template
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSignatureMode(signatureMode === 'visual' ? 'code' : 'visual')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-colors ${signatureMode === 'code' ? 'text-white bg-gray-600' : 'text-gray-600 border border-gray-300 hover:bg-gray-50'}`}
+                >
+                  {signatureMode === 'code' ? '<>' : '</>'} {signatureMode === 'code' ? 'HTML Source' : 'View Source'}
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mb-2">This HTML signature will be appended automatically to all outgoing emails from this account.</p>
+            {signatureMode === 'code' ? (
+              <div className="space-y-2">
+                <textarea
+                  value={formData.signature || ''}
+                  onChange={(e) => handleFieldChange('signature', e.target.value)}
+                  placeholder="Paste or edit raw HTML here…"
+                  className="w-full h-40 px-3 py-2 text-sm font-mono bg-gray-50 border border-gray-300 rounded-lg focus:ring-2 focus:ring-picton-blue focus:border-transparent resize-y"
+                  spellCheck={false}
+                />
+                {formData.signature && (
+                  <div className="border border-gray-200 rounded-lg p-3 bg-white">
+                    <p className="text-xs text-gray-400 mb-1.5">Preview:</p>
+                    <div dangerouslySetInnerHTML={{ __html: formData.signature }} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <RichTextEditor
+                value={formData.signature || ''}
+                onChange={(val) => handleFieldChange('signature', val)}
+                placeholder="Compose your email signature…"
+              />
+            )}
           </div>
 
           {/* Actions */}
@@ -1744,11 +1920,23 @@ const Profile: React.FC = () => {
       const response = await AuthModel.updateProfile(data);
       
       if (response.success) {
-        // Update local user state
-        setUser({
-          ...user!,
-          ...data
-        });
+        // Re-fetch the complete user from the server so is_admin, role,
+        // permissions etc. are all present, then persist to localStorage
+        // so Zustand and localStorage stay in sync (prevents logout).
+        try {
+          const token = AuthModel.getToken();
+          const fresh = await AuthModel.me();
+          if (token && fresh.user) {
+            AuthModel.storeAuth(token, fresh.user);
+            setUser(fresh.user);
+          }
+        } catch {
+          // Fallback: merge form data into existing user in both stores
+          const merged = { ...user!, ...data };
+          const token = AuthModel.getToken();
+          if (token) AuthModel.storeAuth(token, merged as any);
+          setUser(merged as any);
+        }
 
         setSaved(true);
         setTimeout(() => setSaved(false), 3000);

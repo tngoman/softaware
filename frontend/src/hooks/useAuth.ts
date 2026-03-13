@@ -14,27 +14,31 @@ export const useAuth = () => {
         setIsAuthenticated(false);
         return;
       }
+
+      // Token exists in localStorage — mark authenticated immediately
+      // so ProtectedRoute doesn't flash a spinner or redirect.
+      setIsAuthenticated(true);
       
       try {
-        console.log('Fetching user from API...');
         const data = await AuthModel.me();
-        console.log('User data from API:', data);
-        
-        // data is { user: User } - permissions are now included in the user object
         const user = data.user;
-        console.log('User permissions from API:', user.permissions);
         
-        // Update localStorage with fresh data
+        // Refresh localStorage + store with the latest user data
         AuthModel.storeAuth(token, user);
-        
-        // Update store
         setUser(user);
-        setIsAuthenticated(true);
       } catch (error) {
-        console.error('Token validation failed:', error);
-        AuthModel.clearAuth();
-        setUser(null);
-        setIsAuthenticated(false);
+        // If the 401 interceptor already called forceLogout(), the token
+        // will have been removed from localStorage and a hard redirect to
+        // /login is already in progress — propagate that to Zustand.
+        //
+        // For any OTHER failure (500, network timeout, transient error),
+        // the token is still in localStorage and perfectly usable, so
+        // keep the cached session instead of logging the user out.
+        const tokenStillExists = !!AuthModel.getToken();
+        if (!tokenStillExists) {
+          setUser(null);
+          setIsAuthenticated(false);
+        }
       }
     };
 

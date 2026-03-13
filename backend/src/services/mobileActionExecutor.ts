@@ -10,8 +10,11 @@
  *   3. Execute the database operation / proxy call
  *   4. Return a human-readable result string
  *
- * Task tools proxy to external software APIs using the staff member's
- * stored software token from staff_software_tokens.
+ * Task tools (v2.0):
+ *   - READ:  Direct queries to local MySQL `local_tasks` table
+ *   - WRITE: Proxy to external APIs via `task_sources` (source-level API key auth)
+ *   - LOCAL: Bookmark, priority, tags, color labels managed locally (no external call)
+ *   - No per-user software tokens required — API keys are resolved from task_sources table
  */
 
 import { db, toMySQLDate } from '../db/mysql.js';
@@ -23,6 +26,8 @@ import {
 import { env } from '../config/env.js';
 import { sendEmail } from './emailService.js';
 import { siteBuilderService } from './siteBuilderService.js';
+import { syncAllSources } from './taskSyncService.js';
+import { createNotificationWithPush } from './firebaseService.js';
 import { randomUUID } from 'crypto';
 import type { ToolCall, ToolResult } from './actionRouter.js';
 import type { MobileRole } from './mobileTools.js';
@@ -110,9 +115,12 @@ export async function executeMobileAction(
       case 'get_site_deployments':
         return await execGetSiteDeployments(args, ctx);
 
-      // ----- Staff task tools -----
+      // ----- Staff task tools (v2.0 — comprehensive) -----
       case 'list_tasks':
         return requireStaff(ctx, () => execListTasks(args, ctx));
+
+      case 'get_task':
+        return requireStaff(ctx, () => execGetTask(args));
 
       case 'create_task':
         return requireStaff(ctx, () => execCreateTask(args, ctx));
@@ -120,8 +128,59 @@ export async function executeMobileAction(
       case 'update_task':
         return requireStaff(ctx, () => execUpdateTask(args, ctx));
 
+      case 'delete_task':
+        return requireStaff(ctx, () => execDeleteTask(args));
+
+      case 'get_task_comments':
+        return requireStaff(ctx, () => execGetTaskComments(args));
+
       case 'add_task_comment':
         return requireStaff(ctx, () => execAddTaskComment(args, ctx));
+
+      case 'bookmark_task':
+        return requireStaff(ctx, () => execBookmarkTask(args));
+
+      case 'set_task_priority':
+        return requireStaff(ctx, () => execSetTaskPriority(args));
+
+      case 'set_task_color':
+        return requireStaff(ctx, () => execSetTaskColor(args));
+
+      case 'set_task_tags':
+        return requireStaff(ctx, () => execSetTaskTags(args));
+
+      case 'start_task':
+        return requireStaff(ctx, () => execStartTask(args));
+
+      case 'complete_task':
+        return requireStaff(ctx, () => execCompleteTask(args));
+
+      case 'approve_task':
+        return requireStaff(ctx, () => execApproveTask(args));
+
+      case 'get_task_stats':
+        return requireStaff(ctx, () => execGetTaskStats());
+
+      case 'get_pending_approvals':
+        return requireStaff(ctx, () => execGetPendingApprovals());
+
+      case 'get_task_tags':
+        return requireStaff(ctx, () => execGetTaskTags());
+
+      case 'sync_tasks':
+        return requireStaff(ctx, () => execSyncTasks());
+
+      case 'get_sync_status':
+        return requireStaff(ctx, () => execGetSyncStatus());
+
+      case 'stage_tasks_for_invoice':
+        return requireStaff(ctx, () => execStageTasksForInvoice(args));
+
+      case 'get_staged_invoices':
+        return requireStaff(ctx, () => execGetStagedInvoices());
+
+      case 'process_staged_invoices':
+        return requireStaff(ctx, () => execProcessStagedInvoices());
 
       // ----- Staff admin tools -----
       case 'search_clients':
@@ -188,6 +247,28 @@ export async function executeMobileAction(
 
       case 'send_chat_message':
         return requireStaff(ctx, () => execSendChatMessage(args, ctx));
+
+      // ----- Staff bug tracking tools -----
+      case 'list_bugs':
+        return requireStaff(ctx, () => execListBugs(args));
+
+      case 'get_bug_details':
+        return requireStaff(ctx, () => execGetBugDetails(args));
+
+      case 'create_bug':
+        return requireStaff(ctx, () => execCreateBug(args, ctx));
+
+      case 'update_bug':
+        return requireStaff(ctx, () => execUpdateBug(args, ctx));
+
+      case 'add_bug_comment':
+        return requireStaff(ctx, () => execAddBugComment(args, ctx));
+
+      case 'update_bug_workflow':
+        return requireStaff(ctx, () => execUpdateBugWorkflow(args, ctx));
+
+      case 'get_bug_stats':
+        return requireStaff(ctx, () => execGetBugStats());
 
       default:
         return { success: false, message: `Unknown tool: ${name}` };
@@ -438,41 +519,59 @@ async function execRetryFailedIngestion(
 // Task Proxy Helpers
 // ============================================================================
 
-interface SoftwareTokenRow {
-  api_url: string;
-  token: string;
-  software_name: string | null;
+// ============================================================================
+// Task Source Resolution (v2.0 — source-level API key auth)
+// ============================================================================
+
+interface TaskSourceRow {
+  id: number;
+  base_url: string;
+  api_key: string;
+  software_id: number | null;
+  name: string;
 }
 
 /**
- * Get the first available software token for a staff user.
- * Tasks live on the external software API, so we need the stored token.
+ * Resolve the first available task source (with API key) for external proxy calls.
+ * Optionally filter by software_id. Falls back to the first enabled source.
  */
-async function getStaffSoftwareToken(userId: string): Promise<SoftwareTokenRow | null> {
-  return db.queryOne<SoftwareTokenRow>(
-    `SELECT api_url, token, software_name
-     FROM staff_software_tokens
-     WHERE user_id = ?
-     ORDER BY updated_at DESC LIMIT 1`,
-    [userId],
+async function resolveTaskSourceForTools(softwareId?: number | null): Promise<TaskSourceRow | null> {
+  if (softwareId) {
+    const source = await db.queryOne<TaskSourceRow>(
+      `SELECT id, base_url, api_key, software_id, name
+       FROM task_sources
+       WHERE software_id = ? AND sync_enabled = 1 AND api_key IS NOT NULL AND api_key != ''
+       ORDER BY id ASC LIMIT 1`,
+      [softwareId],
+    );
+    if (source) return source;
+  }
+
+  // Fall back to first enabled source with an API key
+  return db.queryOne<TaskSourceRow>(
+    `SELECT id, base_url, api_key, software_id, name
+     FROM task_sources
+     WHERE sync_enabled = 1 AND api_key IS NOT NULL AND api_key != ''
+     ORDER BY id ASC LIMIT 1`,
   );
 }
 
 /**
- * Proxy a request to the external software API (same pattern as softawareTasks route).
+ * Proxy a request to the external tasks-api using source-level API key auth.
+ * Uses X-API-Key header (v2.0 pattern, not Bearer token).
  */
-async function taskProxy(
-  apiUrl: string,
+async function taskProxyV2(
+  baseUrl: string,
   path: string,
   method: string,
-  softwareToken: string,
+  apiKey: string,
   body?: any,
 ): Promise<{ status: number; data: any }> {
-  const url = `${apiUrl.replace(/\/+$/, '')}${path}`;
+  const url = `${baseUrl.replace(/\/+$/, '')}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
-    'Authorization': `Bearer ${softwareToken}`,
+    'X-API-Key': apiKey,
   };
 
   const opts: RequestInit = { method, headers };
@@ -486,78 +585,179 @@ async function taskProxy(
   return { status: resp.status, data };
 }
 
+const NO_SOURCE_MSG = 'No task source is configured yet. Ask an admin to set up a task source in the Tasks settings (Dashboard → Tasks → Sources).';
+
+/**
+ * Resolve a local task by ID — tries local DB id first, then external_id
+ */
+async function resolveLocalTask(taskId: string): Promise<any | null> {
+  // Try by local id first
+  let task = await db.queryOne<any>(
+    `SELECT t.*, s.name as source_name, s.source_type
+     FROM local_tasks t
+     LEFT JOIN task_sources s ON s.id = t.source_id
+     WHERE t.id = ? AND t.task_deleted = 0`,
+    [taskId],
+  );
+  if (task) return task;
+
+  // Try by external_id
+  task = await db.queryOne<any>(
+    `SELECT t.*, s.name as source_name, s.source_type
+     FROM local_tasks t
+     LEFT JOIN task_sources s ON s.id = t.source_id
+     WHERE t.external_id = ? AND t.task_deleted = 0`,
+    [taskId],
+  );
+  return task;
+}
+
 // ============================================================================
-// Staff Task Tool Executors
+// Staff Task Tool Executors (v2.0 — Local DB reads, proxy writes)
 // ============================================================================
 
 async function execListTasks(
   args: Record<string, unknown>,
   ctx: MobileExecutionContext,
 ): Promise<ToolResult> {
-  const creds = await getStaffSoftwareToken(ctx.userId);
-  if (!creds) {
-    return {
-      success: false,
-      message: 'You don\'t have an external software token linked yet. To use task management, go to Dashboard → Software Connections and add your project management API credentials. Once linked, I\'ll be able to list, create, and manage your development tasks.',
-    };
-  }
+  const conditions: string[] = ['t.task_deleted = 0'];
+  const params: any[] = [];
 
-  const result = await taskProxy(
-    creds.api_url,
-    '/api/development/tasks/paginated?page=1&limit=50',
-    'GET',
-    creds.token,
-  );
-
-  if (result.status >= 400) {
-    return { success: false, message: `External API returned error ${result.status}. Your software token may have expired.` };
-  }
-
-  // Parse the response — external APIs typically return { data: [...] } or an array
-  let tasks: any[] = [];
-  if (Array.isArray(result.data)) tasks = result.data;
-  else if (result.data?.data && Array.isArray(result.data.data)) tasks = result.data.data;
-  else if (result.data?.tasks && Array.isArray(result.data.tasks)) tasks = result.data.tasks;
-
-  // Filter by status if requested
+  // Status filter
   const statusFilter = String(args.status || '').toLowerCase();
   if (statusFilter) {
     const normalized = statusFilter === 'in-progress' ? 'progress' : statusFilter;
-    tasks = tasks.filter((t: any) => t.status === normalized || t.task_status === normalized);
+    conditions.push('t.status = ?');
+    params.push(normalized);
   }
 
-  // Filter to assigned-to-me
+  // Type filter
+  if (args.type) {
+    conditions.push('t.type = ?');
+    params.push(String(args.type));
+  }
+
+  // Priority filter
+  if (args.priority) {
+    conditions.push('t.priority = ?');
+    params.push(String(args.priority));
+  }
+
+  // Workflow phase filter
+  if (args.workflow_phase) {
+    conditions.push('t.workflow_phase = ?');
+    params.push(String(args.workflow_phase));
+  }
+
+  // Bookmarked filter
+  if (String(args.bookmarked) === '1') {
+    conditions.push('t.is_bookmarked = 1');
+  }
+
+  // Tag filter
+  if (args.tag) {
+    conditions.push('JSON_CONTAINS(t.local_tags, JSON_QUOTE(?))');
+    params.push(String(args.tag));
+  }
+
+  // Search filter
+  if (args.search) {
+    const search = `%${String(args.search)}%`;
+    conditions.push('(t.title LIKE ? OR t.description LIKE ? OR t.external_id LIKE ?)');
+    params.push(search, search, search);
+  }
+
+  // Assigned-to-me filter
   if (String(args.assignedToMe) === 'true') {
-    // Try matching by user name from local DB
     const user = await db.queryOne<{ name: string | null; email: string }>(
       'SELECT name, email FROM users WHERE id = ?',
       [ctx.userId],
     );
     if (user) {
       const userName = (user.name || user.email || '').toLowerCase();
-      tasks = tasks.filter((t: any) => {
-        const assignee = (t.assigned_to_name || '').toLowerCase();
-        return assignee.includes(userName) || userName.includes(assignee);
-      });
+      conditions.push('LOWER(t.assigned_to_name) LIKE ?');
+      params.push(`%${userName}%`);
     }
   }
+
+  const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
+  const where = `WHERE ${conditions.join(' AND ')}`;
+
+  // Count total
+  const [countRow] = await db.query<any>(
+    `SELECT COUNT(*) as total FROM local_tasks t ${where}`,
+    params,
+  );
+  const total = countRow?.total || 0;
+
+  // Fetch tasks
+  const tasks = await db.query<any>(
+    `SELECT t.*, s.name as source_name
+     FROM local_tasks t
+     LEFT JOIN task_sources s ON s.id = t.source_id
+     ${where}
+     ORDER BY t.task_order ASC, t.external_id DESC
+     LIMIT ?`,
+    [...params, limit],
+  );
 
   if (tasks.length === 0) {
     return { success: true, message: 'No tasks found matching your criteria.' };
   }
 
-  // Format for display (limit to 15)
-  const display = tasks.slice(0, 15).map((t: any, i: number) => {
-    const status = t.status === 'progress' ? 'in-progress' : (t.status || t.task_status || 'unknown');
+  // Format for display
+  const display = tasks.map((t: any, i: number) => {
+    const status = t.status === 'progress' ? 'in-progress' : (t.status || 'unknown');
     const phase = t.workflow_phase ? ` [${t.workflow_phase}]` : '';
     const assignee = t.assigned_to_name ? ` → ${t.assigned_to_name}` : '';
-    return `${i + 1}. **${t.title || t.task_name}** — ${status}${phase}${assignee}\n   ID: ${t.id}`;
+    const priority = t.priority && t.priority !== 'normal' ? ` ⚡${t.priority}` : '';
+    const bookmark = t.is_bookmarked ? ' ⭐' : '';
+    const tags = t.local_tags ? (() => { try { const arr = typeof t.local_tags === 'string' ? JSON.parse(t.local_tags) : t.local_tags; return arr.length ? ` [${arr.join(', ')}]` : ''; } catch { return ''; } })() : '';
+    return `${i + 1}. **${t.title}** — ${status}${phase}${priority}${assignee}${bookmark}${tags}\n   ID: ${t.external_id || t.id}`;
   });
 
   return {
     success: true,
-    message: `Found ${tasks.length} task(s)${tasks.length > 15 ? ' (showing first 15)' : ''}:\n\n${display.join('\n\n')}`,
-    data: { tasks: tasks.slice(0, 15), total: tasks.length },
+    message: `Found ${total} task(s)${total > limit ? ` (showing first ${limit})` : ''}:\n\n${display.join('\n\n')}`,
+    data: { tasks: tasks.slice(0, limit), total },
+  };
+}
+
+async function execGetTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  const priority = task.priority || 'normal';
+  const bookmark = task.is_bookmarked ? '⭐ Bookmarked' : '';
+  const color = task.color_label ? `🎨 ${task.color_label}` : '';
+  const tags = task.local_tags ? (() => { try { const arr = typeof task.local_tags === 'string' ? JSON.parse(task.local_tags) : task.local_tags; return arr.length ? arr.join(', ') : ''; } catch { return ''; } })() : '';
+
+  const lines = [
+    `**${task.title}** (ID: ${task.external_id || task.id})`,
+    `**Status:** ${task.status === 'progress' ? 'in-progress' : task.status}`,
+    `**Type:** ${task.type || '—'}`,
+    `**Priority:** ${priority}`,
+    task.workflow_phase ? `**Phase:** ${task.workflow_phase}` : null,
+    task.assigned_to_name ? `**Assigned to:** ${task.assigned_to_name}` : null,
+    task.estimated_hours ? `**Estimated:** ${task.estimated_hours}h` : null,
+    task.hours ? `**Hours logged:** ${task.hours}h` : null,
+    task.start_date ? `**Start:** ${task.start_date}` : null,
+    task.end_date ? `**Due:** ${task.end_date}` : null,
+    bookmark || null,
+    color || null,
+    tags ? `**Tags:** ${tags}` : null,
+    task.source_name ? `**Source:** ${task.source_name}` : null,
+    task.description ? `\n**Description:**\n${String(task.description).replace(/<[^>]*>/g, '').slice(0, 500)}` : null,
+    task.notes ? `\n**Notes:**\n${String(task.notes).slice(0, 300)}` : null,
+  ].filter(Boolean);
+
+  return {
+    success: true,
+    message: lines.join('\n'),
+    data: { task },
   };
 }
 
@@ -565,10 +765,9 @@ async function execCreateTask(
   args: Record<string, unknown>,
   ctx: MobileExecutionContext,
 ): Promise<ToolResult> {
-  const creds = await getStaffSoftwareToken(ctx.userId);
-  if (!creds) {
-    return { success: false, message: 'You don\'t have an external software token linked yet. Go to Dashboard → Software Connections to add your project management API credentials first.' };
-  }
+  const softwareId = args.software_id ? Number(args.software_id) : null;
+  const source = await resolveTaskSourceForTools(softwareId);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
 
   const title = String(args.title || '').trim();
   if (!title) return { success: false, message: 'Task title is required.' };
@@ -598,17 +797,21 @@ async function execCreateTask(
   if (args.workflow_phase) taskPayload.workflow_phase = String(args.workflow_phase);
   if (args.assigned_to) taskPayload.assigned_to = parseInt(String(args.assigned_to), 10);
 
-  const result = await taskProxy(creds.api_url, '/api/development/tasks', 'POST', creds.token, taskPayload);
+  const result = await taskProxyV2(source.base_url, '/api/tasks-api', 'POST', source.api_key, taskPayload);
 
   if (result.status >= 400) {
     return { success: false, message: `Failed to create task: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
   }
 
-  const taskId = result.data?.id || result.data?.data?.id || result.data?.task_id || 'unknown';
+  const newTaskId = result.data?.id || result.data?.data?.id || result.data?.task_id || 'unknown';
+
+  // Fire-and-forget: trigger a sync so the new task appears in local DB
+  syncAllSources().catch(err => console.error('[MobileAction] Post-create sync failed:', err));
+
   return {
     success: true,
-    message: `✅ Task created successfully!\n\n**Title:** ${title}\n**Type:** ${taskType}\n**Task ID:** ${taskId}`,
-    data: { taskId, task: result.data },
+    message: `✅ Task created successfully!\n\n**Title:** ${title}\n**Type:** ${taskType}\n**Task ID:** ${newTaskId}\n**Source:** ${source.name}`,
+    data: { taskId: newTaskId, task: result.data },
   };
 }
 
@@ -616,50 +819,101 @@ async function execUpdateTask(
   args: Record<string, unknown>,
   ctx: MobileExecutionContext,
 ): Promise<ToolResult> {
-  const creds = await getStaffSoftwareToken(ctx.userId);
-  if (!creds) {
-    return { success: false, message: 'You don\'t have an external software token linked yet. Go to Dashboard → Software Connections to add your project management API credentials first.' };
-  }
-
   const taskId = String(args.taskId || '').trim();
   if (!taskId) return { success: false, message: 'Task ID is required.' };
 
-  const updatePayload: Record<string, any> = {
-    task_id: parseInt(taskId, 10),
-  };
+  // Resolve the local task to get its local id and source info
+  const localTask = await resolveLocalTask(taskId);
+  if (!localTask) return { success: false, message: `Task ${taskId} not found.` };
 
   const changes: string[] = [];
+  const localUpdates: string[] = [];
+  const localValues: any[] = [];
 
+  // Handle local-only fields (priority)
+  if (args.priority) {
+    localUpdates.push('priority = ?');
+    localValues.push(String(args.priority));
+    changes.push(`Priority → ${args.priority}`);
+  }
+
+  // Build external update payload for fields that sync
+  const externalChanges: Record<string, any> = {};
   if (args.status) {
     const status = String(args.status);
-    updatePayload.task_status = status === 'in-progress' ? 'progress' : status;
+    externalChanges.task_status = status === 'in-progress' ? 'progress' : status;
+    localUpdates.push('status = ?');
+    localValues.push(externalChanges.task_status);
     changes.push(`Status → ${status}`);
   }
   if (args.workflow_phase) {
-    updatePayload.workflow_phase = String(args.workflow_phase);
+    externalChanges.workflow_phase = String(args.workflow_phase);
+    localUpdates.push('workflow_phase = ?');
+    localValues.push(externalChanges.workflow_phase);
     changes.push(`Phase → ${args.workflow_phase}`);
   }
   if (args.assigned_to) {
-    updatePayload.assigned_to = parseInt(String(args.assigned_to), 10);
+    externalChanges.assigned_to = parseInt(String(args.assigned_to), 10);
     changes.push(`Assigned to → user ${args.assigned_to}`);
   }
   if (args.hours) {
-    updatePayload.task_hours = String(args.hours);
+    externalChanges.task_hours = String(args.hours);
+    localUpdates.push('hours = ?');
+    localValues.push(String(args.hours));
     changes.push(`Hours → ${args.hours}`);
   }
   if (args.description) {
-    updatePayload.task_description = String(args.description);
+    externalChanges.task_description = String(args.description);
+    localUpdates.push('description = ?');
+    localValues.push(String(args.description));
     changes.push('Description updated');
+  }
+  if (args.title) {
+    externalChanges.task_name = String(args.title);
+    localUpdates.push('title = ?');
+    localValues.push(String(args.title));
+    changes.push(`Title → ${args.title}`);
   }
 
   if (changes.length === 0) {
-    return { success: false, message: 'No changes specified. Provide at least one field to update (status, workflow_phase, assigned_to, hours, or description).' };
+    return { success: false, message: 'No changes specified. Provide at least one field to update.' };
   }
 
-  const result = await taskProxy(creds.api_url, '/api/development/tasks', 'PUT', creds.token, updatePayload);
+  // Update local DB immediately
+  if (localUpdates.length > 0) {
+    localUpdates.push('local_dirty = 1');
+    localValues.push(localTask.id);
+    await db.execute(
+      `UPDATE local_tasks SET ${localUpdates.join(', ')} WHERE id = ?`,
+      localValues,
+    );
+  }
 
-  if (result.status >= 400) {
-    return { success: false, message: `Failed to update task: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
+  // If there are external changes, proxy to external API
+  if (Object.keys(externalChanges).length > 0 && localTask.external_id) {
+    const source = await resolveTaskSourceForTools(localTask.software_id);
+    if (source) {
+      const updatePayload = { ...externalChanges, task_id: parseInt(localTask.external_id, 10) };
+      const result = await taskProxyV2(source.base_url, `/api/tasks-api/${localTask.external_id}`, 'PUT', source.api_key, updatePayload);
+
+      if (result.status >= 400) {
+        return {
+          success: true,
+          message: `⚠️ Task #${taskId} updated locally, but external sync failed: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}\n\nLocal changes:\n${changes.map(c => `  • ${c}`).join('\n')}\n\n_Changes will sync on next automatic sync._`,
+          data: { taskId, changes, syncFailed: true },
+        };
+      }
+
+      // Send notifications for assignment/phase changes (fire & forget)
+      if (externalChanges.assigned_to) {
+        createNotificationWithPush(String(externalChanges.assigned_to), {
+          title: 'Task Assigned to You',
+          message: `${(await db.queryOne<any>('SELECT name FROM users WHERE id = ?', [ctx.userId]))?.name || 'Someone'} assigned you: ${localTask.title}`,
+          type: 'info',
+          data: { type: 'task_assigned', task_id: String(localTask.external_id), link: '/tasks' },
+        }).catch(() => {});
+      }
+    }
   }
 
   return {
@@ -669,19 +923,80 @@ async function execUpdateTask(
   };
 }
 
+async function execDeleteTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  await db.execute(
+    'UPDATE local_tasks SET task_deleted = 1, local_dirty = 1, updated_at = NOW() WHERE id = ?',
+    [task.id],
+  );
+
+  return {
+    success: true,
+    message: `🗑️ Task "${task.title}" (ID: ${task.external_id || task.id}) has been deleted.`,
+    data: { taskId: task.id },
+  };
+}
+
+async function execGetTaskComments(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  // Resolve the external_id for the proxy call
+  const localTask = await resolveLocalTask(taskId);
+  const externalId = localTask?.external_id || taskId;
+
+  const source = await resolveTaskSourceForTools(localTask?.software_id);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  const result = await taskProxyV2(source.base_url, `/api/tasks-api/${externalId}/comments`, 'GET', source.api_key);
+
+  if (result.status >= 400) {
+    return { success: false, message: `Failed to fetch comments: HTTP ${result.status}` };
+  }
+
+  let comments: any[] = [];
+  if (Array.isArray(result.data)) comments = result.data;
+  else if (result.data?.data && Array.isArray(result.data.data)) comments = result.data.data;
+  else if (result.data?.comments && Array.isArray(result.data.comments)) comments = result.data.comments;
+
+  if (comments.length === 0) {
+    return { success: true, message: `No comments found on task #${externalId}.` };
+  }
+
+  const display = comments.slice(0, 20).map((c: any, i: number) => {
+    const author = c.author_name || c.user_name || 'Unknown';
+    const date = c.created_at ? ` (${String(c.created_at).slice(0, 10)})` : '';
+    const internal = c.is_internal ? ' 🔒' : '';
+    const text = String(c.content || c.comment_text || '').replace(/<[^>]*>/g, '').slice(0, 200);
+    return `${i + 1}. **${author}**${date}${internal}: ${text}`;
+  });
+
+  return {
+    success: true,
+    message: `${comments.length} comment(s) on task #${externalId}:\n\n${display.join('\n\n')}`,
+    data: { comments: comments.slice(0, 20) },
+  };
+}
+
 async function execAddTaskComment(
   args: Record<string, unknown>,
   ctx: MobileExecutionContext,
 ): Promise<ToolResult> {
-  const creds = await getStaffSoftwareToken(ctx.userId);
-  if (!creds) {
-    return { success: false, message: 'You don\'t have an external software token linked yet. Go to Dashboard → Software Connections to add your project management API credentials first.' };
-  }
-
   const taskId = String(args.taskId || '').trim();
   const content = String(args.content || '').trim();
   if (!taskId) return { success: false, message: 'Task ID is required.' };
   if (!content) return { success: false, message: 'Comment content is required.' };
+
+  const localTask = await resolveLocalTask(taskId);
+  const externalId = localTask?.external_id || taskId;
+
+  const source = await resolveTaskSourceForTools(localTask?.software_id);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
 
   const isInternal = String(args.is_internal || 'true') === 'true' ? 1 : 0;
 
@@ -692,11 +1007,11 @@ async function execAddTaskComment(
     parent_comment_id: null,
   };
 
-  const result = await taskProxy(
-    creds.api_url,
-    `/api/development/tasks/${taskId}/comments`,
+  const result = await taskProxyV2(
+    source.base_url,
+    `/api/tasks-api/${externalId}/comments`,
     'POST',
-    creds.token,
+    source.api_key,
     commentPayload,
   );
 
@@ -706,8 +1021,432 @@ async function execAddTaskComment(
 
   return {
     success: true,
-    message: `💬 Comment added to task #${taskId}${isInternal ? ' (internal note)' : ''}.`,
-    data: { taskId, commentId: result.data?.comment_id || result.data?.id },
+    message: `💬 Comment added to task #${externalId}${isInternal ? ' (internal note)' : ''}.`,
+    data: { taskId: externalId, commentId: result.data?.comment_id || result.data?.id },
+  };
+}
+
+// ── Local Enhancement Executors ─────────────────────────────────
+
+async function execBookmarkTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  const newVal = task.is_bookmarked ? 0 : 1;
+  await db.execute('UPDATE local_tasks SET is_bookmarked = ? WHERE id = ?', [newVal, task.id]);
+
+  return {
+    success: true,
+    message: newVal
+      ? `⭐ Task "${task.title}" bookmarked.`
+      : `Task "${task.title}" unbookmarked.`,
+    data: { taskId: task.id, is_bookmarked: newVal },
+  };
+}
+
+async function execSetTaskPriority(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  const priority = String(args.priority || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const validPriorities = ['urgent', 'high', 'normal', 'low'];
+  if (!validPriorities.includes(priority)) {
+    return { success: false, message: `Invalid priority. Use: ${validPriorities.join(', ')}` };
+  }
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  await db.execute('UPDATE local_tasks SET priority = ? WHERE id = ?', [priority, task.id]);
+
+  const emoji = priority === 'urgent' ? '🔴' : priority === 'high' ? '🟠' : priority === 'normal' ? '🟢' : '⚪';
+  return {
+    success: true,
+    message: `${emoji} Task "${task.title}" priority set to **${priority}**.`,
+    data: { taskId: task.id, priority },
+  };
+}
+
+async function execSetTaskColor(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  const colorLabel = String(args.color_label || '').trim() || null;
+  await db.execute('UPDATE local_tasks SET color_label = ? WHERE id = ?', [colorLabel, task.id]);
+
+  return {
+    success: true,
+    message: colorLabel
+      ? `🎨 Task "${task.title}" labeled **${colorLabel}**.`
+      : `Task "${task.title}" color label cleared.`,
+    data: { taskId: task.id, color_label: colorLabel },
+  };
+}
+
+async function execSetTaskTags(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const task = await resolveLocalTask(taskId);
+  if (!task) return { success: false, message: `Task ${taskId} not found.` };
+
+  const rawTags = String(args.tags || '').trim();
+  const tags = rawTags ? rawTags.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const tagJson = tags.length > 0 ? JSON.stringify(tags) : null;
+
+  await db.execute('UPDATE local_tasks SET local_tags = ? WHERE id = ?', [tagJson, task.id]);
+
+  return {
+    success: true,
+    message: tags.length > 0
+      ? `🏷️ Task "${task.title}" tagged: ${tags.join(', ')}`
+      : `Task "${task.title}" tags cleared.`,
+    data: { taskId: task.id, tags },
+  };
+}
+
+// ── Workflow Action Executors ───────────────────────────────────
+
+async function execStartTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const localTask = await resolveLocalTask(taskId);
+  const externalId = localTask?.external_id || taskId;
+
+  const source = await resolveTaskSourceForTools(localTask?.software_id);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  const result = await taskProxyV2(source.base_url, `/api/tasks-api/${externalId}/start`, 'POST', source.api_key);
+
+  if (result.status >= 400) {
+    return { success: false, message: `Failed to start task: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
+  }
+
+  // Update local status
+  if (localTask) {
+    await db.execute('UPDATE local_tasks SET status = ? WHERE id = ?', ['progress', localTask.id]);
+  }
+
+  return {
+    success: true,
+    message: `▶️ Task #${externalId} started — now in progress.`,
+    data: { taskId: externalId },
+  };
+}
+
+async function execCompleteTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const localTask = await resolveLocalTask(taskId);
+  const externalId = localTask?.external_id || taskId;
+
+  const source = await resolveTaskSourceForTools(localTask?.software_id);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  const result = await taskProxyV2(source.base_url, `/api/tasks-api/${externalId}/complete`, 'POST', source.api_key);
+
+  if (result.status >= 400) {
+    return { success: false, message: `Failed to complete task: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
+  }
+
+  // Update local status
+  if (localTask) {
+    await db.execute('UPDATE local_tasks SET status = ? WHERE id = ?', ['completed', localTask.id]);
+  }
+
+  return {
+    success: true,
+    message: `✅ Task #${externalId} marked as completed.`,
+    data: { taskId: externalId },
+  };
+}
+
+async function execApproveTask(args: Record<string, unknown>): Promise<ToolResult> {
+  const taskId = String(args.taskId || '').trim();
+  if (!taskId) return { success: false, message: 'Task ID is required.' };
+
+  const localTask = await resolveLocalTask(taskId);
+  const externalId = localTask?.external_id || taskId;
+
+  const source = await resolveTaskSourceForTools(localTask?.software_id);
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  const result = await taskProxyV2(source.base_url, `/api/tasks-api/${externalId}/approve`, 'POST', source.api_key);
+
+  if (result.status >= 400) {
+    return { success: false, message: `Failed to approve task: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
+  }
+
+  return {
+    success: true,
+    message: `👍 Task #${externalId} approved.`,
+    data: { taskId: externalId },
+  };
+}
+
+// ── Stats & Query Executors ─────────────────────────────────────
+
+async function execGetTaskStats(): Promise<ToolResult> {
+  // Get stats from local database
+  const statusCounts = await db.query<any>(
+    `SELECT status, COUNT(*) as count
+     FROM local_tasks
+     WHERE task_deleted = 0
+     GROUP BY status`,
+  );
+
+  const typeCounts = await db.query<any>(
+    `SELECT type, COUNT(*) as count
+     FROM local_tasks
+     WHERE task_deleted = 0
+     GROUP BY type`,
+  );
+
+  const phaseCounts = await db.query<any>(
+    `SELECT workflow_phase, COUNT(*) as count
+     FROM local_tasks
+     WHERE task_deleted = 0 AND workflow_phase IS NOT NULL AND workflow_phase != ''
+     GROUP BY workflow_phase`,
+  );
+
+  const [totalRow] = await db.query<any>(
+    'SELECT COUNT(*) as total FROM local_tasks WHERE task_deleted = 0',
+  );
+
+  const [bookmarkedRow] = await db.query<any>(
+    'SELECT COUNT(*) as count FROM local_tasks WHERE task_deleted = 0 AND is_bookmarked = 1',
+  );
+
+  const total = totalRow?.total || 0;
+  const bookmarked = bookmarkedRow?.count || 0;
+
+  const statusLines = statusCounts.map((s: any) =>
+    `  • ${s.status === 'progress' ? 'in-progress' : s.status}: ${s.count}`
+  ).join('\n');
+
+  const typeLines = typeCounts.map((t: any) =>
+    `  • ${t.type}: ${t.count}`
+  ).join('\n');
+
+  const phaseLines = phaseCounts.length > 0
+    ? phaseCounts.map((p: any) => `  • ${p.workflow_phase}: ${p.count}`).join('\n')
+    : '  (none)';
+
+  return {
+    success: true,
+    message: `📊 **Task Statistics** (${total} total, ${bookmarked} bookmarked)\n\n**By Status:**\n${statusLines}\n\n**By Type:**\n${typeLines}\n\n**By Phase:**\n${phaseLines}`,
+    data: { total, bookmarked, statusCounts, typeCounts, phaseCounts },
+  };
+}
+
+async function execGetPendingApprovals(): Promise<ToolResult> {
+  const source = await resolveTaskSourceForTools();
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  const result = await taskProxyV2(source.base_url, '/api/tasks-api/pending-approval', 'GET', source.api_key);
+
+  if (result.status >= 400) {
+    return { success: false, message: `Failed to fetch pending approvals: HTTP ${result.status}` };
+  }
+
+  let tasks: any[] = [];
+  if (Array.isArray(result.data)) tasks = result.data;
+  else if (result.data?.data && Array.isArray(result.data.data)) tasks = result.data.data;
+  else if (result.data?.tasks && Array.isArray(result.data.tasks)) tasks = result.data.tasks;
+
+  if (tasks.length === 0) {
+    return { success: true, message: 'No tasks pending approval. All clear! ✅' };
+  }
+
+  const display = tasks.slice(0, 15).map((t: any, i: number) => {
+    const assignee = t.assigned_to_name ? ` → ${t.assigned_to_name}` : '';
+    return `${i + 1}. **${t.title || t.task_name}**${assignee}\n   ID: ${t.id}`;
+  });
+
+  return {
+    success: true,
+    message: `🔍 ${tasks.length} task(s) pending approval:\n\n${display.join('\n\n')}`,
+    data: { tasks: tasks.slice(0, 15), total: tasks.length },
+  };
+}
+
+async function execGetTaskTags(): Promise<ToolResult> {
+  const rows = await db.query<any>(`
+    SELECT DISTINCT j.tag
+    FROM local_tasks, JSON_TABLE(local_tags, '$[*]' COLUMNS (tag VARCHAR(100) PATH '$')) j
+    WHERE task_deleted = 0 AND local_tags IS NOT NULL
+    ORDER BY j.tag
+  `);
+  const tags = rows.map((r: any) => r.tag);
+
+  if (tags.length === 0) {
+    return { success: true, message: 'No tags found. You can add tags to tasks using the set_task_tags tool.' };
+  }
+
+  return {
+    success: true,
+    message: `🏷️ ${tags.length} tag(s) in use:\n${tags.map(t => `  • ${t}`).join('\n')}`,
+    data: { tags },
+  };
+}
+
+// ── Sync Executors ──────────────────────────────────────────────
+
+async function execSyncTasks(): Promise<ToolResult> {
+  try {
+    const results = await syncAllSources();
+    const allOk = results.every(r => r.status === 'success');
+    const totalCreated = results.reduce((s, r) => s + (r.tasks_created || 0), 0);
+    const totalUpdated = results.reduce((s, r) => s + (r.tasks_updated || 0), 0);
+
+    if (results.length === 0) {
+      return { success: true, message: 'No task sources configured. Add a source in Dashboard → Tasks → Sources first.' };
+    }
+
+    const lines = results.map(r => {
+      const icon = r.status === 'success' ? '✅' : '❌';
+      return `${icon} **${r.source_name}**: ${r.tasks_created || 0} new, ${r.tasks_updated || 0} updated, ${r.tasks_unchanged || 0} unchanged${r.error ? ` — ${r.error}` : ''}`;
+    });
+
+    return {
+      success: true,
+      message: `🔄 Sync complete (${results.length} source(s)):\n\n${lines.join('\n')}\n\n**Total:** ${totalCreated} created, ${totalUpdated} updated`,
+      data: { results },
+    };
+  } catch (err: any) {
+    return { success: false, message: `Sync failed: ${err.message}` };
+  }
+}
+
+async function execGetSyncStatus(): Promise<ToolResult> {
+  const sources = await db.query<any>(`
+    SELECT id, name, source_type, sync_enabled, sync_interval_min,
+           last_synced_at, last_sync_status, last_sync_message, last_sync_count
+    FROM task_sources
+    ORDER BY name
+  `);
+
+  if (sources.length === 0) {
+    return { success: true, message: 'No task sources configured yet.' };
+  }
+
+  const lines = sources.map((s: any) => {
+    const enabled = s.sync_enabled ? '🟢' : '🔴';
+    const lastSync = s.last_synced_at ? new Date(s.last_synced_at).toLocaleString() : 'never';
+    const status = s.last_sync_status || 'unknown';
+    const count = s.last_sync_count != null ? ` (${s.last_sync_count} tasks)` : '';
+    return `${enabled} **${s.name}** (${s.source_type})\n   Last sync: ${lastSync} — ${status}${count}`;
+  });
+
+  return {
+    success: true,
+    message: `📡 ${sources.length} task source(s):\n\n${lines.join('\n\n')}`,
+    data: { sources },
+  };
+}
+
+// ── Invoice Staging Executors ───────────────────────────────────
+
+async function execStageTasksForInvoice(args: Record<string, unknown>): Promise<ToolResult> {
+  const rawIds = String(args.task_ids || '').trim();
+  if (!rawIds) return { success: false, message: 'task_ids is required (comma-separated external IDs, e.g. "42,43,44").' };
+
+  const taskIds = rawIds.split(',').map(id => id.trim()).filter(Boolean);
+  if (taskIds.length === 0) return { success: false, message: 'No valid task IDs provided.' };
+
+  const billDate = String(args.bill_date || new Date().toISOString().slice(0, 10));
+
+  const placeholders = taskIds.map(() => '?').join(',');
+  const affected = await db.execute(
+    `UPDATE local_tasks SET task_billed = 2, task_bill_date = ? WHERE external_id IN (${placeholders}) AND task_billed = 0`,
+    [billDate, ...taskIds],
+  );
+
+  return {
+    success: true,
+    message: `📋 ${affected} task(s) staged for invoicing (bill date: ${billDate}).`,
+    data: { staged: affected, bill_date: billDate },
+  };
+}
+
+async function execGetStagedInvoices(): Promise<ToolResult> {
+  const tasks = await db.query<any>(
+    `SELECT id, external_id, title, hours, estimated_hours, task_bill_date, assigned_to_name, type
+     FROM local_tasks WHERE task_billed = 2 AND task_deleted = 0 ORDER BY task_bill_date DESC, id DESC`,
+  );
+
+  if (tasks.length === 0) {
+    return { success: true, message: 'No tasks currently staged for invoicing.' };
+  }
+
+  const totalHours = tasks.reduce((s: number, t: any) => s + (Number(t.hours) || 0), 0);
+
+  const display = tasks.map((t: any, i: number) => {
+    const hrs = t.hours ? ` (${t.hours}h)` : '';
+    return `${i + 1}. **${t.title}**${hrs} — ${t.task_bill_date || 'no date'}\n   ID: ${t.external_id || t.id}`;
+  });
+
+  return {
+    success: true,
+    message: `📋 ${tasks.length} task(s) staged for invoicing (${totalHours}h total):\n\n${display.join('\n\n')}`,
+    data: { tasks, total_hours: totalHours },
+  };
+}
+
+async function execProcessStagedInvoices(): Promise<ToolResult> {
+  // Get the first source for invoice processing
+  const source = await resolveTaskSourceForTools();
+  if (!source) return { success: false, message: NO_SOURCE_MSG };
+
+  // Get all staged tasks
+  const staged = await db.query<any>(
+    `SELECT id, external_id, task_bill_date FROM local_tasks WHERE task_billed = 2 AND task_deleted = 0`,
+  );
+
+  if (staged.length === 0) {
+    return { success: true, message: 'No staged tasks to process. Stage some tasks first using stage_tasks_for_invoice.' };
+  }
+
+  const billDate = staged[0].task_bill_date || new Date().toISOString().slice(0, 10);
+  const externalIds = staged.map((t: any) => t.external_id).filter(Boolean);
+
+  if (externalIds.length === 0) {
+    return { success: false, message: 'No tasks with external IDs found to sync.' };
+  }
+
+  // Call external portal to invoice tasks
+  const result = await taskProxyV2(
+    source.base_url,
+    '/api/tasks-api/invoice-tasks',
+    'POST',
+    source.api_key,
+    { task_ids: externalIds, bill_date: billDate },
+  );
+
+  if (result.status >= 400) {
+    return { success: false, message: `External invoicing failed: ${typeof result.data === 'string' ? result.data : JSON.stringify(result.data?.message || result.data?.error || 'Unknown error')}` };
+  }
+
+  // Mark all staged tasks as fully invoiced
+  const ids = staged.map((t: any) => t.id);
+  const placeholders = ids.map(() => '?').join(',');
+  await db.execute(
+    `UPDATE local_tasks SET task_billed = 1 WHERE id IN (${placeholders})`,
+    ids,
+  );
+
+  return {
+    success: true,
+    message: `💰 ${staged.length} task(s) invoiced and synced to portal (bill date: ${billDate}).`,
+    data: { processed: staged.length, bill_date: billDate },
   };
 }
 
@@ -726,11 +1465,7 @@ async function execSearchClients(args: Record<string, unknown>): Promise<ToolRes
   }>(
     `SELECT id, email, name, account_status FROM users
      WHERE (email LIKE ? OR name LIKE ?)
-     AND id COLLATE utf8mb4_unicode_ci NOT IN (
-       SELECT ur.user_id COLLATE utf8mb4_unicode_ci FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE r.slug IN ('admin','super_admin','developer','client_manager','qa_specialist','deployer')
-     )
+     AND is_admin = 0 AND is_staff = 0
      ORDER BY name ASC
      LIMIT 10`,
     [`%${query}%`, `%${query}%`],
@@ -772,15 +1507,11 @@ async function execSuspendClientAccount(
   if (!target) return { success: false, message: 'User not found.' };
 
   // Prevent suspending other staff members
-  const isStaff = await db.queryOne<{ slug: string }>(
-    `SELECT r.slug FROM user_roles ur
-     JOIN roles r ON r.id = ur.role_id
-     WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-       AND r.slug IN ('admin','super_admin','developer','client_manager','qa_specialist','deployer')
-     LIMIT 1`,
+  const staffCheck = await db.queryOne<{ is_admin: number; is_staff: number }>(
+    'SELECT is_admin, is_staff FROM users WHERE id = ?',
     [clientId],
   );
-  if (isStaff) {
+  if (staffCheck && (staffCheck.is_admin || staffCheck.is_staff)) {
     return { success: false, message: 'Cannot modify account status of staff members via this tool.' };
   }
 
@@ -2123,5 +2854,368 @@ async function execSendChatMessage(
   return {
     success: true,
     message: `✅ Message sent to conversation ${conversationId}.`,
+  };
+}
+
+// ============================================================================
+// Staff Bug Tracking Tool Executors
+// ============================================================================
+
+async function execListBugs(args: Record<string, unknown>): Promise<ToolResult> {
+  const limit = Math.min(parseInt(String(args.limit || '20'), 10) || 20, 50);
+
+  let sql = `SELECT b.id, b.title, b.reporter_name, b.status, b.severity, b.workflow_phase,
+                    b.assigned_to_name, b.software_name, b.created_at,
+                    (SELECT COUNT(*) FROM bug_comments bc WHERE bc.bug_id = b.id) AS comment_count
+             FROM bugs b WHERE 1=1`;
+  const params: any[] = [];
+
+  const status = String(args.status || '').trim();
+  if (status) { sql += ' AND b.status = ?'; params.push(status); }
+
+  const severity = String(args.severity || '').trim();
+  if (severity) { sql += ' AND b.severity = ?'; params.push(severity); }
+
+  const phase = String(args.workflow_phase || '').trim();
+  if (phase) { sql += ' AND b.workflow_phase = ?'; params.push(phase); }
+
+  const softwareId = String(args.software_id || '').trim();
+  if (softwareId) { sql += ' AND b.software_id = ?'; params.push(softwareId); }
+
+  const assignedTo = String(args.assigned_to || '').trim();
+  if (assignedTo) { sql += ' AND b.assigned_to = ?'; params.push(assignedTo); }
+
+  const search = String(args.search || '').trim();
+  if (search) {
+    sql += ' AND (b.title LIKE ? OR b.description LIKE ? OR b.reporter_name LIKE ?)';
+    const like = `%${search}%`;
+    params.push(like, like, like);
+  }
+
+  sql += ` ORDER BY FIELD(b.severity, 'critical', 'high', 'medium', 'low'), b.created_at DESC LIMIT ?`;
+  params.push(limit);
+
+  const bugs = await db.query<{
+    id: number; title: string; reporter_name: string; status: string; severity: string;
+    workflow_phase: string; assigned_to_name: string | null; software_name: string | null;
+    created_at: string; comment_count: number;
+  }>(sql, params);
+
+  if (bugs.length === 0) {
+    return { success: true, message: 'No bugs found matching the filters.' };
+  }
+
+  const severityIcon: Record<string, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢' };
+
+  const lines = bugs.map(
+    (b, i) => {
+      const icon = severityIcon[b.severity] || '⚪';
+      const assignee = b.assigned_to_name ? ` → ${b.assigned_to_name}` : '';
+      const software = b.software_name ? ` [${b.software_name}]` : '';
+      const comments = b.comment_count > 0 ? ` 💬${b.comment_count}` : '';
+      return `${i + 1}. ${icon} **#${b.id} ${b.title}**${software}${comments}\n   ${b.severity} · ${b.status} · ${b.workflow_phase}${assignee}\n   Reporter: ${b.reporter_name} · ${new Date(b.created_at).toLocaleDateString()}`;
+    },
+  );
+
+  return {
+    success: true,
+    message: `Found ${bugs.length} bug(s):\n\n${lines.join('\n\n')}`,
+    data: { bugs },
+  };
+}
+
+async function execGetBugDetails(args: Record<string, unknown>): Promise<ToolResult> {
+  const bugId = String(args.bugId || '').trim();
+  if (!bugId) return { success: false, message: 'Please provide the bug ID.' };
+
+  const bug = await db.queryOne<{
+    id: number; title: string; description: string | null; current_behaviour: string | null;
+    expected_behaviour: string | null; reporter_name: string; software_name: string | null;
+    status: string; severity: string; workflow_phase: string;
+    assigned_to: number | null; assigned_to_name: string | null;
+    created_by_name: string | null; linked_task_id: number | null;
+    converted_from_task: number; converted_to_task: number | null;
+    resolution_notes: string | null; resolved_at: string | null; resolved_by: string | null;
+    created_at: string; updated_at: string;
+  }>('SELECT * FROM bugs WHERE id = ?', [bugId]);
+
+  if (!bug) return { success: false, message: `Bug #${bugId} not found.` };
+
+  const comments = await db.query<{
+    id: number; author_name: string; content: string; comment_type: string; is_internal: number; created_at: string;
+  }>(
+    'SELECT id, author_name, content, comment_type, is_internal, created_at FROM bug_comments WHERE bug_id = ? ORDER BY created_at ASC LIMIT 20',
+    [bugId],
+  );
+
+  const attachmentCount = await db.queryOne<{ cnt: number }>(
+    'SELECT COUNT(*) AS cnt FROM bug_attachments WHERE bug_id = ?',
+    [bugId],
+  );
+
+  const severityIcon: Record<string, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢' };
+  const icon = severityIcon[bug.severity] || '⚪';
+
+  let msg = `${icon} **Bug #${bug.id}: ${bug.title}**\n\n`;
+  msg += `**Status:** ${bug.status} · **Severity:** ${bug.severity} · **Phase:** ${bug.workflow_phase}\n`;
+  msg += `**Reporter:** ${bug.reporter_name}\n`;
+  if (bug.assigned_to_name) msg += `**Assigned to:** ${bug.assigned_to_name}\n`;
+  if (bug.software_name) msg += `**Software:** ${bug.software_name}\n`;
+  msg += `**Created:** ${new Date(bug.created_at).toLocaleString()}\n`;
+
+  if (bug.description) msg += `\n**Description:**\n${bug.description.replace(/<[^>]+>/g, '')}\n`;
+  if (bug.current_behaviour) msg += `\n**Current Behaviour:**\n${bug.current_behaviour.replace(/<[^>]+>/g, '')}\n`;
+  if (bug.expected_behaviour) msg += `\n**Expected Behaviour:**\n${bug.expected_behaviour.replace(/<[^>]+>/g, '')}\n`;
+  if (bug.resolution_notes) msg += `\n**Resolution:** ${bug.resolution_notes}\n`;
+  if (bug.resolved_by) msg += `**Resolved by:** ${bug.resolved_by} at ${bug.resolved_at ? new Date(bug.resolved_at).toLocaleString() : 'N/A'}\n`;
+  if (bug.linked_task_id) msg += `\n**Linked Task:** #${bug.linked_task_id}\n`;
+
+  msg += `\n📎 ${attachmentCount?.cnt || 0} attachment(s)`;
+
+  if (comments.length > 0) {
+    msg += `\n\n**Comments (${comments.length}):**\n`;
+    for (const c of comments) {
+      const internalTag = c.is_internal ? ' 🔒' : '';
+      const typeTag = c.comment_type !== 'comment' ? ` [${c.comment_type}]` : '';
+      msg += `\n• **${c.author_name}**${typeTag}${internalTag} — ${new Date(c.created_at).toLocaleString()}\n  ${c.content.replace(/<[^>]+>/g, '').slice(0, 200)}`;
+    }
+  }
+
+  return { success: true, message: msg, data: { bug, comments } };
+}
+
+async function execCreateBug(
+  args: Record<string, unknown>,
+  ctx: MobileExecutionContext,
+): Promise<ToolResult> {
+  const title = String(args.title || '').trim();
+  const reporter_name = String(args.reporter_name || '').trim();
+
+  if (!title) return { success: false, message: 'Please provide a title for the bug.' };
+  if (!reporter_name) return { success: false, message: 'Please provide the reporter name.' };
+
+  const description = args.description ? String(args.description) : null;
+  const current_behaviour = args.current_behaviour ? String(args.current_behaviour) : null;
+  const expected_behaviour = args.expected_behaviour ? String(args.expected_behaviour) : null;
+  const severity = String(args.severity || 'medium');
+  const software_id = args.software_id ? parseInt(String(args.software_id), 10) : null;
+  const software_name = args.software_name ? String(args.software_name) : null;
+  const assigned_to = args.assigned_to ? parseInt(String(args.assigned_to), 10) : null;
+  const assigned_to_name = args.assigned_to_name ? String(args.assigned_to_name) : null;
+
+  // Look up the staff user's name for created_by_name
+  let created_by_name = 'System';
+  const userRow = await db.queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [ctx.userId]);
+  if (userRow) created_by_name = userRow.name;
+
+  const result = await db.execute(
+    `INSERT INTO bugs
+      (title, description, current_behaviour, expected_behaviour, reporter_name,
+       software_id, software_name, status, severity, workflow_phase,
+       assigned_to, assigned_to_name, created_by, created_by_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, 'intake', ?, ?, ?, ?, NOW(), NOW())`,
+    [title, description, current_behaviour, expected_behaviour, reporter_name,
+     software_id, software_name, severity, assigned_to, assigned_to_name,
+     ctx.userId, created_by_name],
+  );
+
+  const insertId = (result as any).insertId;
+
+  // Add system comment for creation
+  await db.execute(
+    `INSERT INTO bug_comments (bug_id, author_name, author_id, content, is_internal, comment_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 0, 'status_change', NOW(), NOW())`,
+    [insertId, 'System', ctx.userId, `Bug reported and entered Intake phase.`],
+  );
+
+  return {
+    success: true,
+    message: `✅ Bug #${insertId} created!\n\n**${title}**\nSeverity: ${severity} · Status: open · Phase: intake\nReporter: ${reporter_name}${assigned_to_name ? `\nAssigned to: ${assigned_to_name}` : ''}`,
+    data: { bugId: insertId },
+  };
+}
+
+async function execUpdateBug(
+  args: Record<string, unknown>,
+  ctx: MobileExecutionContext,
+): Promise<ToolResult> {
+  const bugId = String(args.bugId || '').trim();
+  if (!bugId) return { success: false, message: 'Please provide the bug ID.' };
+
+  // Verify bug exists
+  const existing = await db.queryOne<{ id: number; status: string; assigned_to: number | null }>(
+    'SELECT id, status, assigned_to FROM bugs WHERE id = ?',
+    [bugId],
+  );
+  if (!existing) return { success: false, message: `Bug #${bugId} not found.` };
+
+  const allowed = [
+    'title', 'description', 'current_behaviour', 'expected_behaviour',
+    'reporter_name', 'software_id', 'software_name', 'status', 'severity',
+    'assigned_to', 'assigned_to_name', 'resolution_notes',
+  ];
+
+  const fields: string[] = [];
+  const values: any[] = [];
+  const changes: string[] = [];
+
+  for (const key of allowed) {
+    if (args[key] !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(args[key] === '' ? null : args[key]);
+      changes.push(key);
+    }
+  }
+
+  // Handle resolution timestamps
+  const newStatus = String(args.status || '');
+  if (newStatus === 'resolved' && existing.status !== 'resolved') {
+    let resolvedBy = 'System';
+    const userRow = await db.queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [ctx.userId]);
+    if (userRow) resolvedBy = userRow.name;
+    fields.push('resolved_at = NOW()');
+    fields.push('resolved_by = ?');
+    values.push(resolvedBy);
+  }
+
+  if (fields.length === 0) return { success: false, message: 'No fields provided to update.' };
+
+  values.push(bugId);
+  await db.execute(`UPDATE bugs SET ${fields.join(', ')} WHERE id = ?`, values);
+
+  return {
+    success: true,
+    message: `✅ Bug #${bugId} updated!\n\nFields changed: ${changes.join(', ')}`,
+  };
+}
+
+async function execAddBugComment(
+  args: Record<string, unknown>,
+  ctx: MobileExecutionContext,
+): Promise<ToolResult> {
+  const bugId = String(args.bugId || '').trim();
+  const content = String(args.content || '').trim();
+
+  if (!bugId) return { success: false, message: 'Please provide the bug ID.' };
+  if (!content) return { success: false, message: 'Please provide comment content.' };
+
+  // Verify bug exists
+  const bug = await db.queryOne<{ id: number }>('SELECT id FROM bugs WHERE id = ?', [bugId]);
+  if (!bug) return { success: false, message: `Bug #${bugId} not found.` };
+
+  const isInternal = String(args.is_internal || 'true') === 'true' ? 1 : 0;
+
+  // Look up the staff user's name
+  let authorName = 'Staff';
+  const userRow = await db.queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [ctx.userId]);
+  if (userRow) authorName = userRow.name;
+
+  await db.execute(
+    `INSERT INTO bug_comments (bug_id, author_name, author_id, content, is_internal, comment_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'comment', NOW(), NOW())`,
+    [bugId, authorName, ctx.userId, content, isInternal],
+  );
+
+  const internalNote = isInternal ? ' (internal)' : '';
+  return {
+    success: true,
+    message: `✅ Comment added to bug #${bugId}${internalNote}.`,
+  };
+}
+
+async function execUpdateBugWorkflow(
+  args: Record<string, unknown>,
+  ctx: MobileExecutionContext,
+): Promise<ToolResult> {
+  const bugId = String(args.bugId || '').trim();
+  const newPhase = String(args.workflow_phase || '').trim();
+
+  if (!bugId) return { success: false, message: 'Please provide the bug ID.' };
+  if (!['intake', 'qa', 'development'].includes(newPhase)) {
+    return { success: false, message: 'Workflow phase must be one of: intake, qa, development.' };
+  }
+
+  // Verify bug exists and get current phase
+  const bug = await db.queryOne<{ id: number; workflow_phase: string }>(
+    'SELECT id, workflow_phase FROM bugs WHERE id = ?',
+    [bugId],
+  );
+  if (!bug) return { success: false, message: `Bug #${bugId} not found.` };
+
+  if (bug.workflow_phase === newPhase) {
+    return { success: true, message: `Bug #${bugId} is already in the **${newPhase}** phase.` };
+  }
+
+  const oldPhase = bug.workflow_phase;
+  await db.execute('UPDATE bugs SET workflow_phase = ? WHERE id = ?', [newPhase, bugId]);
+
+  // Add system workflow comment
+  let authorName = 'System';
+  const userRow = await db.queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [ctx.userId]);
+  if (userRow) authorName = userRow.name;
+
+  await db.execute(
+    `INSERT INTO bug_comments (bug_id, author_name, author_id, content, is_internal, comment_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 0, 'workflow_change', NOW(), NOW())`,
+    [bugId, authorName, ctx.userId, `Workflow phase changed: ${oldPhase} → ${newPhase}`],
+  );
+
+  const phaseLabels: Record<string, string> = { intake: 'Intake', qa: 'QA', development: 'Development' };
+  return {
+    success: true,
+    message: `✅ Bug #${bugId} moved from **${phaseLabels[oldPhase] || oldPhase}** to **${phaseLabels[newPhase]}**.`,
+  };
+}
+
+async function execGetBugStats(): Promise<ToolResult> {
+  const total = await db.queryOne<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM bugs');
+
+  const byStatus = await db.query<{ status: string; cnt: number }>(
+    'SELECT status, COUNT(*) AS cnt FROM bugs GROUP BY status',
+  );
+  const bySeverity = await db.query<{ severity: string; cnt: number }>(
+    'SELECT severity, COUNT(*) AS cnt FROM bugs GROUP BY severity',
+  );
+  const byPhase = await db.query<{ workflow_phase: string; cnt: number }>(
+    'SELECT workflow_phase, COUNT(*) AS cnt FROM bugs GROUP BY workflow_phase',
+  );
+  const bySoftware = await db.query<{ software_name: string; cnt: number }>(
+    `SELECT COALESCE(software_name, 'Unspecified') AS software_name, COUNT(*) AS cnt FROM bugs GROUP BY software_name`,
+  );
+
+  const statusMap = Object.fromEntries(byStatus.map(r => [r.status, r.cnt]));
+  const severityMap = Object.fromEntries(bySeverity.map(r => [r.severity, r.cnt]));
+  const phaseMap = Object.fromEntries(byPhase.map(r => [r.workflow_phase, r.cnt]));
+
+  const severityIcon: Record<string, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢' };
+
+  let msg = `📊 **Bug Statistics** (${total?.cnt || 0} total)\n\n`;
+
+  msg += `**By Status:**\n`;
+  for (const s of ['open', 'in-progress', 'pending-qa', 'resolved', 'closed', 'reopened']) {
+    if (statusMap[s]) msg += `  ${s}: ${statusMap[s]}\n`;
+  }
+
+  msg += `\n**By Severity:**\n`;
+  for (const s of ['critical', 'high', 'medium', 'low']) {
+    if (severityMap[s]) msg += `  ${severityIcon[s]} ${s}: ${severityMap[s]}\n`;
+  }
+
+  msg += `\n**By Phase:**\n`;
+  for (const p of ['intake', 'qa', 'development']) {
+    if (phaseMap[p]) msg += `  ${p}: ${phaseMap[p]}\n`;
+  }
+
+  if (bySoftware.length > 0) {
+    msg += `\n**By Software:**\n`;
+    for (const sw of bySoftware) {
+      msg += `  ${sw.software_name}: ${sw.cnt}\n`;
+    }
+  }
+
+  return {
+    success: true,
+    message: msg,
+    data: { total: total?.cnt || 0, byStatus: statusMap, bySeverity: severityMap, byPhase: phaseMap },
   };
 }

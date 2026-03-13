@@ -32,6 +32,9 @@ export async function up() {
   `);
 
   // External software tokens for task proxy
+  // ⚠️  DEPRECATED (v2.1.0): This table is no longer used by AI task tools.
+  //    Task proxy now uses source-level API keys from `task_sources` table.
+  //    Table retained for backward compat; will be removed in a future migration.
   await db.execute(`
     CREATE TABLE IF NOT EXISTS staff_software_tokens (
       id            VARCHAR(36) NOT NULL PRIMARY KEY,

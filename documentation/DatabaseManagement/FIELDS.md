@@ -8,13 +8,27 @@
 | `port` | `number` | Yes | Database server port (3306 for MySQL, 1433 for MSSQL) |
 | `user` | `string` | Yes | Database username |
 | `password` | `string` | Yes | Database password |
-| `database` | `string` | Some endpoints | Target database name (required for tables, describe, indexes, table-data, table-size, table-create-sql) |
+| `database` | `string` | Some endpoints | Target database name (required for tables, describe, indexes, table-data, table-size, table-create-sql, row-*, truncate, drop-table, import-sql) |
 | `type` | `'mysql' \| 'mssql'` | Yes | Database engine type |
 | `tunnel` | `TunnelConfig \| null` | No | SSH tunnel configuration (see below) |
-| `table` | `string` | Some endpoints | Target table name (for describe, indexes, table-data, table-size, table-create-sql) |
-| `sql` | `string` | Some endpoints | SQL query string (for query, export-csv) |
+| `table` | `string` | Some endpoints | Target table name (for describe, indexes, table-data, table-size, table-create-sql, row-*, truncate, drop-table) |
+| `sql` | `string` | Some endpoints | SQL query string (for query, export-csv, import-sql) |
 | `page` | `number` | No | Page number for pagination (default 1) |
 | `pageSize` | `number` | No | Rows per page (default 100, max 1000) |
+| `sortColumn` | `string` | No | Column name to ORDER BY (for table-data) |
+| `sortDirection` | `'ASC' \| 'DESC'` | No | Sort direction (default 'ASC', for table-data) |
+| `filters` | `FilterObject[]` | No | Array of filter objects for WHERE clause generation (for table-data) |
+| `row` | `Record<string, any>` | Some endpoints | Key-value object of column→value pairs (for row-insert, row-update) |
+| `where` | `Record<string, any>` | Some endpoints | Key-value object of primary key columns for WHERE clause (for row-update, row-delete) |
+| `primaryKeys` | `string[]` | No | Array of primary key column names (reserved, not currently used) |
+
+## Request Body: `FilterObject`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `column` | `string` | Yes | Column name to filter on |
+| `operator` | `string` | No | Filter operator (default `'LIKE'`). Supported: `LIKE`, `=`, `!=`, `>`, `<`, `>=`, `<=`, `IS NULL`, `IS NOT NULL`, `REGEXP` (MySQL only) |
+| `value` | `string` | Conditional | Filter value — not required for `IS NULL` and `IS NOT NULL` operators |
 
 ## Request Body: `TunnelConfig`
 
@@ -28,216 +42,317 @@
 
 ---
 
-## API Response: `GET /api/database/keys`
+## Database Table: `db_connections`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `keys[]` | `array` | Filesystem | Array of SSH key file info objects |
-| `keys[].name` | `string` | Filename | Private key filename (e.g., `softaware_id_ed25519`) |
-| `keys[].hasPublicKey` | `boolean` | Filesystem check | Whether `{name}.pub` exists alongside the private key |
-| `keys[].size` | `number` | `fs.statSync().size` | File size in bytes |
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `id` | `VARCHAR(36)` | NO | — | UUID primary key |
+| `name` | `VARCHAR(255)` | NO | — | Connection display name |
+| `host` | `VARCHAR(255)` | NO | — | Database server hostname or IP |
+| `port` | `INT` | YES | `3306` | Database server port |
+| `user` | `VARCHAR(255)` | YES | — | Database username |
+| `password` | `VARCHAR(255)` | YES | — | Database password (plaintext) |
+| `database` | `VARCHAR(255)` | YES | — | Default database name |
+| `type` | `ENUM('mysql','mssql')` | YES | `'mysql'` | Database engine type |
+| `ssh_host` | `VARCHAR(255)` | YES | — | SSH tunnel host |
+| `ssh_port` | `INT` | YES | `22` | SSH tunnel port |
+| `ssh_user` | `VARCHAR(255)` | YES | — | SSH tunnel username |
+| `ssh_password` | `VARCHAR(255)` | YES | — | SSH tunnel password (plaintext) |
+| `ssh_key_file` | `VARCHAR(255)` | YES | — | SSH private key filename |
+| `created_by` | `VARCHAR(36)` | YES | — | User UUID who created the connection |
+| `created_at` | `TIMESTAMP` | YES | `CURRENT_TIMESTAMP` | Creation timestamp |
+| `updated_at` | `TIMESTAMP` | YES | `CURRENT_TIMESTAMP ON UPDATE` | Last update timestamp |
+
+**Column mapping** (DB → Frontend):
+| DB Column | Frontend Field |
+|-----------|---------------|
+| `ssh_host` | `tunnel.sshHost` |
+| `ssh_port` | `tunnel.sshPort` |
+| `ssh_user` | `tunnel.sshUser` |
+| `ssh_password` | `tunnel.sshPassword` |
+| `ssh_key_file` | `tunnel.sshKeyFile` |
+| `created_by` | `createdBy` |
+| `created_at` | `createdAt` |
+| `updated_at` | `updatedAt` |
 
 ---
 
-## API Response: `POST /api/database/connect`
+## API Responses
+
+### `GET /api/database/connections`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `success` | `boolean` | `true` if connection + ping/SELECT 1 succeeded |
-| `error` | `string` | Error message if connection failed (only on failure) |
+| `success` | `boolean` | `true` |
+| `connections[]` | `Connection[]` | Array of connection objects |
+| `connections[].id` | `string` | UUID |
+| `connections[].name` | `string` | Display name |
+| `connections[].host` | `string` | Database host |
+| `connections[].port` | `number` | Database port |
+| `connections[].user` | `string` | Database username |
+| `connections[].password` | `string` | Database password |
+| `connections[].database` | `string` | Default database |
+| `connections[].type` | `string` | `'mysql'` or `'mssql'` |
+| `connections[].tunnel` | `TunnelConfig` | SSH tunnel configuration |
+| `connections[].createdBy` | `string \| null` | Creator user UUID |
+| `connections[].createdAt` | `string` | ISO timestamp |
+| `connections[].updatedAt` | `string` | ISO timestamp |
 
 ---
 
-## API Response: `POST /api/database/databases`
+### `POST /api/database/connections`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `databases[]` | `string[]` | `SHOW DATABASES` (MySQL) or `sys.databases` (MSSQL) | List of database names |
-
-### MySQL Query
-```sql
-SHOW DATABASES
-```
-Returns `Database` column, mapped to string array.
-
-### MSSQL Query
-```sql
-SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' ORDER BY name
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `id` | `string` | UUID of created/updated connection |
 
 ---
 
-## API Response: `POST /api/database/tables`
+### `GET /api/database/keys`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `tables[]` | `array` | `INFORMATION_SCHEMA.TABLES` | Array of table info objects |
-| `tables[].name` | `string` | `TABLE_NAME` | Table or view name |
-| `tables[].type` | `string` | `TABLE_TYPE` | `'BASE TABLE'` or `'VIEW'` |
-| `tables[].rows` | `number \| null` | `TABLE_ROWS` (MySQL only) | Approximate row count (InnoDB estimate) |
-| `tables[].engine` | `string \| null` | `ENGINE` (MySQL only) | Storage engine (InnoDB, MyISAM, etc.) |
-
-### MySQL Query
-```sql
-SELECT TABLE_NAME AS name, TABLE_TYPE AS type, TABLE_ROWS AS `rows`, ENGINE AS engine
-FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_SCHEMA = ?
-ORDER BY TABLE_NAME
-```
-
-### MSSQL Query
-```sql
-SELECT TABLE_NAME AS name, TABLE_TYPE AS type
-FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_CATALOG = @db
-ORDER BY TABLE_NAME
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `keys[]` | `array` | Array of SSH key file info objects |
+| `keys[].name` | `string` | Private key filename |
+| `keys[].hasPublicKey` | `boolean` | Whether `{name}.pub` exists |
+| `keys[].size` | `number` | File size in bytes |
 
 ---
 
-## API Response: `POST /api/database/describe`
+### `POST /api/database/connect`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `columns[]` | `array` | `DESCRIBE` (MySQL) or `INFORMATION_SCHEMA.COLUMNS` (MSSQL) | Column definitions |
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` if connection succeeded |
+| `message` | `string` | `"Connected successfully"` |
+| `error` | `string` | Error message (only on failure, status 400) |
 
-### MySQL Fields
+---
+
+### `POST /api/database/databases`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `databases[]` | `string[]` | List of database names |
+
+---
+
+### `POST /api/database/tables`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `tables[]` | `array` | Array of table info objects |
+| `tables[].name` | `string` | Table or view name |
+| `tables[].type` | `string` | `'BASE TABLE'` or `'VIEW'` |
+| `tables[].rows` | `number \| null` | Approximate row count (MySQL only) |
+| `tables[].engine` | `string \| null` | Storage engine (MySQL only) |
+
+---
+
+### `POST /api/database/describe`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `columns[]` | `array` | Column definitions |
+
+#### MySQL Fields (from `DESCRIBE`)
 | Field | Type | Description |
 |-------|------|-------------|
 | `Field` | `string` | Column name |
-| `Type` | `string` | Data type (e.g., `varchar(255)`, `int(11)`) |
+| `Type` | `string` | Data type (e.g., `varchar(255)`) |
 | `Null` | `string` | `'YES'` or `'NO'` |
 | `Key` | `string` | `'PRI'`, `'UNI'`, `'MUL'`, or empty |
 | `Default` | `any` | Default value or `null` |
-| `Extra` | `string` | Additional info (e.g., `auto_increment`) |
+| `Extra` | `string` | e.g., `auto_increment` |
 
-### MSSQL Fields
+#### MSSQL Fields (normalized to match MySQL)
 | Field | Type | Description |
 |-------|------|-------------|
-| `COLUMN_NAME` | `string` | Column name |
-| `DATA_TYPE` | `string` | Data type (e.g., `nvarchar`, `int`) |
-| `CHARACTER_MAXIMUM_LENGTH` | `number \| null` | Max length for string types |
-| `IS_NULLABLE` | `string` | `'YES'` or `'NO'` |
-| `COLUMN_DEFAULT` | `any` | Default value or `null` |
-| `Key` | `string` | `'PRI'` if column is in a PRIMARY KEY constraint, else empty |
+| `Field` | `string` | Column name (aliased from `COLUMN_NAME`) |
+| `Type` | `string` | Data type with length (aliased) |
+| `Null` | `string` | `'YES'` or `'NO'` (aliased from `IS_NULLABLE`) |
+| `Key` | `string` | `'PRI'` or empty |
+| `Default` | `any` | Default value (aliased from `COLUMN_DEFAULT`) |
 
 ---
 
-## API Response: `POST /api/database/indexes`
+### `POST /api/database/indexes`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `indexes[]` | `array` | `SHOW INDEX` (MySQL) or `sys.indexes` (MSSQL) | Index definitions |
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `indexes[]` | `array` | Index definitions |
 
-### MySQL Fields (from `SHOW INDEX`)
+#### MySQL Fields (from `SHOW INDEX`)
 | Field | Type | Description |
 |-------|------|-------------|
 | `Table` | `string` | Table name |
 | `Non_unique` | `number` | `0` = unique, `1` = non-unique |
-| `Key_name` | `string` | Index name (e.g., `PRIMARY`) |
+| `Key_name` | `string` | Index name |
 | `Column_name` | `string` | Indexed column name |
 | `Index_type` | `string` | `BTREE`, `HASH`, `FULLTEXT` |
-| (+ other MySQL SHOW INDEX fields) | | |
 
-### MSSQL Fields (from query)
+#### MSSQL Fields
 | Field | Type | Description |
 |-------|------|-------------|
 | `index_name` | `string` | Index name |
-| `columns` | `string` | Comma-separated column names (via `STRING_AGG`) |
-| `is_unique` | `boolean` | Whether the index is unique |
-| `type_desc` | `string` | Index type (`CLUSTERED`, `NONCLUSTERED`, `HEAP`) |
+| `columns` | `string` | Comma-separated column names |
+| `is_unique` | `boolean` | Whether unique |
+| `index_type` | `string` | `CLUSTERED`, `NONCLUSTERED` |
 
 ---
 
-## API Response: `POST /api/database/table-data`
+### `POST /api/database/table-data`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `rows[]` | `object[]` | Array of row objects (column→value) |
-| `columns[]` | `string[]` | Column name array (order preserved) |
-| `total` | `number` | Total row count in table (from `COUNT(*)`) |
+| `success` | `boolean` | `true` |
+| `rows[]` | `object[]` | Array of row objects |
+| `columns[]` | `string[]` | Column name array |
+| `total` | `number` | Total row count (with filters applied) |
 | `page` | `number` | Current page number |
-| `pageSize` | `number` | Rows per page (max 1000) |
+| `pageSize` | `number` | Rows per page |
 
 ---
 
-## API Response: `POST /api/database/table-size`
+### `POST /api/database/row-insert`
 
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `size` | `object` | Query result | Size statistics object |
-
-### MySQL `size` Fields
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `row_count` | `number` | `TABLE_ROWS` | Approximate row count |
-| `data_kb` | `number` | `ROUND(DATA_LENGTH/1024)` | Data size in KB |
-| `index_kb` | `number` | `ROUND(INDEX_LENGTH/1024)` | Index size in KB |
-| `total_kb` | `number` | `ROUND((DATA_LENGTH+INDEX_LENGTH)/1024)` | Total size in KB |
-| `engine` | `string` | `ENGINE` | Storage engine |
-| `created` | `string` | `CREATE_TIME` | Table creation timestamp |
-| `collation` | `string` | `TABLE_COLLATION` | Character collation |
-
-### MSSQL `size` Fields
-| Field | Type | Source | Description |
-|-------|------|--------|-------------|
-| `row_count` | `number` | `SUM(rows)` from `sys.partitions` | Exact row count |
-| `total_kb` | `number` | `SUM(total_pages)*8` from `sys.allocation_units` | Total allocated KB |
-| `data_kb` | `number` | `SUM(used_pages)*8` | Used data KB |
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `message` | `string` | `"Row inserted"` |
 
 ---
 
-## API Response: `POST /api/database/table-create-sql`
+### `POST /api/database/row-update`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `sql` | `string` | CREATE TABLE statement (MySQL) or placeholder message (MSSQL) |
-
-**MySQL**: Returns the `Create Table` column from `SHOW CREATE TABLE tableName`.  
-**MSSQL**: Returns `"(MSSQL CREATE TABLE scripting not yet supported)"`.
+| `success` | `boolean` | `true` |
+| `message` | `string` | `"Row updated"` |
 
 ---
 
-## API Response: `POST /api/database/processes`
+### `POST /api/database/row-delete`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `processes[]` | `object[]` | Array of process objects (dynamic columns) |
+| `success` | `boolean` | `true` |
+| `message` | `string` | `"Row deleted"` |
 
-### MySQL Fields (from `SHOW FULL PROCESSLIST`)
+---
+
+### `POST /api/database/import-sql`
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `Id` | `number` | Connection/thread ID |
+| `success` | `boolean` | `true` |
+| `message` | `string` | Summary: `"15 statement(s) executed"` |
+| `executed` | `number` | Number of statements successfully executed |
+| `errors` | `string[]` | Array of error messages (max 20), format: `"error message — first 80 chars of statement…"` |
+| `totalStatements` | `number` | Total number of statements parsed from input |
+
+---
+
+### `POST /api/database/truncate`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `message` | `string` | `"Table {name} truncated"` |
+
+---
+
+### `POST /api/database/drop-table`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `message` | `string` | `"Table {name} dropped"` |
+
+---
+
+### `POST /api/database/table-size`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `size` | `object` | Size statistics object |
+
+#### MySQL `size` Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `row_count` | `number` | Approximate row count |
+| `data_kb` | `number` | Data size in KB |
+| `index_kb` | `number` | Index size in KB |
+| `total_kb` | `number` | Total size in KB |
+| `engine` | `string` | Storage engine |
+| `collation` | `string` | Character collation |
+| `CREATE_TIME` | `string` | Creation timestamp |
+| `UPDATE_TIME` | `string` | Last update timestamp |
+
+#### MSSQL `size` Fields
+| Field | Type | Description |
+|-------|------|-------------|
+| `row_count` | `number` | Row count |
+| `total_kb` | `number` | Total allocated KB |
+| `used_kb` | `number` | Used KB |
+
+---
+
+### `POST /api/database/table-create-sql`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `sql` | `string` | CREATE TABLE DDL (MySQL) or placeholder comment (MSSQL) |
+
+---
+
+### `POST /api/database/processes`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `processes[]` | `object[]` | Array of process objects |
+
+#### MySQL Fields (from `SHOW FULL PROCESSLIST`)
+| Field | Type | Description |
+|-------|------|-------------|
+| `Id` | `number` | Thread ID |
 | `User` | `string` | MySQL user |
 | `Host` | `string` | Client host:port |
 | `db` | `string \| null` | Current database |
-| `Command` | `string` | Current command (Query, Sleep, etc.) |
+| `Command` | `string` | Current command |
 | `Time` | `number` | Seconds in current state |
 | `State` | `string` | Thread state |
-| `Info` | `string \| null` | Current SQL statement (full text) |
+| `Info` | `string \| null` | Current SQL (full text) |
 
-### MSSQL Fields (from `sys.dm_exec_requests`)
+#### MSSQL Fields
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_id` | `number` | Session ID (> 50 = user sessions) |
-| `login_name` | `string` | Login name |
-| `status` | `string` | Request status |
-| `command` | `string` | Current command type |
-| `wait_type` | `string \| null` | Current wait type |
-| `cpu_time` | `number` | CPU time in ms |
-| `total_elapsed_time` | `number` | Elapsed time in ms |
-| `reads` | `number` | Logical reads |
-| `writes` | `number` | Logical writes |
+| `Id` | `number` | Session ID (aliased from `session_id`) |
+| `Status` | `string` | Request status |
+| `Command` | `string` | Command type |
+| `db` | `string` | Database name (via `DB_NAME()`) |
+| `State` | `string \| null` | Wait type |
+| `Time` | `number` | Elapsed time in ms |
 
 ---
 
-## API Response: `POST /api/database/status`
+### `POST /api/database/status`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | `object` | Key-value pairs of server status variables |
+| `success` | `boolean` | `true` |
+| `status` | `object` | Key-value status variables |
 
-### MySQL Status Keys
+#### MySQL Status Keys
 | Key | Source | Description |
 |-----|--------|-------------|
 | `version` | `SELECT VERSION()` | MySQL version string |
@@ -245,46 +360,48 @@ ORDER BY TABLE_NAME
 | `Threads_connected` | `SHOW GLOBAL STATUS` | Current connected threads |
 | `Questions` | `SHOW GLOBAL STATUS` | Total queries executed |
 | `Slow_queries` | `SHOW GLOBAL STATUS` | Slow query count |
+| `Open_tables` | `SHOW GLOBAL STATUS` | Open tables count |
 | `Bytes_received` | `SHOW GLOBAL STATUS` | Total bytes received |
 | `Bytes_sent` | `SHOW GLOBAL STATUS` | Total bytes sent |
 
-### MSSQL Status Keys
+#### MSSQL Status Keys
 | Key | Source | Description |
 |-----|--------|-------------|
 | `server_name` | `@@SERVERNAME` | Server instance name |
 | `version` | `@@VERSION` | Full version string |
-| `spid` | `@@SPID` | Current session process ID |
-| `user_connections` | `SELECT COUNT(*)` from `sys.dm_exec_sessions` | Active user connections |
+| `current_db` | `DB_NAME()` | Current database |
+| `user_connections` | `sys.dm_exec_sessions` | Active user connections |
 
 ---
 
-## API Response: `POST /api/database/query`
+### `POST /api/database/query`
 
-### SELECT Results
+#### SELECT Results
 | Field | Type | Description |
 |-------|------|-------------|
-| `columns[]` | `string[]` | Column names from result set |
-| `rows[]` | `object[]` | Row data as column→value objects |
-| `executionTime` | `number` | Query execution time in milliseconds |
+| `success` | `boolean` | `true` |
+| `columns[]` | `string[]` | Column names |
+| `rows[]` | `object[]` | Row data |
+| `rowCount` | `number` | Number of rows returned |
 
-### DML Results (INSERT/UPDATE/DELETE)
+#### DML Results
 | Field | Type | Description |
 |-------|------|-------------|
-| `affectedRows` | `number` | Number of rows affected |
-| `insertId` | `number` | Last inserted auto-increment ID (MySQL) |
-| `message` | `string` | Summary message (e.g., "Query executed: 5 rows affected") |
+| `success` | `boolean` | `true` |
+| `affectedRows` | `number` | Rows affected |
+| `insertId` | `number` | Last inserted ID (MySQL) |
+| `message` | `string` | Summary message |
 | `columns` | `[]` | Empty array |
 | `rows` | `[]` | Empty array |
-| `executionTime` | `number` | Query execution time in milliseconds |
 
 ---
 
-## API Response: `POST /api/database/export-csv`
+### `POST /api/database/export-csv`
 
 **Content-Type**: `text/csv`  
 **Content-Disposition**: `attachment; filename="export.csv"`
 
-Returns raw CSV text — header row followed by data rows. Fields containing commas, quotes, or newlines are properly escaped.
+Returns raw CSV text with proper escaping.
 
 ---
 
@@ -293,7 +410,8 @@ Returns raw CSV text — header row followed by data rows. Fields containing com
 ### DatabaseManager Component
 | State | Type | Default | Storage | Description |
 |-------|------|---------|---------|-------------|
-| `connections` | `Connection[]` | `[]` | `localStorage: db_connections_v2` | Saved connection configurations |
+| `connections` | `Connection[]` | `[]` | API (`db_connections` table) | Saved connection configurations (shared across users) |
+| `loadingConnections` | `boolean` | `true` | — | Whether connections are being fetched from API |
 | `sshKeys` | `SSHKeyInfo[]` | `[]` | — | Available SSH keys from server |
 | `activeConnection` | `Connection \| null` | `null` | — | Currently active connection |
 | `connected` | `boolean` | `false` | — | Whether actively connected |
@@ -304,23 +422,23 @@ Returns raw CSV text — header row followed by data rows. Fields containing com
 | `databases` | `string[]` | `[]` | — | Available databases on connected server |
 | `tables` | `TableInfo[]` | `[]` | — | Tables in current database |
 | `loadingTables` | `boolean` | `false` | — | Table list loading |
-| `expandedTable` | `string \| null` | `null` | — | Currently expanded table in sidebar tree |
-| `tableColumns` | `Record<string, any[]>` | `{}` | — | Cached column info per table name |
+| `expandedTable` | `string \| null` | `null` | — | Currently expanded table in sidebar |
+| `tableColumns` | `Record<string, any[]>` | `{}` | — | Cached column info per table |
 | `dialogOpen` | `boolean` | `false` | — | Connection dialog visibility |
 | `editingConn` | `Connection \| null` | `null` | — | Connection being edited (null = new) |
 | `mainTab` | `MainTab` | `'query'` | — | Active main area tab |
-| `browsingTable` | `string \| null` | `null` | — | Table being browsed in Browse tab |
-| `queryHistory` | `string[]` | `[]` | `localStorage: db_query_history` | Recent SQL queries (max 100, deduped) |
+| `browsingTable` | `string \| null` | `null` | — | Table being browsed |
+| `queryHistory` | `string[]` | `[]` | `localStorage: db_query_history` | Recent SQL queries (max 100) |
 | `savedQueries` | `{ name, sql }[]` | `[]` | `localStorage: db_saved_queries` | Named saved queries |
 | `showHistory` | `boolean` | `false` | — | History panel visibility |
 | `showSaved` | `boolean` | `false` | — | Saved queries panel visibility |
 | `sidebarCollapsed` | `boolean` | `false` | — | Sidebar collapse state |
-| `tableInfo` | `any` | `null` | — | Table size stats for Info tab |
-| `tableIndexes` | `any[]` | `[]` | — | Table indexes for Info tab |
-| `createSQL` | `string` | `''` | — | CREATE TABLE DDL for Info tab |
-| `processes` | `any[]` | `[]` | — | Active processes for Processes tab |
-| `serverStatus` | `any` | `null` | — | Server status for Server tab |
-| `infoTable` | `string \| null` | `null` | — | Table currently shown in Info tab |
+| `tableInfo` | `any` | `null` | — | Table size stats |
+| `tableIndexes` | `any[]` | `[]` | — | Table indexes |
+| `createSQL` | `string` | `''` | — | CREATE TABLE DDL |
+| `processes` | `any[]` | `[]` | — | Active processes |
+| `serverStatus` | `any` | `null` | — | Server status |
+| `infoTable` | `string \| null` | `null` | — | Table shown in Info tab |
 
 ### TableBrowser Component
 | State | Type | Default | Description |
@@ -331,13 +449,23 @@ Returns raw CSV text — header row followed by data rows. Fields containing com
 | `page` | `number` | `1` | Current page |
 | `pageSize` | `number` | `100` | Rows per page |
 | `loading` | `boolean` | `false` | Data loading state |
-| `filterCol` | `string` | `''` | Selected filter column |
-| `filterVal` | `string` | `''` | Filter value (client-side WHERE) |
+| `sortColumn` | `string \| null` | `null` | Current sort column |
+| `sortDirection` | `'ASC' \| 'DESC' \| null` | `null` | Current sort direction |
+| `filters` | `FilterObject[]` | `[]` | Active server-side filters |
+| `filterCol` | `string` | `''` | Filter column being configured |
+| `filterOp` | `string` | `'LIKE'` | Filter operator being configured |
+| `filterVal` | `string` | `''` | Filter value being configured |
+| `editingRow` | `number \| null` | `null` | Index of row being edited inline |
+| `editForm` | `Record<string, any>` | `{}` | Form data for inline edit |
+| `showNewRow` | `boolean` | `false` | Whether new row form is visible |
+| `newRowForm` | `Record<string, any>` | `{}` | Form data for new row |
+| `selectedRows` | `Set<number>` | `new Set()` | Indices of selected rows (checkboxes) |
+| `primaryKeys` | `string[]` | `[]` | Detected primary key columns |
 
 ### ConnectionDialog Component
 | State | Type | Default | Description |
 |-------|------|---------|-------------|
-| `form` | `Partial<Connection>` | From prop or empty | Form data for connection fields |
+| `form` | `Connection` | From prop or empty | Form data for connection fields |
 | `testing` | `boolean` | `false` | Test connection in progress |
 | `testResult` | `string \| null` | `null` | Test result message |
 
@@ -347,6 +475,7 @@ Returns raw CSV text — header row followed by data rows. Fields containing com
 
 | Key | Type | Max Size | Description |
 |-----|------|----------|-------------|
-| `db_connections_v2` | `Connection[]` | Unbounded | Saved connection configs (⚠️ includes plaintext passwords) |
 | `db_query_history` | `string[]` | 100 entries | Recent SQL queries (newest first, deduped) |
 | `db_saved_queries` | `{ name: string, sql: string }[]` | Unbounded | Named saved queries |
+
+**Note**: Connection configurations are no longer stored in localStorage. They are stored in the `db_connections` MySQL table and fetched via `GET /database/connections`.

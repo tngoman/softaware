@@ -16,6 +16,7 @@ const MobileAuthQR: React.FC = () => {
   const [hasPending, setHasPending] = useState(false);
   const [challengeId, setChallengeId] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<string | null>(null);
+  const [challengeCode, setChallengeCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [completed, setCompleted] = useState(false);
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -38,6 +39,7 @@ const MobileAuthQR: React.FC = () => {
         setHasPending(true);
         setChallengeId(data.challenge_id);
         setQrCode(data.qr_code);
+        setChallengeCode(data.challenge_code || null);
         setExpiresAt(data.expires_at || null);
         setCompleted(false);
       } else {
@@ -45,6 +47,7 @@ const MobileAuthQR: React.FC = () => {
           setHasPending(false);
           setChallengeId(null);
           setQrCode(null);
+          setChallengeCode(null);
           setExpiresAt(null);
         }
       }
@@ -66,11 +69,13 @@ const MobileAuthQR: React.FC = () => {
           setCompleted(false);
           setChallengeId(null);
           setQrCode(null);
+          setChallengeCode(null);
         }, 5000);
       } else if (data.status === 'expired' || data.status === 'not_found') {
         setHasPending(false);
         setChallengeId(null);
         setQrCode(null);
+        setChallengeCode(null);
       }
     } catch {
       // ignore
@@ -90,6 +95,7 @@ const MobileAuthQR: React.FC = () => {
         setHasPending(false);
         setChallengeId(null);
         setQrCode(null);
+        setChallengeCode(null);
       }
     };
     updateCountdown();
@@ -117,8 +123,21 @@ const MobileAuthQR: React.FC = () => {
     return clearAllIntervals;
   }, [clearAllIntervals]);
 
-  // Don't render anything if there's no pending challenge
-  if (!hasPending) return null;
+  // Show a waiting state when there's no pending challenge
+  // (so users know where to look when the mobile app tells them to scan)
+  if (!hasPending) return (
+    <div className="bg-slate-50 border border-slate-200 rounded-xl p-5">
+      <div className="flex items-center gap-3 text-slate-500">
+        <DevicePhoneMobileIcon className="w-5 h-5 flex-shrink-0" />
+        <div>
+          <p className="text-sm font-medium text-slate-700">Mobile App Authentication</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            When you sign in on the SoftAware mobile app, a QR code will appear here for you to scan.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;
@@ -157,6 +176,14 @@ const MobileAuthQR: React.FC = () => {
                 alt="Mobile Authentication QR Code"
                 className="w-64 h-64 mx-auto"
               />
+            </div>
+          )}
+
+          {/* Manual entry code fallback */}
+          {challengeCode && (
+            <div className="w-full bg-white rounded-lg border border-gray-200 p-3 text-center">
+              <p className="text-xs text-gray-500 mb-1">Can't scan? Enter this 6-digit code in the app:</p>
+              <code className="text-2xl font-mono font-semibold text-indigo-700 tracking-[0.3em] select-all">{challengeCode}</code>
             </div>
           )}
 

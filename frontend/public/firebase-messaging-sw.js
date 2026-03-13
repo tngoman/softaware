@@ -43,6 +43,11 @@ function buildDeepLink(data) {
     return '/tasks';
   }
 
+  // Bug notifications → bugs page
+  if (type.startsWith('bug_')) {
+    return '/bugs';
+  }
+
   // Case notifications → case detail or cases list
   if (type.startsWith('case_')) {
     return data.action_url || data.link || '/cases';
@@ -80,6 +85,7 @@ messaging.onBackgroundMessage((payload) => {
   else if (isScheduledCall) tag = `sched-${conversationId}`;
   else if (type.startsWith('case_')) tag = `case-${data.caseId || 'general'}`;
   else if (type.startsWith('task_')) tag = `task-${data.task_id || 'general'}`;
+  else if (type.startsWith('bug_'))  tag = `bug-${data.bugId || 'general'}`;
 
   const notificationOptions = {
     body: payload.notification?.body || '',
@@ -142,6 +148,8 @@ self.addEventListener('notificationclick', (event) => {
     else urlToOpen = '/chat';
   } else if (data.type && data.type.startsWith('task_')) {
     urlToOpen = '/tasks';
+  } else if (data.type && data.type.startsWith('bug_')) {
+    urlToOpen = '/bugs';
   } else if (data.type && data.type.startsWith('case_')) {
     urlToOpen = data.action_url || '/cases';
   } else {

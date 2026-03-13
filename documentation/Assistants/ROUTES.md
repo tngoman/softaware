@@ -1,7 +1,7 @@
 # Assistants Module — API Routes
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-08
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,7 +9,7 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total endpoints** | 42 (+ 8 deprecated) |
+| **Total endpoints** | 44 (+ 8 deprecated) |
 | **Base URL** | `https://api.softaware.net.za` |
 | **Assistants router mount** | `/api/assistants` |
 | **Ingest router mount** | `/api/assistants/:assistantId/ingest` |
@@ -43,6 +43,8 @@
 | 9 | POST | /api/assistants/chat | None | SSE streaming chat with RAG |
 | 10 | GET | /api/assistants/widget.js | None | Embeddable chat widget script |
 | 11 | GET | /api/assistants/templates | None | Persona templates for creation UI |
+| 11a | GET | /api/assistants/telemetry-consent | JWT | Get user's telemetry consent status |
+| 11b | POST | /api/assistants/telemetry-consent | JWT | Accept/update telemetry consent |
 | 12 | POST | /api/assistants/admin/unload-model | None | Unload chat model from RAM |
 | 13 | GET | /api/assistants/admin/model-status | None | Check loaded Ollama models |
 | 14 | POST | /api/assistants/:assistantId/ingest/url | None | Enqueue URL for scraping |
@@ -87,6 +89,7 @@
 | 30 | GET | /api/v1/mobile/conversations | JWT | List conversation history |
 | 31 | GET | /api/v1/mobile/conversations/:id/messages | JWT | Get conversation messages |
 | 32 | DELETE | /api/v1/mobile/conversations/:id | JWT | Delete conversation |
+| 43 | POST | /api/v1/mobile/tts | JWT | **NEW (v2.0.0):** Text-to-speech via OpenAI neural TTS |
 
 ### 2.4 Widget Chat (public, rate-limited) ⭐ NEW
 
@@ -462,7 +465,7 @@ curl -X POST https://api.softaware.net.za/api/assistants/assistant-1709000000000
 
 ### 5.1 POST /api/assistants/chat
 
-**Purpose:** Stream an AI chat response as Server-Sent Events (SSE). Uses RAG retrieval from sqlite-vec and Ollama for generation.
+**Purpose:** Stream an AI chat response as Server-Sent Events (SSE). Uses RAG retrieval from sqlite-vec and tier-based routing for generation. Supports optional image attachment for vision/multimodal analysis.
 
 **Request Body:**
 
@@ -471,6 +474,7 @@ curl -X POST https://api.softaware.net.za/api/assistants/assistant-1709000000000
 | assistantId | string | ✅ | Assistant ID |
 | message | string | ✅ | User's message |
 | conversationHistory | array | ❌ | Previous `{role, content}` pairs (max 10 used) |
+| image | string | ❌ | **NEW (v2.0.0):** Base64 data-URI of attached image (`data:image/png;base64,...`). When present, routes to vision models instead of text models. |
 
 **curl Example:**
 
@@ -595,6 +599,86 @@ curl https://api.softaware.net.za/api/assistants/templates
   }
 }
 ```
+
+---
+
+### 6.3 GET /api/assistants/telemetry-consent ⭐ NEW (v2.2.0)
+
+**Purpose:** Get the current user's telemetry consent status and assistant count. Used by the frontend to decide whether to show the consent modal before first assistant creation.
+
+**Auth:** JWT Bearer token (requireAuth)
+
+**curl Example:**
+
+```bash
+curl https://api.softaware.net.za/api/assistants/telemetry-consent \
+  -H "Authorization: Bearer <jwt>"
+```
+
+**Success Response (200):**
+
+```json
+{
+  "success": true,
+  "consent": {
+    "accepted": true,
+    "optedOut": false,
+    "consentDate": "2026-03-12T10:30:00.000Z"
+  },
+  "assistantCount": 2
+}
+```
+
+**Notes:**
+- `assistantCount` is the total number of assistants the user owns (SELECT COUNT from `assistants` WHERE `userId` = ?)
+- If user has never given consent: `accepted = false`, `optedOut = false`, `consentDate = null`
+- Frontend shows modal when `accepted = false` and `assistantCount = 0` (first-time assistant creation)
+
+---
+
+### 6.4 POST /api/assistants/telemetry-consent ⭐ NEW (v2.2.0)
+
+**Purpose:** Accept or update telemetry consent. Called when user clicks "Accept" on the consent modal. Paid users can additionally set the opt-out flag to disable analytics logging for their chat sessions.
+
+**Auth:** JWT Bearer token (requireAuth)
+
+**Request Body:**
+
+```json
+{
+  "accepted": true,
+  "optOut": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `accepted` | boolean | Yes | Whether user accepts telemetry terms |
+| `optOut` | boolean | No | If true, user's portal chat will NOT be logged (paid users only) |
+
+**curl Example:**
+
+```bash
+curl -X POST https://api.softaware.net.za/api/assistants/telemetry-consent \
+  -H "Authorization: Bearer <jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{ "accepted": true, "optOut": false }'
+```
+
+**Success Response (200):**
+
+```json
+{
+  "success": true,
+  "message": "Telemetry consent updated"
+}
+```
+
+**Notes:**
+- Updates MySQL `users` table columns: `telemetry_consent_accepted`, `telemetry_opted_out`, `telemetry_consent_date`
+- `telemetry_consent_date` set to `NOW()` on every update
+- The `optOut` flag only affects portal SSE chat logging (assistants.ts). Widget and enterprise webhook logging is always on (those are client-facing, not user-facing).
+- Route registered before `/templates` and `/:assistantId` catch-all to avoid path conflicts
 
 ---
 
@@ -1109,7 +1193,7 @@ curl -X DELETE -H 'Authorization: Bearer <jwt>' \
 
 ### 10.1 POST /api/v1/mobile/intent
 
-**Purpose:** Process a voice-transcribed text through the AI assistant with function calling. Now supports optional `assistantId` for assistant selection.
+**Purpose:** Process a voice-transcribed text through the AI assistant with function calling. Now supports optional `assistantId` for assistant selection and optional `image` for vision analysis.
 
 **Request Body:**
 
@@ -1119,6 +1203,7 @@ curl -X DELETE -H 'Authorization: Bearer <jwt>' \
 | conversationId | string | ❌ | Resume an existing conversation |
 | assistantId | string | ❌ | **NEW (v1.4.0):** Use a specific assistant's prompt & model |
 | language | string | ❌ | Language hint (e.g., "en", "af") |
+| image | string | ❌ | **NEW (v2.0.0):** Base64 data-URI of attached image. Must be `data:image/*` format, max ~10MB. Routes to vision models on first round. |
 
 **curl Example:**
 
@@ -1291,6 +1376,46 @@ curl -X DELETE -H 'Authorization: Bearer <jwt>' \
 |--------|-------|------|
 | 401 | `Authentication required` | No JWT |
 | 404 | `Conversation not found` | ID doesn't exist or not owned by user |
+
+---
+
+### 10.6 POST /api/v1/mobile/tts ⭐ NEW (v2.0.0)
+
+**Purpose:** Text-to-speech synthesis using OpenAI-compatible neural TTS. Converts AI response text into spoken audio for mobile voice output.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| text | string | ✅ | Text to synthesize (max ~4000 chars) |
+| voice | string | ❌ | Voice name (default: `alloy`). Options: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer` |
+
+**curl Example:**
+
+```bash
+curl -X POST -H 'Authorization: Bearer <jwt>' \
+  -H 'Content-Type: application/json' \
+  https://api.softaware.net.za/api/v1/mobile/tts \
+  -d '{"text": "Hello, how can I help you today?", "voice": "nova"}'
+```
+
+**Success Response (200):**
+
+Returns audio binary with `Content-Type: audio/mpeg`.
+
+**Error Responses:**
+
+| Status | Error | When |
+|--------|-------|------|
+| 400 | `Missing "text" field` | No text provided |
+| 401 | `Authentication required` | No JWT |
+| 500 | `TTS generation failed` | OpenAI API error |
+
+**Notes:**
+- Uses the OpenAI TTS API endpoint (`/v1/audio/speech`)
+- API key sourced from credential vault (`service_name='OpenAI'`)
+- Returns raw audio bytes — client plays directly without decoding
+- STT (speech-to-text) uses browser-native Web Speech API on the frontend — no backend endpoint needed
 
 ---
 

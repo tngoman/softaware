@@ -122,13 +122,11 @@ export interface PlanningUser {
 }
 
 export interface StartCallResult {
-  action: 'start_scheduled_call' | 'initiate_call';
-  scheduled_call_id?: number;
-  call_session_id?: number;
-  event_id?: number;
-  call_type?: string;
-  title?: string;
-  attendee_user_ids?: string[];
+  call_id: number;
+  conversation_id: number;
+  call_type: string;
+  screen_share?: boolean;
+  status: string;
 }
 
 // ─── API Methods ─────────────────────────────────────────────────────────

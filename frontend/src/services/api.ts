@@ -57,11 +57,21 @@ function forceLogout() {
   window.location.href = '/login';
 }
 
-// Add response interceptor to handle 401 errors with silent refresh
+// Add response interceptor to handle 401 and 403 errors
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+
+    // Handle 403 — permission denied
+    if (error.response?.status === 403) {
+      const message = error.response?.data?.error || error.response?.data?.message || 'You do not have permission to perform this action.';
+      // Dynamically import toast to avoid circular deps
+      import('react-hot-toast').then(({ default: toast }) => {
+        toast.error(message, { duration: 5000, id: 'permission-denied' });
+      });
+      return Promise.reject(error);
+    }
 
     // Only handle 401s
     if (error.response?.status !== 401) {

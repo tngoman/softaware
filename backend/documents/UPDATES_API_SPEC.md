@@ -26,16 +26,17 @@
    - [Upload](#7-upload)
    - [Download](#8-download)
    - [Heartbeat](#9-heartbeat)
-   - [Clients](#10-clients)
-   - [Users](#11-users)
-   - [Modules](#12-modules)
-   - [Module Developers](#13-module-developers)
-   - [Installed Updates](#14-installed-updates)
-   - [Schema](#15-schema)
-   - [Password Reset](#16-password-reset)
-   - [Verify OTP](#17-verify-otp)
-   - [Reset Password](#18-reset-password)
-   - [API Status](#19-api-status)
+   - [Error Reports](#10-error-reports)
+   - [Clients](#11-clients)
+   - [Users](#12-users)
+   - [Modules](#13-modules)
+   - [Module Developers](#14-module-developers)
+   - [Installed Updates](#15-installed-updates)
+   - [Schema](#16-schema)
+   - [Password Reset](#17-password-reset)
+   - [Verify OTP](#18-verify-otp)
+   - [Reset Password](#19-reset-password)
+   - [API Status](#20-api-status)
 8. [User Roles](#user-roles)
 9. [Remote Control (Client Commands)](#remote-control-client-commands)
 10. [Error Handling](#error-handling)
@@ -756,7 +757,20 @@ Client applications call this endpoint periodically to:
   "update_id": null,
   "metadata": {
     "custom_key": "custom_value"
-  }
+  },
+  "recent_errors": [
+    {
+      "type": "RuntimeException",
+      "level": "error",
+      "label": "Database Connection Failed",
+      "message": "SQLSTATE[HY000] [2002] Connection refused",
+      "file": "/app/Models/User.php",
+      "line": 45,
+      "trace": "#0 /app/Controllers/Api.php(12)...",
+      "url": "https://portal.example.com/api/users",
+      "timestamp": "2026-03-13T10:30:00+02:00"
+    }
+  ]
 }
 ```
 
@@ -776,6 +790,7 @@ Client applications call this endpoint periodically to:
 | `update_installed` | No | If true, records update installation |
 | `update_id` | No | Which update was just installed |
 | `metadata` | No | Arbitrary JSON metadata |
+| `recent_errors` | No | Array of error objects to piggyback on heartbeat (see [Error Reports](#10-error-reports)) |
 
 **Client Identifier Generation** (when not provided):
 - SHA-256 hash of: `hostname|machine_name|mac_address|os_info`
@@ -806,7 +821,8 @@ Client applications call this endpoint periodically to:
   "is_blocked": false,
   "blocked_reason": null,
   "force_logout": false,
-  "server_message": null
+  "server_message": null,
+  "errors_received": 0
 }
 ```
 
@@ -828,7 +844,209 @@ Client applications call this endpoint periodically to:
 
 ---
 
-### 10. Clients
+### 10. Error Reports
+
+**`POST /api/error-report`** — Public (requires software key)  
+**`GET /api/error-report`** — Admin  
+**`GET /api/error-report/summaries`** — Admin
+
+Clients report errors to the server either via this dedicated endpoint or by piggybacking on heartbeats using the `recent_errors` field.
+
+#### POST — Submit Error Reports
+
+**Request Body:**
+```json
+{
+  "software_key": "20251001SILU",
+  "client_identifier": "abc123def456...",
+  "hostname": "WORKSTATION-01",
+  "os_info": "Linux 6.5.0",
+  "app_version": "2.1.0",
+  "source": "backend",
+  "errors": [
+    {
+      "type": "RuntimeException",
+      "level": "error",
+      "label": "Database Connection Failed",
+      "message": "SQLSTATE[HY000] [2002] Connection refused",
+      "file": "/app/Models/User.php",
+      "line": 45,
+      "column": 12,
+      "trace": "#0 /app/Controllers/Api.php(12): User->find()\n#1 ...",
+      "url": "https://portal.example.com/api/users",
+      "request": {
+        "method": "GET",
+        "uri": "/api/users",
+        "route": "users.index",
+        "ip": "196.xxx.xxx.xxx",
+        "user_agent": "Mozilla/5.0..."
+      },
+      "timestamp": "2026-03-13T10:30:00+02:00"
+    }
+  ],
+  "metadata": {
+    "php_version": "8.2.28",
+    "server_software": "Apache/2.4.63",
+    "portal_type": "Silulumanzi Portal",
+    "reported_at": "2026-03-13T10:30:05+02:00"
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `software_key` | Yes | Also accepted via `X-Software-Key` header |
+| `client_identifier` | Yes | The same identifier used in heartbeats |
+| `hostname` | No | Machine hostname |
+| `os_info` | No | Operating system details |
+| `app_version` | No | Currently installed version |
+| `source` | No | `"backend"` (default) or `"frontend"` |
+| `errors` | Yes | Array of error objects (min 1) |
+| `metadata` | No | Extra context (PHP version, server software, etc.) |
+
+**Error Object Fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | Error class/type (e.g. `"RuntimeException"`, `"TypeError"`) |
+| `level` | Yes | `"error"`, `"warning"`, or `"notice"` |
+| `label` | Yes | Short human-readable label |
+| `message` | Yes | Full error message |
+| `file` | No | Source file where error occurred |
+| `line` | No | Line number |
+| `column` | No | Column number |
+| `trace` | No | Stack trace string |
+| `url` | No | URL where error occurred |
+| `request` | No | Request context object |
+| `request.method` | No | HTTP method (GET, POST, etc.) |
+| `request.uri` | No | Request URI |
+| `request.route` | No | Named route |
+| `request.ip` | No | Client IP |
+| `request.user_agent` | No | Browser/client user agent |
+| `timestamp` | No | When the error occurred (ISO 8601). Defaults to server time if omitted |
+
+**Success Response (200):**
+```json
+{
+  "success": true,
+  "received": 3,
+  "message": "Error report received"
+}
+```
+
+**Blocked Client Response (403):**
+```json
+{
+  "success": false,
+  "blocked": true,
+  "reason": "Client is blocked"
+}
+```
+
+**Key Behaviors:**
+- Errors are stored individually in `error_reports` table
+- Per-client summary counts are auto-maintained in `client_error_summaries`
+- Blocked clients cannot submit error reports
+- The `errors` array is validated — each error must have `type`, `level`, `label`, and `message`
+- Messages are truncated to 65,000 characters
+
+#### Heartbeat Piggybacking
+
+As an alternative to the dedicated endpoint, clients can include a `recent_errors` array in their heartbeat payload. The format is the same as the `errors` array above:
+
+```json
+{
+  "software_key": "20251001SILU",
+  "client_identifier": "abc123...",
+  "hostname": "WORKSTATION-01",
+  "app_version": "2.1.0",
+  "recent_errors": [
+    {
+      "type": "Warning",
+      "level": "warning",
+      "label": "Deprecated API Usage",
+      "message": "Method X is deprecated, use Y instead",
+      "file": "/app/Services/Legacy.php",
+      "line": 88,
+      "timestamp": "2026-03-13T10:25:00+02:00"
+    }
+  ]
+}
+```
+
+The heartbeat response includes `errors_received` count confirming how many were stored.
+
+#### GET — Browse Error Reports (Admin)
+
+**Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `software_key` | Filter by software key |
+| `client_identifier` | Filter by client |
+| `level` | Filter by level: `error`, `warning`, `notice` |
+| `source` | Filter by source: `backend`, `frontend` |
+| `hostname` | Filter by hostname (partial match) |
+| `limit` | Max results (default 200, max 1000) |
+| `offset` | Pagination offset |
+
+**Response:**
+```json
+{
+  "success": true,
+  "errors": [
+    {
+      "id": 5,
+      "software_key": "20251001SILU",
+      "software_name": "Silulumanzi Portal",
+      "client_identifier": "abc123...",
+      "hostname": "WORKSTATION-01",
+      "source": "backend",
+      "error_type": "RuntimeException",
+      "error_level": "error",
+      "error_label": "Database Connection Failed",
+      "error_message": "SQLSTATE[HY000] [2002] Connection refused",
+      "error_file": "/app/Models/User.php",
+      "error_line": 45,
+      "error_trace": "#0 ...",
+      "error_url": "https://portal.example.com/api/users",
+      "app_version": "2.1.0",
+      "error_occurred_at": "2026-03-13 08:30:00",
+      "received_at": "2026-03-13 08:30:05"
+    }
+  ],
+  "total": 42,
+  "limit": 200,
+  "offset": 0
+}
+```
+
+#### GET /summaries — Per-Client Error Summaries (Admin)
+
+**Response:**
+```json
+{
+  "success": true,
+  "summaries": [
+    {
+      "id": 1,
+      "software_key": "20251001SILU",
+      "software_name": "Silulumanzi Portal",
+      "client_identifier": "abc123...",
+      "hostname": "WORKSTATION-01",
+      "total_errors": 12,
+      "total_warnings": 5,
+      "total_notices": 3,
+      "last_error_message": "Connection refused",
+      "last_error_at": "2026-03-13 08:30:00"
+    }
+  ]
+}
+```
+
+---
+
+### 11. Clients
 
 **`GET /api/clients`** — Admin  
 **`GET /api/clients?id={id}`** — Admin  

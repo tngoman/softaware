@@ -10,13 +10,14 @@ import { badRequest } from '../utils/httpErrors.js';
 import { env } from '../config/env.js';
 import { sendTwoFactorOtp } from '../services/emailService.js';
 import { sendSms } from '../services/smsService.js';
+import { createPushChallenge } from './twoFactor.js';
 
 export const authRouter = Router();
 
 // ─── Helper: Build frontend-compatible User shape ──────────────────
 export async function buildFrontendUser(userId: string) {
-  const user = await db.queryOne<User>(
-    'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+  const user = await db.queryOne<User & { is_admin?: number; is_staff?: number }>(
+    'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, createdAt, updatedAt FROM users WHERE id = ?',
     [userId]
   );
   if (!user) return null;
@@ -25,7 +26,11 @@ export async function buildFrontendUser(userId: string) {
   const firstName = nameParts[0] || '';
   const lastName = nameParts.slice(1).join(' ') || '';
 
-  // Resolve role from user_roles table
+  // Read admin/staff flags directly from users table
+  const isAdmin = !!(user as any).is_admin;
+  const isStaff = !!(user as any).is_staff;
+
+  // Resolve role from user_roles table (for display/legacy purposes)
   let userRole: { id: number; name: string; slug: string } | null = null;
   const roleRow = await db.queryOne<{ role_id: number; role_name: string; role_slug: string }>(
     `SELECT r.id AS role_id, r.name AS role_name, r.slug AS role_slug
@@ -38,11 +43,13 @@ export async function buildFrontendUser(userId: string) {
   if (roleRow) {
     userRole = { id: roleRow.role_id, name: roleRow.role_name, slug: roleRow.role_slug };
   } else {
-    userRole = { id: 0, name: 'Client', slug: 'client' };
+    // Derive a display role from the flags
+    userRole = isAdmin
+      ? { id: 0, name: 'Administrator', slug: 'admin' }
+      : isStaff
+        ? { id: 0, name: 'Staff', slug: 'staff' }
+        : { id: 0, name: 'Client', slug: 'client' };
   }
-
-  const isAdmin = userRole.slug === 'admin' || userRole.slug === 'super_admin';
-  const isStaff = ['developer', 'client_manager', 'qa_specialist', 'deployer'].includes(userRole.slug);
 
   // Resolve permissions from role_permissions
   let permissions: Array<{ id: number; name: string; slug: string }> = [];
@@ -134,6 +141,10 @@ const RegisterSchema = z.object({
   password: z.string().min(8),
   name: z.string().min(1).max(255).optional(),
   teamName: z.string().min(1).optional(),
+  // Contact fields for client signup
+  company_name: z.string().min(1).max(255).optional(),
+  phone: z.string().max(20).optional(),
+  address: z.string().max(500).optional(),
 });
 
 authRouter.post('/register', async (req, res, next) => {
@@ -155,9 +166,19 @@ authRouter.post('/register', async (req, res, next) => {
 
       const userName = input.name || input.email.split('@')[0];
 
+      // Create a contact record for this client
+      const contactName = input.company_name || userName;
       await conn.execute(
-        'INSERT INTO users (id, email, name, passwordHash, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)',
-        [userId, input.email, userName, passwordHash, now, now]
+        `INSERT INTO contacts (company_name, contact_person, email, phone, location, contact_type, remarks, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, 'Client signup', 1, ?, ?)`,
+        [contactName, userName, input.email, input.phone || null, input.address || null, now, now]
+      );
+      const [contactRows] = await conn.execute('SELECT LAST_INSERT_ID() as id');
+      const contactId = (contactRows as any[])[0]?.id;
+
+      await conn.execute(
+        'INSERT INTO users (id, email, name, passwordHash, contact_id, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [userId, input.email, userName, passwordHash, contactId, now, now]
       );
 
       // Legacy: create team + membership for credit balance scoping (to be removed)
@@ -263,16 +284,37 @@ authRouter.post('/login', async (req, res, next) => {
         }
       }
 
+      // For TOTP (app) method, create a push challenge and send FCM notification
+      // so the user can approve login from their mobile app with a single tap
+      let challengeId: string | null = null;
+      if (method === 'totp') {
+        try {
+          challengeId = await createPushChallenge(
+            user.id,
+            input.rememberMe,
+            user.email,
+            (user as any).name,
+          );
+        } catch (err) {
+          console.error('[Auth] Failed to create push challenge:', err);
+          // Non-fatal — user can still enter TOTP code manually
+        }
+      }
+
       return res.json({
         success: true,
         requires_2fa: true,
         two_factor_method: method,
         message: method === 'totp'
-          ? 'Two-factor authentication required. Enter your authenticator app code.'
+          ? (challengeId
+            ? 'Two-factor authentication required. Approve the login on your mobile app, or enter your authenticator code.'
+            : 'Two-factor authentication required. Enter your authenticator app code.')
           : method === 'email'
           ? 'Two-factor authentication required. A verification code has been sent to your email.'
           : 'Two-factor authentication required. A verification code has been sent to your phone.',
         temp_token: tempToken,
+        // Include challenge_id for push-to-approve polling (null if no mobile devices registered)
+        ...(challengeId ? { challenge_id: challengeId } : {}),
       });
     }
     // ── End 2FA check ─────────────────────────────────────────────
@@ -519,16 +561,12 @@ authRouter.post('/masquerade/exit', async (req, res, next) => {
     const adminId = String(decoded.userId);
 
     // Verify the user is actually an admin
-    const adminRole = await db.queryOne<{ slug: string }>(
-      `SELECT r.slug FROM user_roles ur
-       JOIN roles r ON r.id = ur.role_id
-       WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-         AND r.slug IN ('admin', 'super_admin')
-       LIMIT 1`,
+    const adminRow = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
       [adminId]
     );
 
-    if (!adminRole) {
+    if (!adminRow || !adminRow.is_admin) {
       return res.status(403).json({ success: false, error: 'Restore token does not belong to an admin' });
     }
 
@@ -933,6 +971,283 @@ authRouter.delete('/webauthn/credentials/:id', requireAuth, async (req: AuthRequ
 
     await db.execute('DELETE FROM webauthn_credentials WHERE id = ?', [credId]);
     res.json({ success: true, message: 'Passkey removed' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// PIN-BASED QUICK LOGIN (v1.9.0)
+// ═══════════════════════════════════════════════════════════════════
+// Lets users set a 4-digit PIN for faster re-authentication instead
+// of typing their full email + password every time.
+//
+// Flow:
+//   1. User sets a PIN in Settings → POST /auth/pin/set (password required)
+//   2. On next login, frontend detects returning user email in localStorage
+//   3. User enters PIN → POST /auth/pin/verify (email + pin)
+//   4. Backend validates PIN, issues JWT (same as normal login)
+//   5. Rate-limited: 5 attempts → 15-minute lockout
+// ═══════════════════════════════════════════════════════════════════
+
+/** Ensure user_pins table exists */
+async function ensurePinTable() {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS user_pins (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL UNIQUE,
+      pin_hash VARCHAR(255) NOT NULL,
+      failed_attempts INT DEFAULT 0,
+      locked_until DATETIME NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+ensurePinTable().catch((e) => console.warn('[PIN] table migration:', e));
+
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCKOUT_MINUTES = 15;
+
+// ─── GET /auth/pin/status ─────────────────────────────────────────
+// Check if the current user has a PIN set
+authRouter.get('/pin/status', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const { userId } = getAuth(req);
+    const row = await db.queryOne<{ id: number }>(
+      'SELECT id FROM user_pins WHERE user_id = ?',
+      [userId],
+    );
+    res.json({ success: true, data: { has_pin: !!row } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/pin/set ──────────────────────────────────────────
+// Set or update the user's PIN (requires current password for security)
+const SetPinSchema = z.object({
+  pin: z.string().regex(/^\d{4}$/, 'PIN must be exactly 4 digits'),
+  password: z.string().min(1, 'Current password is required'),
+});
+
+authRouter.post('/pin/set', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const { userId } = getAuth(req);
+    const input = SetPinSchema.parse(req.body);
+
+    // Verify current password
+    const user = await db.queryOne<{ passwordHash: string }>(
+      'SELECT passwordHash FROM users WHERE id = ?',
+      [userId],
+    );
+    if (!user) throw badRequest('User not found');
+
+    const passwordValid = await bcrypt.compare(input.password, user.passwordHash);
+    if (!passwordValid) throw badRequest('Incorrect password');
+
+    // Hash the PIN
+    const pinHash = await bcrypt.hash(input.pin, 10);
+
+    // Upsert the PIN
+    await db.execute(
+      `INSERT INTO user_pins (user_id, pin_hash, failed_attempts, locked_until)
+       VALUES (?, ?, 0, NULL)
+       ON DUPLICATE KEY UPDATE pin_hash = VALUES(pin_hash), failed_attempts = 0, locked_until = NULL, updated_at = NOW()`,
+      [userId, pinHash],
+    );
+
+    res.json({ success: true, message: 'PIN set successfully' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── DELETE /auth/pin ────────────────────────────────────────────
+// Remove the user's PIN
+authRouter.delete('/pin', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const { userId } = getAuth(req);
+    await db.execute('DELETE FROM user_pins WHERE user_id = ?', [userId]);
+    res.json({ success: true, message: 'PIN removed' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/pin/verify ──────────────────────────────────────
+// Quick login with email + PIN (no password required)
+// Rate-limited: 5 failed attempts → 15-minute lockout
+const VerifyPinSchema = z.object({
+  email: z.string().email(),
+  pin: z.string().regex(/^\d{4}$/, 'PIN must be exactly 4 digits'),
+});
+
+authRouter.post('/pin/verify', async (req, res, next) => {
+  try {
+    const input = VerifyPinSchema.parse(req.body);
+
+    // Find the user
+    const user = await db.queryOne<{ id: string; account_status: string; isActive: number }>(
+      'SELECT id, account_status, isActive FROM users WHERE email = ?',
+      [input.email],
+    );
+    if (!user) throw badRequest('Invalid email or PIN');
+    if (!user.isActive || user.account_status !== 'active') {
+      throw badRequest('Account is not active');
+    }
+
+    // Get PIN record
+    const pinRow = await db.queryOne<{
+      pin_hash: string;
+      failed_attempts: number;
+      locked_until: string | null;
+    }>(
+      'SELECT pin_hash, failed_attempts, locked_until FROM user_pins WHERE user_id = ?',
+      [user.id],
+    );
+    if (!pinRow) throw badRequest('PIN login is not set up for this account. Please sign in with your password.');
+
+    // Check lockout
+    if (pinRow.locked_until) {
+      const lockExpiry = new Date(pinRow.locked_until);
+      if (lockExpiry > new Date()) {
+        const minutesLeft = Math.ceil((lockExpiry.getTime() - Date.now()) / 60000);
+        throw badRequest(`Too many failed attempts. Try again in ${minutesLeft} minute${minutesLeft !== 1 ? 's' : ''}.`);
+      }
+      // Lockout expired — reset
+      await db.execute(
+        'UPDATE user_pins SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?',
+        [user.id],
+      );
+      pinRow.failed_attempts = 0;
+    }
+
+    // Verify PIN
+    const pinValid = await bcrypt.compare(input.pin, pinRow.pin_hash);
+    if (!pinValid) {
+      const newAttempts = pinRow.failed_attempts + 1;
+      if (newAttempts >= PIN_MAX_ATTEMPTS) {
+        await db.execute(
+          `UPDATE user_pins SET failed_attempts = ?, locked_until = DATE_ADD(NOW(), INTERVAL ? MINUTE) WHERE user_id = ?`,
+          [newAttempts, PIN_LOCKOUT_MINUTES, user.id],
+        );
+        throw badRequest(`Too many failed attempts. PIN login locked for ${PIN_LOCKOUT_MINUTES} minutes.`);
+      }
+      await db.execute(
+        'UPDATE user_pins SET failed_attempts = ? WHERE user_id = ?',
+        [newAttempts, user.id],
+      );
+      throw badRequest('Invalid email or PIN');
+    }
+
+    // PIN valid — reset failed attempts
+    await db.execute(
+      'UPDATE user_pins SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?',
+      [user.id],
+    );
+
+    // Check 2FA requirement
+    const twoFa = await db.queryOne<{ is_enabled: number; preferred_method: string }>(
+      'SELECT is_enabled, preferred_method FROM user_two_factor WHERE user_id = ? AND is_enabled = 1',
+      [user.id],
+    );
+
+    if (twoFa) {
+      // PIN bypasses password but NOT 2FA — issue temp token for 2FA flow
+      const tempToken = jwt.sign(
+        { userId: user.id, purpose: '2fa', rememberMe: true },
+        env.JWT_SECRET,
+        { expiresIn: '5m' },
+      );
+
+      const method = twoFa.preferred_method || 'totp';
+
+      // Auto-send OTP for email/SMS methods
+      if (method === 'email' || method === 'sms') {
+        const userDetails = await db.queryOne<{ email: string; name: string; phone: string }>(
+          'SELECT email, name, phone FROM users WHERE id = ?',
+          [user.id],
+        );
+        if (userDetails) {
+          if (method === 'email') {
+            await sendTwoFactorOtp(userDetails.email, userDetails.name, user.id);
+          } else if (method === 'sms' && userDetails.phone) {
+            const otp = Math.floor(100000 + Math.random() * 900000).toString();
+            const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+            await db.execute(
+              `UPDATE user_two_factor SET otp_code = ?, otp_expires_at = DATE_ADD(NOW(), INTERVAL 5 MINUTE) WHERE user_id = ?`,
+              [otpHash, user.id],
+            );
+            await sendSms(userDetails.phone, `Your SoftAware verification code is: ${otp}`);
+          }
+        }
+      }
+
+      // For TOTP users, try push-to-approve
+      let challengeId: string | null = null;
+      if (method === 'totp') {
+        const userDetails = await db.queryOne<{ email: string; name: string }>(
+          'SELECT email, name FROM users WHERE id = ?',
+          [user.id],
+        );
+        if (userDetails) {
+          challengeId = await createPushChallenge(user.id, true, userDetails.email, userDetails.name);
+        }
+      }
+
+      return res.json({
+        success: true,
+        requires_2fa: true,
+        two_factor_method: method,
+        temp_token: tempToken,
+        challenge_id: challengeId,
+        message: '2FA verification required',
+      });
+    }
+
+    // No 2FA — issue full token
+    const token = signAccessToken({ userId: user.id }, '30d');
+    const cookieMaxAge = 30 * 24 * 60 * 60 * 1000;
+    setAuthCookie(req, res, token, cookieMaxAge);
+
+    await trackSession(user.id, token, req);
+    const frontendUser = await buildFrontendUser(user.id);
+
+    res.json({
+      success: true,
+      message: 'PIN login successful',
+      data: { token, user: frontendUser },
+      accessToken: token,
+      token,
+      expiresIn: '30d',
+      user: frontendUser,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /auth/pin/check/:email ──────────────────────────────────
+// Public endpoint — check if an email has PIN login enabled
+// (used by frontend to show PIN pad vs password form)
+authRouter.get('/pin/check/:email', async (req, res, next) => {
+  try {
+    const email = decodeURIComponent(req.params.email);
+    const user = await db.queryOne<{ id: string }>(
+      'SELECT id FROM users WHERE email = ?',
+      [email],
+    );
+    if (!user) {
+      // Don't reveal whether email exists
+      return res.json({ success: true, data: { has_pin: false } });
+    }
+    const pinRow = await db.queryOne<{ id: number }>(
+      'SELECT id FROM user_pins WHERE user_id = ?',
+      [user.id],
+    );
+    res.json({ success: true, data: { has_pin: !!pinRow } });
   } catch (err) {
     next(err);
   }

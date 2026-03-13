@@ -378,13 +378,17 @@ Each item in the `errors` array:
 | `error_level` | string | **Yes** | One of: `"error"`, `"warning"`, `"notice"` |
 | `message` | string | **Yes** | Error message (max 65,000 chars) |
 | `timestamp` | string | **Yes** | ISO 8601 timestamp of when the error occurred |
+| `label` | string | No | Short label for grouping/display (defaults to `error_type` if omitted) |
 | `file` | string | No | Source file where the error occurred |
 | `line` | number | No | Line number |
+| `column` | number | No | Column number |
 | `stack_trace` | string | No | Full stack trace |
 | `url` | string | No | URL/route where the error occurred |
 | `user_agent` | string | No | Browser/client user-agent |
 | `request_method` | string | No | HTTP method (GET, POST, etc.) |
 | `request_uri` | string | No | Request URI path |
+
+> **Field name aliases:** The backend also accepts short names `type` (for `error_type`), `level` (for `error_level`), and `trace` (for `stack_trace`). The documented names above are preferred. Request context can also be sent as a nested `request` object with `method`, `uri`, `route`, `ip`, and `user_agent` sub-fields.
 
 #### Metadata Object (Optional)
 

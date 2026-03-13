@@ -47,16 +47,23 @@ export interface EnterpriseEndpoint {
   target_api_auth_value?: string;      // Encrypted auth credentials
   target_api_headers?: string;         // JSON object of custom headers
   
+  // IP restriction (JSON array of allowed IPs, e.g. '["1.2.3.4","10.0.0.0/8"]')
+  allowed_ips?: string;
+
   // Metadata
   created_at: string;
   updated_at: string;
   last_request_at?: string;
   total_requests: number;
+  
+  // Package system link
+  contact_id?: number;                 // Links to MySQL contacts.id for package billing
 }
 
 export interface EndpointCreateInput {
   client_id: string;
   client_name: string;
+  contact_id?: number;
   inbound_provider: string;
   llm_provider: string;
   llm_model: string;
@@ -107,6 +114,8 @@ function getDb(): Database.Database {
       target_api_auth_type    TEXT,
       target_api_auth_value   TEXT,
       target_api_headers      TEXT,
+      
+      allowed_ips             TEXT,
       
       created_at              TEXT NOT NULL,
       updated_at              TEXT NOT NULL,
@@ -174,16 +183,17 @@ export function createEndpoint(input: EndpointCreateInput): EnterpriseEndpoint {
 
   db.prepare(`
     INSERT INTO enterprise_endpoints (
-      id, client_id, client_name, status, inbound_provider,
+      id, client_id, client_name, contact_id, status, inbound_provider,
       llm_provider, llm_model, llm_temperature, llm_max_tokens,
       llm_system_prompt, llm_tools_config,
       target_api_url, target_api_auth_type, target_api_auth_value,
       created_at, updated_at, total_requests
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     endpoint.id,
     endpoint.client_id,
     endpoint.client_name,
+    (input as any).contact_id || null,
     endpoint.status,
     endpoint.inbound_provider,
     endpoint.llm_provider,

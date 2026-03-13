@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   BugAntIcon,
   ExclamationTriangleIcon,
@@ -57,8 +58,10 @@ const LEVEL_CONFIG: Record<string, { icon: React.ComponentType<{ className?: str
 
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return '—';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const secs = Math.floor(diff / 1000);
+  // Ensure UTC parsing for MySQL datetime strings (no timezone suffix)
+  const utcStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z';
+  const diff = Date.now() - new Date(utcStr).getTime();
+  const secs = Math.max(0, Math.floor(diff / 1000));
   if (secs < 60) return `${secs}s ago`;
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
@@ -181,17 +184,20 @@ const DetailItem: React.FC<{ label: string; value: string | null | undefined }> 
    ═══════════════════════════════════════════════════════════════ */
 
 const ErrorReports: React.FC = () => {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<'log' | 'summaries'>('log');
   const [errors, setErrors] = useState<ErrorRow[]>([]);
   const [summaries, setSummaries] = useState<ClientErrorSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [selectedError, setSelectedError] = useState<ErrorRow | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Filters
   const [filterLevel, setFilterLevel] = useState<string>('');
   const [filterSource, setFilterSource] = useState<string>('');
-  const [filterHostname, setFilterHostname] = useState('');
+  const [filterHostname, setFilterHostname] = useState(searchParams.get('hostname') || '');
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
 
@@ -229,7 +235,14 @@ const ErrorReports: React.FC = () => {
   useEffect(() => {
     if (tab === 'log') loadErrors();
     else loadSummaries();
-  }, [tab, loadErrors, loadSummaries]);
+
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      if (tab === 'log') loadErrors();
+      else loadSummaries();
+    }, 30000); // every 30s
+    return () => clearInterval(interval);
+  }, [tab, loadErrors, loadSummaries, autoRefresh]);
 
   /* ── Summary KPIs ──────────────────────────────────────── */
   const kpis = {
@@ -255,13 +268,24 @@ const ErrorReports: React.FC = () => {
             Errors reported by connected clients and applications
           </p>
         </div>
-        <button
-          onClick={() => tab === 'log' ? loadErrors() : loadSummaries()}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-white border rounded-lg hover:bg-gray-50 transition"
-        >
-          <ArrowPathIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="rounded text-red-600 focus:ring-red-500"
+            />
+            Auto-refresh
+          </label>
+          <button
+            onClick={() => tab === 'log' ? loadErrors() : loadSummaries()}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-white border rounded-lg hover:bg-gray-50 transition"
+          >
+            <ArrowPathIcon className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -364,7 +388,17 @@ const ErrorReports: React.FC = () => {
                               {err.error_message}
                             </td>
                             <td className="px-4 py-3 text-sm text-gray-700">{err.software_name || err.software_key}</td>
-                            <td className="px-4 py-3 text-sm text-gray-500">{err.hostname || '—'}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">
+                              {err.hostname ? (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); navigate(`/client-monitor?search=${encodeURIComponent(err.hostname!)}`); }}
+                                  className="text-indigo-600 hover:text-indigo-800 hover:underline transition"
+                                  title="View in Client Monitor"
+                                >
+                                  {err.hostname}
+                                </button>
+                              ) : '—'}
+                            </td>
                             <td className="px-4 py-3">
                               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                                 err.source === 'frontend' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-700'
@@ -386,6 +420,7 @@ const ErrorReports: React.FC = () => {
                 <div className="px-4 py-3 bg-gray-50 border-t flex items-center justify-between">
                   <p className="text-xs text-gray-500">
                     Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+                    {autoRefresh && <span className="ml-2">• Auto-refreshing every 30s</span>}
                   </p>
                   <div className="flex gap-1">
                     <button

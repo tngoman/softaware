@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAppStore } from '../../store';
 import { useAppSettings } from '../../hooks/useAppSettings';
+import { getApiBaseUrl } from '../../config/app';
 
 // Consumer-friendly features for PLG
 const consumerFeatures = [
@@ -63,8 +64,8 @@ const formatPrice = (cents: number): string => {
   return `R${rands.toLocaleString('en-ZA')}`;
 };
 
-// Consumer PLG pricing plans
-const consumerPlans = [
+// Consumer PLG pricing plans (fallback if API is unavailable)
+const fallbackConsumerPlans = [
   {
     id: 'free',
     name: 'Free Forever',
@@ -129,8 +130,8 @@ const consumerPlans = [
   },
 ];
 
-// Enterprise technical pricing plans
-const enterprisePlans = [
+// Enterprise technical pricing plans (fallback if API is unavailable)
+const fallbackEnterprisePlans = [
   {
     id: 'byoe',
     name: 'Bring Your Own Engine',
@@ -197,6 +198,23 @@ const enterprisePlans = [
   },
 ];
 
+/** Convert API package to the plan shape the LandingPage components expect */
+const apiPackageToPlan = (pkg: any, tierMap: Record<string, string> = {}) => ({
+  id: pkg.slug,
+  name: pkg.name,
+  tier: (tierMap[pkg.slug] || pkg.slug.toUpperCase()) as any,
+  priceMonthly: pkg.price_monthly,
+  priceAnnually: pkg.price_annually || 0,
+  trialDays: 0,
+  features: { items: pkg.features || [] },
+  isActive: true,
+  description: pkg.description || '',
+  cta: pkg.cta_text || 'Get Started',
+});
+
+const consumerTierMap: Record<string, string> = { free: 'FREE', starter: 'STARTER', professional: 'PROFESSIONAL' };
+const enterpriseTierMap: Record<string, string> = { byoe: 'BYOE', managed: 'MANAGED', custom: 'ENTERPRISE' };
+
 const getPlanFeatures = (plan: any): string[] => {
   if (!plan) return [];
   if (plan.features?.items && Array.isArray(plan.features.items)) {
@@ -218,6 +236,32 @@ const getPlanFeatures = (plan: any): string[] => {
 const LandingPage: React.FC = () => {
   const { isAuthenticated } = useAppStore();
   const { logoUrl, siteName } = useAppSettings();
+
+  // Dynamic pricing from database — falls back to hardcoded arrays
+  const [consumerPlans, setConsumerPlans] = useState(fallbackConsumerPlans);
+  const [enterprisePlans, setEnterprisePlans] = useState(fallbackEnterprisePlans);
+
+  useEffect(() => {
+    const fetchPricing = async () => {
+      try {
+        const baseUrl = getApiBaseUrl();
+        const res = await fetch(`${baseUrl}/packages/pricing`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success) {
+          if (data.consumer?.length) {
+            setConsumerPlans(data.consumer.map((p: any) => apiPackageToPlan(p, consumerTierMap)));
+          }
+          if (data.enterprise?.length) {
+            setEnterprisePlans(data.enterprise.map((p: any) => apiPackageToPlan(p, enterpriseTierMap)));
+          }
+        }
+      } catch {
+        // Fallback to hardcoded plans — already set as default state
+      }
+    };
+    fetchPricing();
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-50">

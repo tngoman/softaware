@@ -88,6 +88,7 @@ const formatSize = (bytes: number) => {
 interface ComposeProps {
   accounts: MailboxAccount[];
   defaultAccountId: number;
+  activeFolder?: string;
   replyTo?: MailMessage | null;
   replyAll?: boolean;
   forward?: MailMessage | null;
@@ -96,7 +97,7 @@ interface ComposeProps {
 }
 
 const ComposeModal: React.FC<ComposeProps> = ({
-  accounts, defaultAccountId, replyTo, replyAll, forward, onClose, onSent,
+  accounts, defaultAccountId, activeFolder: propFolder, replyTo, replyAll, forward, onClose, onSent,
 }) => {
   const [sending, setSending] = useState(false);
   const [accountId, setAccountId] = useState(defaultAccountId);
@@ -111,8 +112,20 @@ const ComposeModal: React.FC<ComposeProps> = ({
   const editorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
+  const bodyInitialized = useRef(false);
 
+  // Build the signature HTML for the current account
+  const getSignatureHtml = useCallback((acctId: number) => {
+    const acct = accounts.find(a => a.id === acctId);
+    if (!acct?.signature) return '';
+    return `<br/><div class="email-signature" style="margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 12px;">${acct.signature}</div>`;
+  }, [accounts]);
+
+  // Populate fields for reply / forward
   useEffect(() => {
+    let html = '';
+    const sig = getSignatureHtml(accountId);
+
     if (replyTo) {
       setTo(replyTo.from.address);
       setSubject(replyTo.subject.startsWith('Re:') ? replyTo.subject : `Re: ${replyTo.subject}`);
@@ -124,13 +137,13 @@ const ComposeModal: React.FC<ComposeProps> = ({
         setCc(ccAddrs);
         setShowCcBcc(!!ccAddrs);
       }
-      setBody(`<br/><br/><div style="border-left: 2px solid #ccc; padding-left: 12px; margin-left: 4px; color: #666;">
+      html = `<br/>${sig}<br/><div style="border-left: 2px solid #ccc; padding-left: 12px; margin-left: 4px; color: #666;">
         <p>On ${formatFullDate(replyTo.date)}, ${replyTo.from.name || replyTo.from.address} wrote:</p>
         ${replyTo.html || `<pre>${replyTo.text}</pre>`}
-      </div>`);
+      </div>`;
     } else if (forward) {
       setSubject(forward.subject.startsWith('Fwd:') ? forward.subject : `Fwd: ${forward.subject}`);
-      setBody(`<br/><br/><div style="border-top: 1px solid #ccc; padding-top: 12px; margin-top: 12px;">
+      html = `<br/>${sig}<br/><div style="border-top: 1px solid #ccc; padding-top: 12px; margin-top: 12px;">
         <p><strong>---------- Forwarded message ----------</strong></p>
         <p>From: ${forward.from.name} &lt;${forward.from.address}&gt;</p>
         <p>Date: ${formatFullDate(forward.date)}</p>
@@ -138,15 +151,61 @@ const ComposeModal: React.FC<ComposeProps> = ({
         <p>To: ${forward.to.map(a => a.address).join(', ')}</p>
         <br/>
         ${forward.html || `<pre>${forward.text}</pre>`}
-      </div>`);
+      </div>`;
+
+      // Download original attachments for forwarding
+      if (forward.attachments?.length > 0) {
+        (async () => {
+          const downloadedFiles: File[] = [];
+          for (const att of forward.attachments) {
+            try {
+              const url = `${getApiBaseUrl()}/api${WebmailModel.getAttachmentUrl(
+                defaultAccountId, propFolder || 'INBOX', forward.uid, att.partId
+              )}`;
+              const resp = await fetch(url, {
+                credentials: 'include',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('token') || ''}` },
+              });
+              if (resp.ok) {
+                const blob = await resp.blob();
+                const file = new File([blob], att.filename || `attachment-${att.partId}`, {
+                  type: att.contentType || 'application/octet-stream',
+                });
+                downloadedFiles.push(file);
+              }
+            } catch (e) {
+              console.warn('Failed to download forward attachment:', att.filename, e);
+            }
+          }
+          if (downloadedFiles.length > 0) {
+            setAttachments(prev => [...prev, ...downloadedFiles]);
+          }
+        })();
+      }
+    } else {
+      // New compose — just the signature
+      if (sig) {
+        html = `<br/>${sig}`;
+      }
+    }
+
+    if (html) {
+      setBody(html);
+      // Set editor content directly in this effect to avoid timing issues
+      if (editorRef.current) {
+        editorRef.current.innerHTML = html;
+        bodyInitialized.current = true;
+      }
     }
   }, [replyTo, replyAll, forward]);
 
+  // Fallback: set editor HTML when body state updates (for cases where ref wasn't ready)
   useEffect(() => {
-    if (editorRef.current && body) {
+    if (editorRef.current && body && !bodyInitialized.current) {
       editorRef.current.innerHTML = body;
+      bodyInitialized.current = true;
     }
-  }, []);
+  }, [body]);
 
   // ─── File handling ───────────────────────────────────────────────────
   const addFiles = (files: FileList | File[]) => {
@@ -269,7 +328,20 @@ const ComposeModal: React.FC<ComposeProps> = ({
               <span className="text-sm font-medium text-gray-500 w-12">From:</span>
               <select
                 value={accountId}
-                onChange={e => setAccountId(Number(e.target.value))}
+                onChange={e => {
+                  const newId = Number(e.target.value);
+                  // Swap signature in editor when switching accounts
+                  if (editorRef.current) {
+                    const editor = editorRef.current;
+                    const oldSig = editor.querySelector('.email-signature');
+                    if (oldSig) oldSig.remove();
+                    const newSigHtml = getSignatureHtml(newId);
+                    if (newSigHtml) {
+                      editor.insertAdjacentHTML('beforeend', newSigHtml);
+                    }
+                  }
+                  setAccountId(newId);
+                }}
                 className="flex-1 px-3 py-1.5 text-sm border rounded-lg focus:ring-2 focus:ring-picton-blue"
               >
                 {accounts.map(a => (
@@ -487,10 +559,11 @@ const Webmail: React.FC = () => {
       setFolders(f);
     } catch (err: any) {
       console.error('Failed to load folders:', err);
-      if (err.response?.status === 400 || err.response?.status === 404) {
+      const status = err.response?.status;
+      if (status === 400 || status === 401 || status === 404) {
         Swal.fire({
-          icon: 'error', title: 'Connection Error',
-          text: `Could not connect to ${activeAccount.email_address}. Check settings in Profile → Mailboxes.`,
+          icon: 'error', title: status === 401 ? 'Authentication Failed' : 'Connection Error',
+          text: err.response?.data?.message || `Could not connect to ${activeAccount.email_address}. Check settings in Profile → Mailboxes.`,
         });
       }
     } finally {
@@ -510,8 +583,14 @@ const Webmail: React.FC = () => {
       setTotalMessages(result.total);
       setTotalPages(result.pages);
       setCurrentPage(result.page);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load messages:', err);
+      if (err.response?.status === 401) {
+        Swal.fire({
+          icon: 'error', title: 'Authentication Failed',
+          text: err.response?.data?.message || `Could not connect to ${activeAccount.email_address}. Please update your password in Profile → Mailboxes.`,
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -953,6 +1032,7 @@ const Webmail: React.FC = () => {
         <ComposeModal
           accounts={accounts}
           defaultAccountId={defaultAccountId}
+          activeFolder={activeFolder}
           replyTo={replyTo}
           replyAll={replyAll}
           forward={forwardMsg}

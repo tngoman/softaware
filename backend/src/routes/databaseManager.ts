@@ -4,9 +4,16 @@ import { Client as SSHClient } from 'ssh2';
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireDeveloper } from '../middleware/requireDeveloper.js';
+import { db } from '../db/mysql.js';
 
 const router = Router();
+
+// ── All database routes require authenticated developer/admin ──
+router.use(requireAuth, requireDeveloper);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYS_DIR = path.resolve(__dirname, '..', '..', 'keys');
 
@@ -39,6 +46,14 @@ interface ConnectionBody {
   sql?: string;
   page?: number;
   pageSize?: number;
+  // Enhanced browse options
+  sortColumn?: string;
+  sortDirection?: 'ASC' | 'DESC';
+  filters?: { column: string; operator: string; value: string }[];
+  // Row operations
+  row?: Record<string, any>;
+  where?: Record<string, any>;
+  primaryKeys?: string[];
 }
 
 // ── SSH Tunnel ──────────────────────────────────────────────
@@ -121,6 +136,7 @@ async function withMySQL<T>(body: ConnectionBody, fn: (conn: mysql.Connection) =
       password: body.password || '',
       database: body.database || undefined,
       connectTimeout: 10000,
+      multipleStatements: true,
     });
     return await fn(conn);
   } finally {
@@ -163,6 +179,82 @@ async function withMSSQL<T>(body: ConnectionBody, fn: (pool: any) => Promise<T>)
 // ═══════════════════════════════════════════════════════════════
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
+
+// ── Shared Connections CRUD ─────────────────────────────────
+
+/** GET /connections — list all saved connections (shared across all users) */
+router.get('/connections', async (_req: Request, res: Response) => {
+  try {
+    const rows = await db.query(
+      'SELECT * FROM db_connections ORDER BY name ASC'
+    );
+    const connections = rows.map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      host: r.host,
+      port: r.port,
+      user: r.user,
+      password: r.password,
+      database: r.database,
+      type: r.type,
+      tunnel: {
+        sshHost: r.ssh_host || '',
+        sshPort: r.ssh_port || 22,
+        sshUser: r.ssh_user || '',
+        sshPassword: r.ssh_password || undefined,
+        sshKeyFile: r.ssh_key_file || undefined,
+      },
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+    res.json({ success: true, connections });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** POST /connections — create or update a connection */
+router.post('/connections', async (req: Request, res: Response) => {
+  try {
+    const { id, name, host, port, user, password, database: dbName, type, tunnel } = req.body;
+    if (!name || !host || !type) {
+      return res.status(400).json({ success: false, error: 'name, host, and type are required' });
+    }
+    const userId = (req as AuthRequest).userId || null;
+    const connId = id || crypto.randomUUID();
+    const t = tunnel || {};
+
+    await db.query(
+      `INSERT INTO db_connections (id, name, host, port, user, password, \`database\`, type, ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         name = VALUES(name), host = VALUES(host), port = VALUES(port),
+         user = VALUES(user), password = VALUES(password), \`database\` = VALUES(\`database\`),
+         type = VALUES(type), ssh_host = VALUES(ssh_host), ssh_port = VALUES(ssh_port),
+         ssh_user = VALUES(ssh_user), ssh_password = VALUES(ssh_password),
+         ssh_key_file = VALUES(ssh_key_file)`,
+      [
+        connId, name, host, port || 3306, user || '', password || '',
+        dbName || '', type, t.sshHost || '', t.sshPort || 22,
+        t.sshUser || '', t.sshPassword || null, t.sshKeyFile || null, userId,
+      ]
+    );
+    res.json({ success: true, id: connId });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** DELETE /connections/:id — remove a connection */
+router.delete('/connections/:id', async (req: Request, res: Response) => {
+  try {
+    await db.query('DELETE FROM db_connections WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // ── GET /keys — available SSH key files ─────────────────────
 router.get('/keys', (_req: Request, res: Response) => {
@@ -309,7 +401,7 @@ router.post('/indexes', async (req: Request, res: Response) => {
   }
 });
 
-// ── POST /table-data — paginated browse ─────────────────────
+// ── POST /table-data — paginated browse with sort/filter ────
 router.post('/table-data', async (req: Request, res: Response) => {
   try {
     const body = req.body as ConnectionBody;
@@ -317,25 +409,244 @@ router.post('/table-data', async (req: Request, res: Response) => {
     const page = body.page || 1;
     const pageSize = Math.min(body.pageSize || 100, 1000);
     const offset = (page - 1) * pageSize;
+    const sortCol = body.sortColumn;
+    const sortDir = body.sortDirection === 'DESC' ? 'DESC' : 'ASC';
+    const filters = body.filters || [];
     if (!table) return res.status(400).json({ success: false, error: 'Table name required' });
 
     if (body.type === 'mssql') {
       await withMSSQL(body, async (pool) => {
         const safe = table.replace(/'/g, "''").replace(/\[|\]/g, '');
-        const cnt = await pool.request().query(`SELECT COUNT(*) AS total FROM [${safe}]`);
+        let where = '';
+        if (filters.length > 0) {
+          const clauses = filters.map(f => {
+            const col = `[${f.column.replace(/\]/g, ']]')}]`;
+            const op = f.operator || 'LIKE';
+            if (op === 'IS NULL') return `${col} IS NULL`;
+            if (op === 'IS NOT NULL') return `${col} IS NOT NULL`;
+            if (op === 'LIKE') return `CAST(${col} AS NVARCHAR(MAX)) LIKE '%${f.value.replace(/'/g, "''")}%'`;
+            return `${col} ${op} '${f.value.replace(/'/g, "''")}'`;
+          });
+          where = ' WHERE ' + clauses.join(' AND ');
+        }
+        const orderBy = sortCol ? `ORDER BY [${sortCol.replace(/\]/g, ']]')}] ${sortDir}` : 'ORDER BY (SELECT NULL)';
+        const cnt = await pool.request().query(`SELECT COUNT(*) AS total FROM [${safe}]${where}`);
         const r = await pool.request().query(
-          `SELECT * FROM [${safe}] ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`);
+          `SELECT * FROM [${safe}]${where} ${orderBy} OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`);
         const columns = r.recordset.length > 0 ? Object.keys(r.recordset[0]) : [];
         res.json({ success: true, columns, rows: r.recordset, total: cnt.recordset[0].total, page, pageSize });
       });
     } else {
       await withMySQL(body, async (conn) => {
         const safe = table.replace(/`/g, '');
-        const [cnt] = await conn.query(`SELECT COUNT(*) AS total FROM \`${safe}\``);
+        let where = '';
+        const whereParams: any[] = [];
+        if (filters.length > 0) {
+          const clauses = filters.map(f => {
+            const col = `\`${f.column.replace(/`/g, '')}\``;
+            const op = f.operator || 'LIKE';
+            if (op === 'IS NULL') return `${col} IS NULL`;
+            if (op === 'IS NOT NULL') return `${col} IS NOT NULL`;
+            if (op === 'LIKE') { whereParams.push(`%${f.value}%`); return `${col} LIKE ?`; }
+            if (op === 'REGEXP') { whereParams.push(f.value); return `${col} REGEXP ?`; }
+            whereParams.push(f.value);
+            return `${col} ${op} ?`;
+          });
+          where = ' WHERE ' + clauses.join(' AND ');
+        }
+        const orderBy = sortCol ? ` ORDER BY \`${sortCol.replace(/`/g, '')}\` ${sortDir}` : '';
+        const [cnt] = await conn.query(`SELECT COUNT(*) AS total FROM \`${safe}\`${where}`, whereParams);
         const total = (cnt as any[])[0]?.total || 0;
-        const [rows, fields] = await conn.query(`SELECT * FROM \`${safe}\` LIMIT ? OFFSET ?`, [pageSize, offset]);
+        const [rows, fields] = await conn.query(`SELECT * FROM \`${safe}\`${where}${orderBy} LIMIT ? OFFSET ?`, [...whereParams, pageSize, offset]);
         const columns = fields && Array.isArray(fields) ? fields.map((f: any) => f.name) : (Array.isArray(rows) && rows.length > 0 ? Object.keys((rows as any[])[0]) : []);
         res.json({ success: true, columns, rows, total, page, pageSize });
+      });
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /row-insert — insert a new row ─────────────────────
+router.post('/row-insert', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { table, row } = body;
+    if (!table || !row) return res.status(400).json({ success: false, error: 'Table and row data required' });
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        const cols = Object.keys(row);
+        const colList = cols.map(c => `[${c.replace(/\]/g, ']]')}]`).join(', ');
+        const valList = cols.map((_, i) => `@p${i}`).join(', ');
+        const request = pool.request();
+        cols.forEach((c, i) => request.input(`p${i}`, row[c] === '' ? null : row[c]));
+        await request.query(`INSERT INTO [${table.replace(/\]/g, ']]')}] (${colList}) VALUES (${valList})`);
+        res.json({ success: true, message: 'Row inserted' });
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        const cols = Object.keys(row);
+        const colList = cols.map(c => `\`${c.replace(/`/g, '')}\``).join(', ');
+        const placeholders = cols.map(() => '?').join(', ');
+        const values = cols.map(c => row[c] === '' ? null : row[c]);
+        await conn.execute(`INSERT INTO \`${table.replace(/`/g, '')}\` (${colList}) VALUES (${placeholders})`, values);
+        res.json({ success: true, message: 'Row inserted' });
+      });
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /row-update — update a row by primary key ──────────
+router.post('/row-update', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { table, row, where: whereObj } = body;
+    if (!table || !row || !whereObj) return res.status(400).json({ success: false, error: 'Table, row data, and where clause required' });
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        const setCols = Object.keys(row);
+        const whereCols = Object.keys(whereObj);
+        const request = pool.request();
+        const setClause = setCols.map((c, i) => { request.input(`s${i}`, row[c] === '' ? null : row[c]); return `[${c.replace(/\]/g, ']]')}]=@s${i}`; }).join(', ');
+        const whereClause = whereCols.map((c, i) => {
+          if (whereObj[c] === null) return `[${c.replace(/\]/g, ']]')}] IS NULL`;
+          request.input(`w${i}`, whereObj[c]);
+          return `[${c.replace(/\]/g, ']]')}]=@w${i}`;
+        }).join(' AND ');
+        await request.query(`UPDATE [${table.replace(/\]/g, ']]')}] SET ${setClause} WHERE ${whereClause}`);
+        res.json({ success: true, message: 'Row updated' });
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        const setCols = Object.keys(row);
+        const whereCols = Object.keys(whereObj);
+        const setClause = setCols.map(c => `\`${c.replace(/`/g, '')}\`=?`).join(', ');
+        const whereClause = whereCols.map(c => {
+          if (whereObj[c] === null) return `\`${c.replace(/`/g, '')}\` IS NULL`;
+          return `\`${c.replace(/`/g, '')}\`=?`;
+        }).join(' AND ');
+        const params = [...setCols.map(c => row[c] === '' ? null : row[c]), ...whereCols.filter(c => whereObj[c] !== null).map(c => whereObj[c])];
+        await conn.execute(`UPDATE \`${table.replace(/`/g, '')}\` SET ${setClause} WHERE ${whereClause} LIMIT 1`, params);
+        res.json({ success: true, message: 'Row updated' });
+      });
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /row-delete — delete a row by primary key ──────────
+router.post('/row-delete', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { table, where: whereObj } = body;
+    if (!table || !whereObj) return res.status(400).json({ success: false, error: 'Table and where clause required' });
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        const whereCols = Object.keys(whereObj);
+        const request = pool.request();
+        const whereClause = whereCols.map((c, i) => {
+          if (whereObj[c] === null) return `[${c.replace(/\]/g, ']]')}] IS NULL`;
+          request.input(`w${i}`, whereObj[c]);
+          return `[${c.replace(/\]/g, ']]')}]=@w${i}`;
+        }).join(' AND ');
+        await request.query(`DELETE TOP(1) FROM [${table.replace(/\]/g, ']]')}] WHERE ${whereClause}`);
+        res.json({ success: true, message: 'Row deleted' });
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        const whereCols = Object.keys(whereObj);
+        const whereClause = whereCols.map(c => {
+          if (whereObj[c] === null) return `\`${c.replace(/`/g, '')}\` IS NULL`;
+          return `\`${c.replace(/`/g, '')}\`=?`;
+        }).join(' AND ');
+        const params = whereCols.filter(c => whereObj[c] !== null).map(c => whereObj[c]);
+        await conn.execute(`DELETE FROM \`${table.replace(/`/g, '')}\` WHERE ${whereClause} LIMIT 1`, params);
+        res.json({ success: true, message: 'Row deleted' });
+      });
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /import-sql — execute a SQL file/dump ──────────────
+router.post('/import-sql', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { sql } = body;
+    if (!sql) return res.status(400).json({ success: false, error: 'SQL content required' });
+
+    // Split by semicolons, filter empties, execute sequentially
+    const statements = sql.split(/;\s*\n/).map((s: string) => s.trim()).filter((s: string) => s.length > 0 && !s.startsWith('--'));
+    let executed = 0;
+    let errors: string[] = [];
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        for (const stmt of statements) {
+          try { await pool.request().query(stmt); executed++; }
+          catch (e: any) { errors.push(`${e.message} — ${stmt.substring(0, 80)}…`); }
+        }
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        for (const stmt of statements) {
+          try { await conn.query(stmt); executed++; }
+          catch (e: any) { errors.push(`${e.message} — ${stmt.substring(0, 80)}…`); }
+        }
+      });
+    }
+    res.json({ success: true, message: `${executed} statement(s) executed`, executed, errors: errors.slice(0, 20), totalStatements: statements.length });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /truncate — truncate a table ───────────────────────
+router.post('/truncate', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { table } = body;
+    if (!table) return res.status(400).json({ success: false, error: 'Table name required' });
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        await pool.request().query(`TRUNCATE TABLE [${table.replace(/\]/g, ']]')}]`);
+        res.json({ success: true, message: `Table ${table} truncated` });
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        await conn.query(`TRUNCATE TABLE \`${table.replace(/`/g, '')}\``);
+        res.json({ success: true, message: `Table ${table} truncated` });
+      });
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /drop-table — drop a table ────────────────────────
+router.post('/drop-table', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody;
+    const { table } = body;
+    if (!table) return res.status(400).json({ success: false, error: 'Table name required' });
+
+    if (body.type === 'mssql') {
+      await withMSSQL(body, async (pool) => {
+        await pool.request().query(`DROP TABLE [${table.replace(/\]/g, ']]')}]`);
+        res.json({ success: true, message: `Table ${table} dropped` });
+      });
+    } else {
+      await withMySQL(body, async (conn) => {
+        await conn.query(`DROP TABLE \`${table.replace(/`/g, '')}\``);
+        res.json({ success: true, message: `Table ${table} dropped` });
       });
     }
   } catch (err: any) {
@@ -465,7 +776,38 @@ router.post('/query', async (req: Request, res: Response) => {
     } else {
       await withMySQL(body, async (conn) => {
         const [result, fields] = await conn.query(sql);
-        if (Array.isArray(result)) {
+
+        // Detect multi-statement results: for single statements, fields entries
+        // are FieldPacket objects (with .name). For multi-statement, fields entries
+        // are either undefined (non-SELECT) or sub-arrays of FieldPackets (SELECT).
+        const isMulti = Array.isArray(fields) && fields.length > 0
+          && (fields[0] === undefined || Array.isArray(fields[0]));
+
+        if (isMulti) {
+          // Multiple statements — find last SELECT result set or summarise all
+          const results = result as any[];
+          const fieldSets = fields as any[];
+          let lastSelectIdx = -1;
+          for (let i = fieldSets.length - 1; i >= 0; i--) {
+            if (Array.isArray(fieldSets[i]) && fieldSets[i].length > 0) { lastSelectIdx = i; break; }
+          }
+          if (lastSelectIdx >= 0) {
+            // Return the last SELECT result set
+            const rows = Array.isArray(results[lastSelectIdx]) ? results[lastSelectIdx] : [];
+            const cols = fieldSets[lastSelectIdx].map((f: any) => f.name);
+            res.json({ success: true, columns: cols, rows, rowCount: rows.length,
+              message: `${results.length} statement(s) executed — showing last SELECT result` });
+          } else {
+            // All statements were non-SELECT (CREATE, INSERT, UPDATE, etc.)
+            let totalAffected = 0;
+            for (const r of results) {
+              if (r && typeof r === 'object' && !Array.isArray(r)) totalAffected += (r.affectedRows || 0);
+            }
+            res.json({ success: true, columns: [], rows: [],
+              affectedRows: totalAffected,
+              message: `${results.length} statement(s) executed — ${totalAffected} row(s) affected` });
+          }
+        } else if (Array.isArray(result)) {
           const columns = fields && Array.isArray(fields)
             ? fields.map((f: any) => f.name)
             : (result.length > 0 ? Object.keys(result[0]) : []);

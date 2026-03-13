@@ -8,11 +8,11 @@ interface AdminRouteProps {
 }
 
 const AdminRoute: React.FC<AdminRouteProps> = ({ children }) => {
-  const { isAdmin } = usePermissions();
+  const { isStrictAdmin } = usePermissions();
 
   return (
     <ProtectedRoute>
-      {isAdmin() ? <>{children}</> : <Navigate to="/" replace />}
+      {isStrictAdmin() ? <>{children}</> : <Navigate to="/" replace />}
     </ProtectedRoute>
   );
 };

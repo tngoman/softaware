@@ -66,14 +66,6 @@ glmRouter.post('/api/chat', requireApiKey, async (req, res, next) => {
   try {
     const teamId = await getTeamIdFromApiKey(req);
 
-    if (teamId) {
-      const { deductCredits } = await import('../services/credits.js');
-      await deductCredits(teamId, 'TEXT_CHAT', {
-        userId: (req as any).apiKey.userId,
-        endpoint: '/glm/api/chat',
-      });
-    }
-
     const body = ChatRequestSchema.parse(req.body);
     const response = await glmService.chat(body as any);
     res.json(response);
@@ -86,14 +78,6 @@ glmRouter.post('/api/chat', requireApiKey, async (req, res, next) => {
 glmRouter.post('/api/simple', requireApiKey, async (req, res, next) => {
   try {
     const teamId = await getTeamIdFromApiKey(req);
-
-    if (teamId) {
-      const { deductCredits } = await import('../services/credits.js');
-      await deductCredits(teamId, 'TEXT_SIMPLE', {
-        userId: (req as any).apiKey.userId,
-        endpoint: '/glm/api/simple',
-      });
-    }
 
     const { prompt, systemPrompt } = SimpleChatRequestSchema.parse(req.body);
     const response = await glmService.simpleChat(prompt, systemPrompt);
@@ -129,12 +113,6 @@ glmRouter.post('/chat', async (req: AuthRequest, res, next) => {
   try {
     const teamId = await getTeamIdFromUser(req);
 
-    const { deductCredits } = await import('../services/credits.js');
-    await deductCredits(teamId, 'TEXT_CHAT', {
-      userId: req.userId,
-      endpoint: '/glm/chat',
-    });
-
     const body = ChatRequestSchema.parse(req.body);
     const response = await glmService.chat(body as any);
     res.json(response);
@@ -147,12 +125,6 @@ glmRouter.post('/chat', async (req: AuthRequest, res, next) => {
 glmRouter.post('/simple', async (req: AuthRequest, res, next) => {
   try {
     const teamId = await getTeamIdFromUser(req);
-
-    const { deductCredits } = await import('../services/credits.js');
-    await deductCredits(teamId, 'TEXT_SIMPLE', {
-      userId: req.userId,
-      endpoint: '/glm/simple',
-    });
 
     const { prompt, systemPrompt } = SimpleChatRequestSchema.parse(req.body);
     const response = await glmService.simpleChat(prompt, systemPrompt);

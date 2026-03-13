@@ -424,7 +424,8 @@ async function upsertTasks(
     }
   }
 
-  // Soft-delete tasks that no longer exist on the remote (but don't remove locally dirty ones)
+  // Soft-delete tasks that no longer exist on the remote (but don't remove locally dirty ones
+  // or locally-created tasks like bug-converted tasks whose external_id is non-numeric)
   if (seenExternalIds.size > 0) {
     const placeholders = [...seenExternalIds].map(() => '?').join(',');
     const deletedCount = await db.execute(
@@ -433,7 +434,8 @@ async function upsertTasks(
        WHERE source_id = ?
          AND external_id NOT IN (${placeholders})
          AND task_deleted = 0
-         AND local_dirty = 0`,
+         AND local_dirty = 0
+         AND external_id REGEXP '^[0-9]+$'`,
       [now, sourceId, ...seenExternalIds]
     );
     deleted = deletedCount;
@@ -447,15 +449,32 @@ async function upsertTasks(
  * Only supported for tasks-api sources currently.
  */
 async function pushDirtyTasks(source: TaskSource): Promise<{ pushed: number; errors: string[] }> {
-  const dirtyTasks = await db.query<any>(
+  const allDirtyTasks = await db.query<any>(
     'SELECT * FROM local_tasks WHERE source_id = ? AND local_dirty = 1 AND task_deleted = 0',
     [source.id]
   );
 
-  if (dirtyTasks.length === 0) return { pushed: 0, errors: [] };
+  if (allDirtyTasks.length === 0) return { pushed: 0, errors: [] };
+
+  // Separate remote-pushable tasks (numeric external_id) from local-only tasks (e.g. bug-converted)
+  const dirtyTasks = allDirtyTasks.filter((t: any) => /^\d+$/.test(String(t.external_id)));
+  const localOnlyTasks = allDirtyTasks.filter((t: any) => !/^\d+$/.test(String(t.external_id)));
+
+  // Clear dirty flag on local-only tasks — they live only in local_tasks
+  if (localOnlyTasks.length > 0) {
+    const now = toMySQLDate(new Date());
+    for (const t of localOnlyTasks) {
+      await db.execute(
+        'UPDATE local_tasks SET local_dirty = 0 WHERE id = ?',
+        [t.id]
+      );
+    }
+  }
 
   const errors: string[] = [];
   let pushed = 0;
+
+  if (dirtyTasks.length === 0) return { pushed: 0, errors };
 
   if (source.source_type === 'tasks-api') {
     const baseUrl = source.base_url.replace(/\/+$/, '');
@@ -492,7 +511,7 @@ async function pushDirtyTasks(source: TaskSource): Promise<{ pushed: number; err
         const body: any = await resp.json();
         pushed = (body?.data?.created || 0) + (body?.data?.updated || 0);
 
-        // Clear dirty flag on pushed tasks
+        // Clear dirty flag on pushed tasks only
         const now = toMySQLDate(new Date());
         for (const t of dirtyTasks) {
           await db.execute(

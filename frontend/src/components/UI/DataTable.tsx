@@ -36,6 +36,8 @@ interface DataTableProps<T> {
   onPageChange?: (page: number) => void;
   onSearch?: (query: string) => void;
   onSort?: (sortBy: string, sortOrder: 'asc' | 'desc') => void;
+  onPageSizeChange?: (size: number) => void;
+  pageSizeOptions?: number[];
 }
 
 function DataTable<T>({
@@ -55,6 +57,8 @@ function DataTable<T>({
   onPageChange,
   onSearch,
   onSort,
+  onPageSizeChange,
+  pageSizeOptions = [10, 25, 50, 100],
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -141,23 +145,23 @@ function DataTable<T>({
       )}
 
       {/* Table */}
-      <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+      <div className="bg-white dark:bg-dark-800 shadow overflow-hidden sm:rounded-lg">
         {loading ? (
           <div className="p-8 text-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-            <p className="mt-2 text-gray-500">Loading...</p>
+            <p className="mt-2 text-gray-500 dark:text-gray-400">Loading...</p>
           </div>
         ) : (
           <>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-dark-700">
+                <thead className="bg-gray-50 dark:bg-dark-850">
                   {table.getHeaderGroups().map((headerGroup) => (
                     <tr key={headerGroup.id}>
                       {headerGroup.headers.map((header) => (
                         <th
                           key={header.id}
-                          className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:bg-gray-100"
+                          className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-dark-700"
                           onClick={header.column.getToggleSortingHandler()}
                         >
                           <div className="flex items-center space-x-1">
@@ -178,12 +182,12 @@ function DataTable<T>({
                     </tr>
                   ))}
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-white dark:bg-dark-800 divide-y divide-gray-200 dark:divide-dark-700">
                   {table.getRowModel().rows.length === 0 ? (
                     <tr>
                       <td
                         colSpan={columns.length}
-                        className="px-6 py-12 text-center text-gray-500"
+                        className="px-6 py-12 text-center text-gray-500 dark:text-gray-400"
                       >
                         {emptyMessage}
                       </td>
@@ -192,7 +196,7 @@ function DataTable<T>({
                     table.getRowModel().rows.map((row) => (
                       <tr
                         key={row.id}
-                        className={`hover:bg-gray-50 ${
+                        className={`hover:bg-gray-50 dark:hover:bg-dark-700 ${
                           onRowClick ? 'cursor-pointer' : ''
                         }`}
                         onClick={() => onRowClick?.(row.original)}
@@ -200,7 +204,7 @@ function DataTable<T>({
                         {row.getVisibleCells().map((cell) => (
                           <td
                             key={cell.id}
-                            className="px-6 py-4 whitespace-nowrap text-sm text-gray-900"
+                            className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100"
                           >
                             {flexRender(
                               cell.column.columnDef.cell,
@@ -216,7 +220,7 @@ function DataTable<T>({
             </div>
 
             {/* Pagination */}
-            <div className="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+            <div className="bg-white dark:bg-dark-800 px-4 py-3 flex items-center justify-between border-t border-gray-200 dark:border-dark-700 sm:px-6">
               <div className="flex-1 flex justify-between sm:hidden">
                 <button
                   onClick={() => {
@@ -227,7 +231,7 @@ function DataTable<T>({
                     }
                   }}
                   disabled={serverSide ? currentPage === 0 : !table.getCanPreviousPage()}
-                  className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-dark-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-white dark:bg-dark-800 hover:bg-gray-50 dark:hover:bg-dark-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Previous
                 </button>
@@ -243,14 +247,25 @@ function DataTable<T>({
                     ? currentPage >= Math.ceil((totalItems || 0) / pageSize) - 1
                     : !table.getCanNextPage()
                   }
-                  className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-dark-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-white dark:bg-dark-800 hover:bg-gray-50 dark:hover:bg-dark-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Next
                 </button>
               </div>
               <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-sm text-gray-700">
+                <div className="flex items-center gap-4">
+                  {onPageSizeChange && (
+                    <select
+                      value={pageSize}
+                      onChange={(e) => onPageSizeChange(Number(e.target.value))}
+                      className="text-sm border border-gray-300 dark:border-dark-600 rounded-md px-2 py-1 bg-white dark:bg-dark-800 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {pageSizeOptions.map(size => (
+                        <option key={size} value={size}>{size} / page</option>
+                      ))}
+                    </select>
+                  )}
+                  <p className="text-sm text-gray-700 dark:text-gray-300">
                     Showing{' '}
                     <span className="font-medium">
                       {serverSide 
@@ -296,7 +311,7 @@ function DataTable<T>({
                         }
                       }}
                       disabled={serverSide ? currentPage === 0 : !table.getCanPreviousPage()}
-                      className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-800 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-dark-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <ChevronLeftIcon className="h-5 w-5" />
                     </button>
@@ -346,7 +361,7 @@ function DataTable<T>({
                           return (
                             <span
                               key={`ellipsis-${idx}`}
-                              className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700"
+                              className="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-800 text-sm font-medium text-gray-700 dark:text-gray-300"
                             >
                               ...
                             </span>
@@ -366,8 +381,8 @@ function DataTable<T>({
                             }}
                             className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
                               pageNum === current
-                                ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
-                                : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                                ? 'z-10 bg-blue-50 dark:bg-blue-900/30 border-blue-500 text-blue-600 dark:text-blue-400'
+                                : 'bg-white dark:bg-dark-800 border-gray-300 dark:border-dark-600 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-dark-700'
                             }`}
                           >
                             {pageNum + 1}
@@ -388,7 +403,7 @@ function DataTable<T>({
                         ? currentPage >= Math.ceil((totalItems || 0) / pageSize) - 1
                         : !table.getCanNextPage()
                       }
-                      className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-dark-600 bg-white dark:bg-dark-800 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-dark-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <ChevronRightIcon className="h-5 w-5" />
                     </button>

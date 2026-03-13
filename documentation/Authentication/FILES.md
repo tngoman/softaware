@@ -1,7 +1,7 @@
 # Authentication Module - File Inventory
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-06
+**Version:** 1.9.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,32 +9,36 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total files** | 16 |
-| **Total LOC** | ~3,900 |
-| **Backend files** | 6 (~1,380 LOC) |
-| **Frontend files** | 10 (~2,500 LOC) |
+| **Total files** | 20 |
+| **Total LOC** | ~6,370 |
+| **Backend files** | 6 (~2,300 LOC) |
+| **Frontend files** | 14 (~4,070 LOC) |
 
 ### Directory Tree
 
 ```
 Backend:
-  src/routes/auth.ts                       (283 LOC)
-  src/routes/twoFactor.ts                  (674 LOC) — multi-method 2FA
+  src/routes/auth.ts                       (1253 LOC) — core auth + PIN quick login (v1.9.0)
+  src/routes/twoFactor.ts                  (1304 LOC) — multi-method 2FA + push-to-approve + alt methods
   src/routes/email.ts                      (178 LOC) — email endpoints
   src/services/emailService.ts             (256 LOC) — centralized email transport
   src/routes/adminClientManager.ts         (~60 LOC masquerade endpoint)
   src/middleware/requireAdmin.ts           (55 LOC)
 
 Frontend:
-  src/pages/public/AuthPage.tsx            (631 LOC) — login/register + 2FA verify
-  src/pages/auth/Login.tsx                 (300 LOC) — legacy login + 2FA verify
+  src/pages/public/AuthPage.tsx            (1047 LOC) — login/register + 2FA verify + push-to-approve + PIN login + alt methods
+  src/pages/auth/Login.tsx                 (570 LOC) — legacy login + 2FA verify + alt methods
+  src/pages/public/LoginPage.tsx           (475 LOC) — public login + 2FA verify + alt methods
   src/pages/ForgotPassword.tsx             (302 LOC)
   src/pages/admin/ClientManager.tsx         (~40 LOC masquerade handler)
   src/hooks/useAuth.ts                     (43 LOC)
-  src/models/AuthModel.ts                  (280 LOC) — auth + 2FA API methods
-  src/components/TwoFactorSetup.tsx        (325 LOC) — reusable 2FA management
-  src/pages/general/AccountSettings.tsx    (246 LOC) — 2FA for staff/admin
-  src/pages/portal/Settings.tsx            (193 LOC) — 2FA for clients
+  src/models/AuthModel.ts                  (464 LOC) — auth + 2FA + push + mobile QR + PIN API methods
+  src/components/TwoFactorSetup.tsx        (503 LOC) — reusable 2FA management + auto-verify
+  src/components/PinSetup.tsx              (308 LOC) — PIN setup/change/remove component (v1.9.0)
+  src/components/MobileAuthQR.tsx          (208 LOC) — mobile QR auth + short codes (always visible)
+  src/utils/totp.ts                        (64 LOC) — browser-side TOTP generation (Web Crypto API)
+  src/pages/general/AccountSettings.tsx    (279 LOC) — 2FA + PIN for staff/admin
+  src/pages/portal/Settings.tsx            (244 LOC) — 2FA + PIN for clients
   src/pages/system/SystemSettings.tsx      (795 LOC) — SMTP config tab
   src/components/Layout/Layout.tsx          (~50 LOC masquerade banner)
   src/components/Layout/PortalLayout.tsx    (~50 LOC masquerade banner)
@@ -49,17 +53,18 @@ Frontend:
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/auth.ts` |
-| **LOC** | 283 |
-| **Purpose** | Registration, login (with multi-method 2FA gate), token refresh, user profile resolution, permissions, masquerade exit |
-| **Dependencies** | bcryptjs, jsonwebtoken, zod, db/mysql, middleware/auth, config/env, utils/httpErrors |
+| **LOC** | 1253 |
+| **Purpose** | Registration, login (with multi-method 2FA gate + push-to-approve challenge creation), PIN-based quick login (v1.9.0), token refresh, user profile resolution, permissions, masquerade exit |
+| **Dependencies** | bcryptjs, jsonwebtoken, zod, db/mysql, middleware/auth, config/env, utils/httpErrors, twoFactor.ts (createPushChallenge) |
 | **Exports** | `authRouter`, `buildFrontendUser` |
 
 #### Methods / Functions
 
 | Function | Params | Returns | Description | DB Queries |
 |----------|--------|---------|-------------|------------|
-| `buildFrontendUser(userId)` | `userId: string` | Frontend user object or null | Resolves user → user_roles → role → permissions into frontend-compatible shape. No team dependency. | `SELECT FROM users`, `SELECT FROM user_roles JOIN roles`, `SELECT FROM role_permissions JOIN permissions` |
+| `buildFrontendUser(userId)` | `userId: string` | Frontend user object or null | Resolves user (with `is_admin`/`is_staff` from `users` table columns) → user_roles → role → permissions into frontend-compatible shape. No team dependency. Admin/staff status read directly from DB columns (v1.6.0+). | `SELECT id, email, name, ..., is_admin, is_staff FROM users`, `SELECT FROM user_roles JOIN roles`, `SELECT FROM role_permissions JOIN permissions` |
 | `generateActivationKey(email)` | `email: string` | `string` (e.g., `USER-A3F1B2C8D4E5F6A7`) | SHA-256 hash of email + timestamp, truncated to 16 hex chars | — |
+| `ensurePinTable()` | — | `void` | (v1.9.0) Creates `user_pins` table if it doesn't exist. Uses explicit `utf8mb4_unicode_ci` collation on `user_id` for FK compatibility with `users.id`. Called on module load. | `CREATE TABLE IF NOT EXISTS user_pins (...)` |
 
 #### Endpoints
 
@@ -72,18 +77,24 @@ Frontend:
 | POST | /auth/refresh | None | L247-258 |
 | GET | /auth/permissions | requireAuth | L261-273 |
 | POST | /auth/masquerade/exit | None (restore token) | L276-321 |
+| GET | /auth/pin/status | requireAuth | ~L1020-1030 |
+| POST | /auth/pin/set | requireAuth | ~L1035-1068 |
+| DELETE | /auth/pin | requireAuth | ~L1070-1078 |
+| POST | /auth/pin/verify | None | ~L1080-1230 |
+| GET | /auth/pin/check/:email | None | ~L1232-1253 |
 
 #### Code Excerpt — buildFrontendUser
 
 ```typescript
 export async function buildFrontendUser(userId: string) {
+  // v1.6.0: is_admin and is_staff read directly from users table columns
   const user = await db.queryOne<User>(
-    'SELECT id, email, name, phone, avatarUrl, createdAt, updatedAt FROM users WHERE id = ?',
+    'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, createdAt, updatedAt FROM users WHERE id = ?',
     [userId]
   );
   if (!user) return null;
 
-  // Resolve role from user_roles table (no team dependency)
+  // Resolve role from user_roles table (for display name and permission resolution only)
   const roleRow = await db.queryOne<{ role_id: number; role_name: string; role_slug: string }>(
     `SELECT r.id AS role_id, r.name AS role_name, r.slug AS role_slug
      FROM user_roles ur JOIN roles r ON r.id = ur.role_id
@@ -97,8 +108,9 @@ export async function buildFrontendUser(userId: string) {
     ? { id: roleRow.role_id, name: roleRow.role_name, slug: roleRow.role_slug }
     : { id: 0, name: 'Client', slug: 'client' };
 
-  const isAdmin = userRole.slug === 'admin' || userRole.slug === 'super_admin';
-  const isStaff = ['developer', 'client_manager', 'qa_specialist', 'deployer'].includes(userRole.slug);
+  // v1.6.0: is_admin/is_staff from users table columns (not derived from role slug)
+  const isAdmin = !!user.is_admin;
+  const isStaff = !!user.is_staff;
 
   // Admin/staff get wildcard; others get granular permissions
   // Returns: { id, email, name, avatar, is_admin, is_staff, role, permissions }
@@ -138,10 +150,10 @@ const result = await db.transaction(async (conn) => {
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/twoFactor.ts` |
-| **LOC** | 665 |
-| **Purpose** | Multi-method 2FA (TOTP / Email OTP / SMS OTP) setup, verification, method switching, backup code management, role-based enforcement |
-| **Dependencies** | otpauth, qrcode, crypto, bcryptjs, jsonwebtoken, zod, db/mysql, middleware/auth, auth.ts (buildFrontendUser), services/emailService (sendTwoFactorOtp) |
-| **Exports** | `twoFactorRouter` |
+| **LOC** | 1304 |
+| **Purpose** | Multi-method 2FA (TOTP / Email OTP / SMS OTP) setup, verification, method switching, backup code management, role-based enforcement, mobile QR auth, push-to-approve 2FA (v1.7.0), alternative auth methods + short codes (v1.8.0) |
+| **Dependencies** | otpauth, qrcode, crypto, bcryptjs, jsonwebtoken, zod, db/mysql, middleware/auth, auth.ts (buildFrontendUser), services/emailService (sendTwoFactorOtp), services/firebaseService (sendPushToUser) |
+| **Exports** | `twoFactorRouter`, `createPushChallenge` |
 
 #### Methods / Functions
 
@@ -151,6 +163,8 @@ const result = await db.transaction(async (conn) => {
 | `createTOTP(secretBase32, userEmail)` | secret, email | `TOTP` instance | Creates OTPAuth TOTP with SHA1, 6 digits, 30s period |
 | `generateOTP()` | — | `string` (6 digits) | Random 6-digit numeric code for email/SMS |
 | `sendSms(phone, message)` | phone, message | `void` | Stub for SMS delivery (implementation TBD) |
+| `createPushChallenge(userId, rememberMe, userEmail, userName?)` | userId, rememberMe, email, name? | `string \| null` | (v1.7.0) Creates push challenge in `mobile_auth_challenges` with `source='push'`, sends FCM notification via `sendPushToUser()`. Returns challengeId or null if no FCM devices. |
+| `generateShortCode()` | — | `string` (6 chars) | (v1.8.0) Generates a 6-digit numeric code (e.g., `482916`) using `crypto.randomBytes()`. Used for `short_code` column in `mobile_auth_challenges`. Compatible with mobile app's 6-digit input field. |
 
 #### Endpoints
 
@@ -161,23 +175,30 @@ const result = await db.transaction(async (conn) => {
 | POST | /auth/2fa/verify-setup | requireAuth | ~L205-280 |
 | POST | /auth/2fa/verify | None (temp_token) | ~L285-420 |
 | POST | /auth/2fa/send-otp | None (temp_token) | ~L425-480 |
-| POST | /auth/2fa/disable | requireAuth | ~L485-530 |
+| POST | /auth/2fa/send-alt-otp | None (temp_token) | ~L480-540 |
+| POST | /auth/2fa/disable | requireAuth | ~L540-585 |
 | PUT | /auth/2fa/method | requireAuth | ~L535-610 |
 | POST | /auth/2fa/backup-codes | requireAuth | ~L615-665 |
+| POST | /auth/2fa/push-approve | requireAuth | ~L1050-1130 |
+| POST | /auth/2fa/push-status | None (temp_token) | ~L1135-1228 |
 
 #### Code Excerpt — Multi-Method Verification
 
 ```typescript
-// Determine verification strategy based on preferred method
+// v1.8.0: Always try TOTP validation first, regardless of preferred method
 const method = twoFactorRow.preferred_method || 'totp';
 let isValid = false;
 let usedBackupCode = false;
 
-if (method === 'totp' && input.code.length === 6 && /^\d+$/.test(input.code)) {
+// TOTP check — always attempted first (universal TOTP validation)
+if (input.code.length === 6 && /^\d+$/.test(input.code)) {
   const totp = createTOTP(twoFactorRow.secret, user.email);
   const delta = totp.validate({ token: input.code, window: 1 });
-  isValid = delta !== null;
-} else if ((method === 'email' || method === 'sms') && input.code.length === 6) {
+  if (delta !== null) isValid = true;
+}
+
+// Email/SMS OTP check — tried if TOTP didn't match
+if (!isValid && (method === 'email' || method === 'sms') && input.code.length === 6) {
   // Verify OTP code stored in DB
   if (twoFactorRow.otp_code && twoFactorRow.otp_expires_at) {
     const now = new Date();
@@ -213,7 +234,7 @@ if (!isValid) {
 |----------|-------|
 | **Location** | `/var/opt/backend/src/middleware/requireAdmin.ts` |
 | **LOC** | 55 |
-| **Purpose** | Express middleware that gates routes to admin/super_admin users only |
+| **Purpose** | Express middleware that gates routes to admin users only. Checks `users.is_admin` column directly (v1.6.0+). |
 | **Dependencies** | db/mysql, utils/httpErrors |
 | **Exports** | `requireAdmin` |
 
@@ -221,22 +242,23 @@ if (!isValid) {
 
 | Function | Params | Returns | Description | DB Queries |
 |----------|--------|---------|-------------|------------|
-| `requireAdmin` | `(req, res, next)` | void (calls `next()` or throws 403) | Checks `user_roles` JOIN `roles` for `admin` or `super_admin` slug | `SELECT FROM user_roles JOIN roles WHERE user_id = ? AND slug IN ('admin','super_admin')` |
+| `requireAdmin` | `(req, res, next)` | void (calls `next()` or throws 403) | Checks `users.is_admin` column directly. No longer queries `user_roles`/`roles` tables (v1.6.0+). | `SELECT is_admin FROM users WHERE id = ?` |
 
 #### Code Excerpt — Admin Check
 
 ```typescript
-const adminRow = await db.queryOne<{ slug: string }>(
-  `SELECT r.slug FROM user_roles ur
-   JOIN roles r ON r.id = ur.role_id
-   WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci
-   AND r.slug IN ('admin', 'super_admin')
-   LIMIT 1`,
+// v1.6.0: Direct column check on users table (no role slug dependency)
+const [rows] = await db.execute(
+  'SELECT is_admin FROM users WHERE id = ? LIMIT 1',
   [req.user.id]
 );
+const user = (rows as any[])[0];
 
-if (!adminRow) {
-  throw new ForbiddenError('Admin access required');
+if (!user || !user.is_admin) {
+  return res.status(403).json({
+    success: false,
+    error: 'Administrator access required. You do not have permission to perform this action.'
+  });
 }
 next();
 ```
@@ -312,9 +334,9 @@ const config = JSON.parse(decrypted);
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/public/AuthPage.tsx` |
-| **LOC** | 631 |
+| **LOC** | 1047 |
 | **Route** | `/login`, `/register` |
-| **Purpose** | Unified tabbed login/registration page with email auto-append and multi-method 2FA verification step |
+| **Purpose** | Unified tabbed login/registration page with email auto-append, multi-method 2FA verification, push-to-approve polling (v1.8.0), alternative auth method fallback (v1.8.0), PIN quick login for returning users (v1.9.0) |
 | **Dependencies** | react-router-dom, AuthModel, useAppStore, useAppSettings, sweetalert2 |
 | **Component** | `AuthPage` (React.FC, default export) |
 
@@ -329,6 +351,9 @@ const config = JSON.parse(decrypted);
 | Placeholder | `you@youremail.com` |
 | Login flow | Calls `AuthModel.login(finalEmail, password)` → stores token → fetches permissions → navigates |
 | **2FA step** | If `requires_2fa` returned, shows verification UI based on `two_factor_method` (totp/email/sms) |
+| **Push-to-approve** | (v1.8.0) If `challenge_id` returned, polls `POST /auth/2fa/push-status` every 3 seconds. Shows waiting/denied/expired UI. Auto-completes login on approval. |
+| **Alternative methods** | (v1.8.0) On push or manual code screens, shows buttons for the other 2 methods (e.g., "Use Email Instead", "Use SMS Instead"). Calls `AuthModel.sendAltOtp()`. |
+| **PIN login** | (v1.9.0) Detects returning user via `AuthModel.getLastEmail()`. If email has PIN (`checkPinByEmail`), shows PIN pad (4 digit inputs, auto-submit on 4th digit). "Use password instead" and "Not you?" links. Calls `AuthModel.loginWithPin()`. |
 | **2FA resend** | For email/SMS, "Resend verification code" button calls `AuthModel.resend2FAOtp()` |
 | Error display | Inline red error box |
 | Registration | Name + email + password + confirm → `AuthModel.register()` → confirmation screen |
@@ -343,6 +368,10 @@ const [twoFaCode, setTwoFaCode] = useState('');
 const [twoFaVerifying, setTwoFaVerifying] = useState(false);
 const [twoFaError, setTwoFaError] = useState('');
 const [twoFaResending, setTwoFaResending] = useState(false);
+const [challengeId, setChallengeId] = useState<string | null>(null);
+const [pushStatus, setPushStatus] = useState<string>('');
+const [showManualCode, setShowManualCode] = useState(false);
+const [sendingAltOtp, setSendingAltOtp] = useState(false);
 ```
 
 ---
@@ -352,9 +381,9 @@ const [twoFaResending, setTwoFaResending] = useState(false);
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/auth/Login.tsx` |
-| **LOC** | 296 |
+| **LOC** | 570 |
 | **Route** | `/billing-login` |
-| **Purpose** | Legacy login form with email auto-append, branding, redirect if authenticated, multi-method 2FA verification step |
+| **Purpose** | Legacy login form with email auto-append, branding, redirect if authenticated, multi-method 2FA verification step, push-to-approve polling, alternative auth method fallback (v1.8.0) |
 | **Dependencies** | react-router-dom, AuthModel, AppSettingsModel, useAppStore, sweetalert2 |
 | **Component** | `Login` (React.FC, default export) |
 
@@ -375,7 +404,24 @@ const [twoFaResending, setTwoFaResending] = useState(false);
 
 ---
 
-### 3.3 `src/pages/ForgotPassword.tsx` — Password Reset Page
+### 3.3 `src/pages/public/LoginPage.tsx` — Public Login Page (v1.8.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/pages/public/LoginPage.tsx` |
+| **LOC** | 475 |
+| **Route** | `/public-login` (or alternate login route) |
+| **Purpose** | Public login form with email auto-append, multi-method 2FA verification, push-to-approve, alternative auth method fallback. Same feature set as Login.tsx. |
+| **Dependencies** | react-router-dom, AuthModel, useAppStore |
+| **Component** | `LoginPage` (React.FC, default export) |
+
+#### Key Behaviors
+
+Same as Login.tsx — email auto-append, push-to-approve polling, alternative method buttons, multi-method 2FA verify.
+
+---
+
+### 3.4 `src/pages/ForgotPassword.tsx` — Password Reset Page
 
 | Property | Value |
 |----------|-------|
@@ -404,7 +450,7 @@ const [twoFaResending, setTwoFaResending] = useState(false);
 
 ---
 
-### 3.4 `src/hooks/useAuth.ts` — Auth Initialization Hook
+### 3.5 `src/hooks/useAuth.ts` — Auth Initialization Hook
 
 | Property | Value |
 |----------|-------|
@@ -426,13 +472,13 @@ const [twoFaResending, setTwoFaResending] = useState(false);
 
 ---
 
-### 3.5 `src/models/AuthModel.ts` — Auth API Client
+### 3.6 `src/models/AuthModel.ts` — Auth API Client
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/models/AuthModel.ts` |
-| **LOC** | 270 |
-| **Purpose** | Static class wrapping all auth, 2FA, and masquerade API calls plus localStorage management |
+| **LOC** | 464 |
+| **Purpose** | Static class wrapping all auth, 2FA, push-to-approve, mobile QR, alternative auth, PIN quick login, and masquerade API calls plus localStorage management |
 | **Dependencies** | services/api.ts (Axios), types/User |
 | **Exports** | `AuthModel` (class), `TwoFactorStatus` (interface), `TwoFactorSetupResult` (interface) |
 
@@ -463,6 +509,22 @@ const [twoFaResending, setTwoFaResending] = useState(false);
 | `disable2FA(password)` | POST | /auth/2fa/disable | Disable 2FA (clients only) |
 | `change2FAMethod(method, password, code)` | PUT | /auth/2fa/method | Change preferred method |
 | `regenerateBackupCodes(password)` | POST | /auth/2fa/backup-codes | Generate new backup codes |
+| `sendAltOtp(tempToken, method)` | POST | /auth/2fa/send-alt-otp | (v1.8.0) Send OTP via alternative method (email or SMS) |
+| `pollPushStatus(tempToken, challengeId)` | POST | /auth/2fa/push-status | (v1.8.0) Poll push-to-approve challenge status |
+| `getMobileAuthQR()` | GET | /auth/2fa/mobile-qr | Get QR + short code for mobile auth (v1.8.0: includes `challenge_code`) |
+| `getMobileAuthStatus(challengeId)` | GET | /auth/2fa/mobile-qr/status/:id | Poll QR auth challenge status |
+
+#### PIN Methods (v1.9.0)
+
+| Method | HTTP | Path | Description |
+|--------|------|------|-------------|
+| `getPinStatus()` | GET | /auth/pin/status | Check if current user has a PIN set |
+| `setPin(pin, password)` | POST | /auth/pin/set | Set or update 4-digit PIN (requires password) |
+| `removePin()` | DELETE | /auth/pin | Remove user's PIN |
+| `checkPinByEmail(email)` | GET | /auth/pin/check/:email | Check if email has PIN login enabled |
+| `loginWithPin(email, pin)` | POST | /auth/pin/verify | Login with email + PIN → JWT or 2FA |
+| `setLastEmail(email)` | — | — | Store email in localStorage for returning user detection |
+| `getLastEmail()` | — | — | Get stored email from localStorage |
 
 #### Masquerade Methods
 
@@ -513,7 +575,7 @@ static async exitMasquerade(): Promise<{ token: string; user: User }> {
 
 ---
 
-### 3.6 `src/pages/admin/ClientManager.tsx` — Masquerade Handler (partial)
+### 3.7 `src/pages/admin/ClientManager.tsx` — Masquerade Handler (partial)
 
 | Property | Value |
 |----------|-------|
@@ -558,15 +620,22 @@ const handleMasquerade = async (userId: string, email: string) => {
 
 ---
 
-### 3.7 `src/components/Layout/Layout.tsx` — Masquerade Banner (partial)
+### 3.8 `src/components/Layout/Layout.tsx` — Masquerade Banner + Admin Nav Gating (partial)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/components/Layout/Layout.tsx` |
-| **Auth-relevant LOC** | ~50 (state, handler, banner JSX) |
-| **Purpose** | Admin/staff layout with masquerade detection and "Return to Admin" banner |
+| **Auth-relevant LOC** | ~80 (state, handler, banner JSX, adminOnly nav filtering) |
+| **Purpose** | Admin/staff layout with masquerade detection, "Return to Admin" banner, and admin-only navigation item filtering (v1.6.0+) |
 | **Used when** | Masquerading as a user who has admin or staff role (renders via `SmartDashboard` when `user.is_admin \|\| user.is_staff`) |
-| **Dependencies** | AuthModel, useAppStore, useNavigate |
+| **Dependencies** | AuthModel, useAppStore, useNavigate, usePermissions |
+
+#### v1.6.0 Changes — Admin-Only Nav Gating
+
+- Added `adminOnly` flag to `NavItem` and `NavSection` interfaces
+- `SidebarSection` component filters items/sections using `isStrictAdmin()` from `usePermissions` hook
+- Admin-only items: Webmail, AI & Enterprise section, All Cases, Credentials, Client Monitor, Error Reports
+- Staff users see only non-admin navigation items; admin users see all items
 
 #### State & Effects
 
@@ -612,7 +681,7 @@ const handleExitMasquerade = async () => {
 
 ---
 
-### 3.8 `src/components/Layout/PortalLayout.tsx` — Masquerade Banner (partial)
+### 3.9 `src/components/Layout/PortalLayout.tsx` — Masquerade Banner (partial)
 
 | Property | Value |
 |----------|-------|
@@ -668,7 +737,7 @@ const handleExitMasquerade = async () => {
 
 ---
 
-### 3.9 `src/models/AdminAIModels.ts` — Masquerade API Call (partial)
+### 3.10 `src/models/AdminAIModels.ts` — Masquerade API Call (partial)
 
 | Property | Value |
 |----------|-------|
@@ -698,13 +767,13 @@ static async masquerade(userId: number | string) {
 
 ---
 
-### 3.10 `src/components/TwoFactorSetup.tsx` — Reusable 2FA Management Component
+### 3.11 `src/components/TwoFactorSetup.tsx` — Reusable 2FA Management Component
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/components/TwoFactorSetup.tsx` |
-| **LOC** | 310 |
-| **Purpose** | Reusable component for 2FA setup, verification, method change, disable, and backup code management. Role-aware: adapts available methods and disable capability based on `isStaffOrAdmin` prop. |
+| **LOC** | 503 |
+| **Purpose** | Reusable component for 2FA setup, verification, method change, disable, and backup code management. Role-aware: adapts available methods and disable capability based on `isStaffOrAdmin` prop. Auto-verify TOTP: generates TOTP codes client-side via `totp.ts` and auto-submits verification (v1.8.0). |
 | **Dependencies** | AuthModel, @heroicons/react, sweetalert2 |
 | **Component** | `TwoFactorSetup` (React.FC) |
 | **Props** | `{ isStaffOrAdmin?: boolean }` |
@@ -732,33 +801,122 @@ static async masquerade(userId: number | string) {
 
 ---
 
-### 3.11 `src/pages/general/AccountSettings.tsx` — Staff/Admin Account Settings
+### 3.12 `src/components/PinSetup.tsx` — PIN Setup/Change/Remove Component (v1.9.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/components/PinSetup.tsx` |
+| **LOC** | 308 |
+| **Purpose** | Reusable component for PIN quick login setup, change, and removal. 2-step PIN entry (enter → confirm), password verification, 4-digit input boxes with auto-focus and backspace navigation. |
+| **Dependencies** | AuthModel, sweetalert2 |
+| **Component** | `PinSetup` (React.FC, default export) |
+| **Added in** | v1.9.0 |
+
+#### Key Behaviors
+
+| Behavior | Description |
+|----------|-------------|
+| Status fetch | On mount, calls `AuthModel.getPinStatus()` → shows "Set Up PIN" or "Change/Remove" UI |
+| PIN entry | 4 individual digit input boxes with `type="password"`, `inputMode="numeric"`. Auto-advance on digit, backspace navigates to previous box. |
+| PIN confirm | After entering 4 digits, shows "Confirm your PIN" step. Must match first entry. |
+| Password verify | After PIN confirmation, prompts for current account password. |
+| Set PIN | Calls `AuthModel.setPin(pin, password)` → shows SweetAlert2 success. |
+| Change PIN | Same flow as setup — replaces existing PIN. |
+| Remove PIN | SweetAlert2 confirmation → `AuthModel.removePin()` → updates UI to "Not Set". |
+| Button types | All 5 buttons use `type="button"` to prevent unintended form submissions. |
+
+#### Used By
+
+| Parent Component | Context |
+|-----------------|--------|
+| `AccountSettings.tsx` | Staff/admin PIN setup (Security section) |
+| `PortalSettings.tsx` | Client PIN setup (Security tab) |
+
+---
+
+### 3.13 `src/components/MobileAuthQR.tsx` — Mobile QR Auth Component (v1.8.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/components/MobileAuthQR.tsx` |
+| **LOC** | 208 |
+| **Purpose** | Displays QR code for mobile app authentication on web profile pages. Shows human-friendly short code (`challengeCode`) below QR for manual entry. Always visible — shows "waiting for mobile app" message when no pending challenge (previously returned `null`). |
+| **Dependencies** | AuthModel, qrcode (via backend-generated data URL) |
+| **Component** | `MobileAuthQR` (React.FC, default export) |
+| **Added in** | v1.7.0 (QR display), v1.8.0 (always visible, short codes) |
+
+#### Key Behaviors
+
+| Behavior | Description |
+|----------|-------------|
+| Always visible | Component always renders. If no pending challenge, shows "waiting for mobile app" status message. |
+| QR display | When a challenge is pending, shows QR code from `AuthModel.getMobileAuthQR()` response |
+| Short code | (v1.8.0) Displays `challengeCode` (6-digit numeric, e.g., `482916`) below QR for manual entry in the mobile app |
+| Polling | Polls challenge status periodically; clears state on completion/expiry |
+| State cleanup | Clears `challengeCode` and QR data on challenge completion or expiry |
+
+#### Used By
+
+| Parent Component | Context |
+|-----------------|---------|
+| `AccountSettings.tsx` | Staff/admin profile — mobile QR auth for web login |
+| `PortalSettings.tsx` | Client portal — mobile QR auth for web login |
+
+---
+
+### 3.14 `src/utils/totp.ts` — Browser-Side TOTP Generation (v1.8.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/utils/totp.ts` |
+| **LOC** | 64 |
+| **Purpose** | Browser-side TOTP code generation using Web Crypto API (HMAC-SHA1). Decodes base32 secrets, computes time-based 6-digit codes with 30-second period. Used by TwoFactorSetup.tsx for auto-verify during TOTP setup. |
+| **Dependencies** | None (uses native Web Crypto API) |
+| **Exports** | `generateTOTP(secret: string): Promise<string>` |
+
+#### Exported Functions
+
+| Function | Params | Returns | Description |
+|----------|--------|---------|-------------|
+| `generateTOTP(secret)` | `secret: string` (base32) | `Promise<string>` (6-digit code) | Decodes base32 secret, computes HMAC-SHA1 with current time step (30s period), truncates to 6-digit code |
+
+#### Used By
+
+| Parent Component | Context |
+|-----------------|---------|
+| `TwoFactorSetup.tsx` | Auto-verify: after user scans QR, generates TOTP code client-side and auto-submits to verify-setup endpoint |
+
+---
+
+### 3.15 `src/pages/general/AccountSettings.tsx` — Staff/Admin Account Settings
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/general/AccountSettings.tsx` |
-| **LOC** | 246 |
-| **Purpose** | Account settings page with Two-Factor Authentication card for staff/admin users |
-| **Dependencies** | TwoFactorSetup, useAppStore |
+| **LOC** | 279 |
+| **Purpose** | Account settings page with Two-Factor Authentication card and PIN Quick Login setup for staff/admin users |
+| **Dependencies** | TwoFactorSetup, PinSetup, useAppStore |
 | **2FA Card** | Renders `<TwoFactorSetup isStaffOrAdmin={isStaffOrAdmin} />` where `isStaffOrAdmin` is derived from `user.is_admin || user.is_staff` in the Zustand store |
-| **Updated in** | v1.4.0 — added 2FA card |
+| **PIN Card** | (v1.9.0) Renders `<PinSetup />` in the Security section below the 2FA card |
+| **Updated in** | v1.9.0 — added PinSetup component |
 
 ---
 
-### 3.12 `src/pages/portal/Settings.tsx` — Client Portal Settings
+### 3.16 `src/pages/portal/Settings.tsx` — Client Portal Settings
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/portal/Settings.tsx` |
-| **LOC** | 193 |
-| **Purpose** | Portal settings page with Security tab containing 2FA setup for client users |
-| **Dependencies** | TwoFactorSetup |
+| **LOC** | 244 |
+| **Purpose** | Portal settings page with Security tab containing 2FA setup and PIN Quick Login for client users |
+| **Dependencies** | TwoFactorSetup, PinSetup |
 | **2FA Card** | Under Security tab, renders `<TwoFactorSetup isStaffOrAdmin={false} />` |
-| **Updated in** | v1.4.0 — added 2FA card under Security tab |
+| **PIN Card** | (v1.9.0) Under Security tab, renders `<PinSetup />` below the 2FA card |
+| **Updated in** | v1.9.0 — added PinSetup component |
 
 ---
 
-### 3.13 `src/pages/system/SystemSettings.tsx` — SMTP Configuration Tab
+### 3.17 `src/pages/system/SystemSettings.tsx` — SMTP Configuration Tab
 
 | Property | Value |
 |----------|-------|

@@ -128,7 +128,6 @@ function timeAgo(dateStr: string): string {
 const SitesPage: React.FC = () => {
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevSitesRef = useRef<Site[]>([]);
 
   const loadSites = useCallback(async () => {
@@ -192,15 +191,11 @@ const SitesPage: React.FC = () => {
   // ── Auto-poll while any site is "generating" ──
   useEffect(() => {
     const hasGenerating = sites.some((s) => s.status === 'generating');
-    if (hasGenerating && !pollRef.current) {
-      pollRef.current = setInterval(loadSites, 4000);
-    } else if (!hasGenerating && pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
+    if (hasGenerating) {
+      // Always create a fresh interval when generating
+      const id = setInterval(loadSites, 4000);
+      return () => clearInterval(id);
     }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
   }, [sites, loadSites]);
 
   const handleDelete = async (id: string, name: string) => {
@@ -364,7 +359,7 @@ const SitesPage: React.FC = () => {
                     <div className="flex items-center gap-2 mt-2 p-2.5 bg-blue-50 rounded-lg">
                       <ArrowPathIcon className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" />
                       <p className="text-xs text-blue-600">
-                        AI is building your website — this usually takes 2–5 minutes…
+                        We are building your landing page — this usually takes 2–5 minutes…
                       </p>
                     </div>
                   )}

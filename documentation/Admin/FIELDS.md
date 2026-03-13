@@ -875,7 +875,43 @@ pm2 restart backend  # Reload endpoints from file
 
 ---
 
-## 11. Related Documentation
+## 11. SQLite Tables (Audit Log)
+
+### 11.1 `admin_audit_log` — Admin Action Audit Trail
+
+**Storage:** `/var/opt/backend/data/audit_log.db` (SQLite, WAL mode)  
+**Purpose:** Tracks every admin-panel action without loading the MySQL database.
+
+| Column | Type | Constraints | Default | Description |
+|--------|------|-------------|---------|-------------|
+| id | INTEGER | PK, AUTOINCREMENT | - | Auto-incrementing ID |
+| user_id | TEXT | NOT NULL | - | Admin user ID |
+| user_email | TEXT | | '' | Cached user email |
+| user_name | TEXT | | '' | Cached display name |
+| action | TEXT | NOT NULL | - | HTTP method (GET/POST/PUT/PATCH/DELETE) |
+| resource | TEXT | NOT NULL | - | Full route path |
+| resource_type | TEXT | | '' | Derived category (clients, credits, settings...) |
+| description | TEXT | | '' | Human-readable description |
+| request_body | TEXT | | '{}' | JSON request body (sensitive fields redacted) |
+| response_status | INTEGER | | 0 | HTTP status code |
+| ip_address | TEXT | | '' | Client IP address |
+| user_agent | TEXT | | '' | Client user agent |
+| duration_ms | INTEGER | | 0 | Response time in ms |
+| created_at | DATETIME | | CURRENT_TIMESTAMP | When the action occurred |
+
+**Indexes:**
+```sql
+CREATE INDEX idx_audit_user ON admin_audit_log (user_id, created_at);
+CREATE INDEX idx_audit_created ON admin_audit_log (created_at);
+CREATE INDEX idx_audit_resource ON admin_audit_log (resource_type, created_at);
+CREATE INDEX idx_audit_action ON admin_audit_log (action, created_at);
+```
+
+**Trimming:** Entries can be trimmed by age (days) or purged entirely from the UI.
+
+---
+
+## 12. Related Documentation
 
 - [README.md](./README.md) — Module overview
 - [ROUTES.md](./ROUTES.md) — API endpoints

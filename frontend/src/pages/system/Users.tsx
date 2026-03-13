@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { PlusIcon, PencilIcon, TrashIcon, UserIcon, EnvelopeIcon, ShieldCheckIcon, CheckCircleIcon, XCircleIcon, KeyIcon, NoSymbolIcon } from '@heroicons/react/24/outline';
+import { PlusIcon, PencilIcon, TrashIcon, UserIcon, EnvelopeIcon, ShieldCheckIcon, CheckCircleIcon, XCircleIcon, KeyIcon, NoSymbolIcon, BuildingOfficeIcon } from '@heroicons/react/24/outline';
 import { ColumnDef } from '@tanstack/react-table';
-import { SystemUserModel, User, SystemRoleModel, Role } from '../../models';
+import { SystemUserModel, User, SystemRoleModel, Role, ContactModel } from '../../models';
+import { Contact } from '../../types';
 import { Input, Select, Button, Card, DataTable, BackButton } from '../../components/UI';
 import Can from '../../components/Can';
 import Swal from 'sweetalert2';
@@ -9,6 +10,7 @@ import Swal from 'sweetalert2';
 const Users: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -24,11 +26,13 @@ const Users: React.FC = () => {
     is_admin: false,
     is_staff: false,
     role_id: undefined as number | undefined,
+    contact_id: undefined as number | undefined,
   });
 
   useEffect(() => {
     loadUsers();
     loadRoles();
+    loadContacts();
   }, [pagination.page, pagination.limit, search]);
 
   const loadUsers = async () => {
@@ -60,6 +64,16 @@ const Users: React.FC = () => {
     }
   };
 
+  const loadContacts = async () => {
+    try {
+      const data = await ContactModel.getAll('customers');
+      const list = Array.isArray(data) ? data : (data as any).data || [];
+      setContacts(list);
+    } catch (error: any) {
+      console.error('Failed to load contacts:', error);
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       username: '',
@@ -71,6 +85,7 @@ const Users: React.FC = () => {
       is_admin: false,
       is_staff: false,
       role_id: undefined,
+      contact_id: undefined,
     });
     setEditingUser(null);
     setShowForm(false);
@@ -91,6 +106,7 @@ const Users: React.FC = () => {
           is_active: formData.is_active,
           is_admin: formData.is_admin,
           is_staff: formData.is_staff,
+          contact_id: formData.contact_id || null,
         };
         
         if (formData.password) {
@@ -129,7 +145,10 @@ const Users: React.FC = () => {
           return;
         }
         
-        const result = await SystemUserModel.create(formData);
+        const result = await SystemUserModel.create({
+          ...formData,
+          contact_id: formData.contact_id || undefined,
+        });
         
         // Assign role if selected
         if (formData.role_id && result.data?.id) {
@@ -171,6 +190,7 @@ const Users: React.FC = () => {
       is_admin: user.is_admin,
       is_staff: user.is_staff || false,
       role_id: user.roles?.[0]?.id,
+      contact_id: (user as any).contact_id || undefined,
     });
     setShowForm(true);
   };
@@ -487,6 +507,22 @@ const Users: React.FC = () => {
                   ))}
                 </Select>
                 <p className="text-xs text-gray-500 mt-1">Assign a role to grant permissions</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <Select
+                  label="Linked Client"
+                  value={formData.contact_id?.toString() || ''}
+                  onChange={(e) => setFormData({ ...formData, contact_id: e.target.value ? parseInt(e.target.value) : undefined })}
+                >
+                  <option value="">Select a client...</option>
+                  {contacts.map(c => (
+                    <option key={c.contact_id} value={c.contact_id}>{c.contact_name}{c.contact_person ? ` — ${c.contact_person}` : ''}</option>
+                  ))}
+                </Select>
+                <p className="text-xs text-gray-500 mt-1">Link this user to a client record. Required for portal users.</p>
               </div>
             </div>
 

@@ -273,14 +273,12 @@ const PlanningPage: React.FC = () => {
   const handleStartCall = async (event: CalendarEvent) => {
     try {
       const result = await PlanningModel.startCall(event.id);
-      if (result.action === 'start_scheduled_call' && result.scheduled_call_id) {
-        notify.success('Opening scheduled call...');
-        // Navigate to staff chat — the scheduled call will auto-start
-        window.location.href = `/staff-chat?start_call=${result.scheduled_call_id}`;
-      } else {
-        notify.success('Call information ready — navigate to Staff Chat to start');
-      }
-    } catch { notify.error('Failed to start call'); }
+      notify.success('Starting call...');
+      // Navigate to chat page with call params — ChatPage will auto-join WebRTC
+      window.location.href = `/chat?c=${result.conversation_id}&joinCallId=${result.call_id}&callType=${result.call_type}`;
+    } catch (err: any) {
+      notify.error(err?.response?.data?.error || 'Failed to start call');
+    }
   };
 
   const openCreateModal = (date?: Date) => {

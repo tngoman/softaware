@@ -89,7 +89,7 @@ if (process.env.NODE_ENV === 'development') {
 
 5. **Push notifications** — IMAP IDLE for real-time new message notifications.
 
-6. **Signature management** — Per-account email signatures (HTML/text).
+6. **~~Signature management~~** — ✅ Implemented (March 2026). Per-account email signatures with WYSIWYG + HTML source editor, corporate template insertion, auto-append on compose.
 
 7. **Search improvements** — Full server-side IMAP SEARCH with more criteria (date range, has-attachment, etc.).
 
@@ -109,8 +109,13 @@ if (process.env.NODE_ENV === 'development') {
 | March 2026 | Copilot | **Sent Folder MIME Fix** — Fixed blank email in Sent folder caused by `filter(Boolean)` removing RFC 2822 mandatory blank line between headers and body |
 | March 2026 | Copilot | **FormData Content-Type Fix** — Removed explicit `Content-Type: multipart/form-data` header from frontend (was stripping boundary needed by multer). Let axios auto-set |
 | March 2026 | Copilot | **MailComposer for Sent Copy** — Replaced hand-built MIME with nodemailer MailComposer to build full RFC822 message (with attachments) for Sent folder append |
-| March 2026 | Copilot | **Auto-Detect Sent Folder** — Scans IMAP folder tree for `specialUse: '\\Sent'` instead of hardcoding `'Sent'` path |
-
+| March 2026 | Copilot | **Auto-Detect Sent Folder** — Scans IMAP folder tree for `specialUse: '\\Sent'` instead of hardcoding `'Sent'` path || March 2026 | Copilot | **Unread Count Badge** — New `GET /webmail/unread-count` endpoint returns INBOX unseen count across all user accounts. `getUnreadCount()` in webmailService uses parallel IMAP STATUS queries. Frontend Layout polls every 2 min, renders red badge pill on Webmail sidebar link. NavItem interface extended with `badgeKey` for reusable badge support |
+| March 2026 | Copilot | **Email Signatures** — Per-account HTML signatures stored in `user_mailboxes.signature` (TEXT NULL). Dual-mode editor in Profile MailboxesTab: ReactQuill WYSIWYG ("Visual" mode) + raw HTML textarea with live preview ("HTML Source" mode). "Insert Template" button generates corporate HTML table (Softaware logo + user name/email/phone from Zustand store). Signatures auto-appended in ComposeModal via `getSignatureHtml()` on compose/reply/forward. Account switcher swaps signature in editor. |
+| March 2026 | Copilot | **Sent Items Attachment Fix** — Fixed MailComposer import path (`nodemailer/lib/mail-composer/index.js`), pre-build RFC822 before SMTP send with defensive Buffer copies. Emails in Sent folder now include all attachments. |
+| March 2026 | Copilot | **Forward Email Fix** — Fixed contentEditable innerHTML timing (was `[]` deps, now `[body]` with ref guard). Forward now includes original message body. Forward attachments downloaded via fetch API and attached to outgoing email. `activeFolder` prop added to ComposeModal for correct attachment fetching. |
+| March 2026 | Copilot | **MySQL Strict Mode Fix** — `signature TEXT DEFAULT ''` crashed MySQL strict mode (`ER_BLOB_CANT_HAVE_DEFAULT`). Changed to `TEXT NULL` in both CREATE TABLE and ALTER TABLE migration. Wrapped `ensureWebmailTable()` middleware in try/catch to prevent unhandled crash loop. Manually ran ALTER TABLE on live DB. |
+| March 2026 | Copilot | **Zod Boolean Coercion Fix** — `UpdateAccountSchema` rejected `is_default` as number (MySQL TINYINT returns 0/1). Added `coerceBool` Zod preprocessor that coerces numbers to booleans. Applied to both `CreateAccountSchema` and `UpdateAccountSchema`. Frontend also sends `!!formData.is_default`. |
+| March 2026 | Copilot | **createMailbox Insert Fix** — Changed `db.execute()` to `db.insert()` in `createMailbox()` so `insertId` is properly returned instead of `affectedRows`. |
 ---
 
 ## Dependencies on Other Modules
@@ -129,4 +134,4 @@ if (process.env.NODE_ENV === 'development') {
 |--------|-------|
 | Profile | MailboxesTab uses `WebmailAccountModel` for account CRUD and testing |
 | System Settings | Webmail Server tab uses `WebmailSettingsModel` for domain config |
-| Layout | Sidebar renders Webmail menu item in Main section |
+| Layout | Sidebar renders Webmail menu item with unread count badge (polls `GET /webmail/unread-count` every 2 min) |

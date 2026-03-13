@@ -28,6 +28,7 @@ adminEnterpriseEndpointsRouter.use(requireAuth, requireAdmin);
 const createSchema = z.object({
   client_id: z.string().min(1).max(100),
   client_name: z.string().min(1).max(255),
+  contact_id: z.number().optional(),
   inbound_provider: z.enum(['whatsapp', 'slack', 'custom_rest', 'sms', 'email', 'web']),
   llm_provider: z.enum(['ollama', 'openrouter', 'openai']),
   llm_model: z.string().min(1),
@@ -43,6 +44,7 @@ const createSchema = z.object({
 
 const updateSchema = createSchema.partial().extend({
   status: z.enum(['active', 'paused', 'disabled']).optional(),
+  allowed_ips: z.string().nullish(),
 });
 
 const statusSchema = z.object({
@@ -134,6 +136,46 @@ adminEnterpriseEndpointsRouter.patch('/:id/status', (req: AuthRequest, res: Resp
       return res.status(400).json({ success: false, error: 'Validation failed', details: error.errors });
     }
     console.error('[AdminEnterprise] Status error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PATCH /:id/config — Update endpoint configuration (IP restrictions, etc.)
+// ═══════════════════════════════════════════════════════════════════════════
+const configSchema = z.object({
+  allowed_ips: z.string().nullish(),
+});
+
+adminEnterpriseEndpointsRouter.patch('/:id/config', (req: AuthRequest, res: Response) => {
+  try {
+    const data = configSchema.parse(req.body);
+    const existing = getEndpoint(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Endpoint not found' });
+    }
+    // Validate IP list if provided
+    if (data.allowed_ips) {
+      try {
+        const ips = JSON.parse(data.allowed_ips);
+        if (!Array.isArray(ips)) throw new Error('Must be an array');
+        for (const ip of ips) {
+          if (typeof ip !== 'string' || !/^[\d.:a-fA-F\/]+$/.test(ip.trim())) {
+            throw new Error(`Invalid IP: ${ip}`);
+          }
+        }
+      } catch (e: any) {
+        return res.status(400).json({ success: false, error: `Invalid allowed_ips: ${e.message}` });
+      }
+    }
+    updateEndpoint(req.params.id, { allowed_ips: data.allowed_ips ?? null } as any);
+    const updated = getEndpoint(req.params.id);
+    res.json({ success: true, data: updated });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      return res.status(400).json({ success: false, error: 'Validation failed', details: error.errors });
+    }
+    console.error('[AdminEnterprise] Config error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

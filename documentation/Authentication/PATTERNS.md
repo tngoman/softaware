@@ -1,7 +1,7 @@
 # Authentication Module - Architecture Patterns
 
-**Version:** 1.5.0  
-**Last Updated:** 2026-03-06
+**Version:** 1.9.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -150,14 +150,14 @@ const token = signAccessToken({ userId }, decoded.rememberMe ? '30d' : undefined
 
 ### 2.4 Frontend User Shape Builder Pattern
 
-**Context:** Frontend expects a specific user object shape with role and permissions — but backend stores these across 3+ tables.
+**Context:** Frontend expects a specific user object shape with role and permissions — but backend stores these across 3+ tables. Admin/staff status is stored directly on the `users` table (v1.6.0+).
 
 **Implementation:**
 
 ```typescript
 export async function buildFrontendUser(userId: string) {
-  // 3 sequential DB queries (no team dependency):
-  const user = await db.queryOne('SELECT ... FROM users WHERE id = ?', [userId]);
+  // v1.6.0: is_admin and is_staff read directly from users table columns
+  const user = await db.queryOne('SELECT id, email, name, ..., is_admin, is_staff FROM users WHERE id = ?', [userId]);
   const roleRow = await db.queryOne('SELECT ... FROM user_roles JOIN roles ...', [userId]);
   const permissions = await db.query('SELECT ... FROM role_permissions JOIN permissions ...', [roleId]);
 
@@ -166,8 +166,9 @@ export async function buildFrontendUser(userId: string) {
     ? { id: roleRow.role_id, name: roleRow.role_name, slug: roleRow.role_slug }
     : { id: 0, name: 'Client', slug: 'client' };
 
-  const isAdmin = userRole.slug === 'admin' || userRole.slug === 'super_admin';
-  const isStaff = ['developer', 'client_manager', 'qa_specialist', 'deployer'].includes(userRole.slug);
+  // v1.6.0: Read directly from users table columns (not derived from role slugs)
+  const isAdmin = !!user.is_admin;
+  const isStaff = !!user.is_staff;
 
   return {
     id, email, name, avatar, is_admin, is_staff,
@@ -182,6 +183,7 @@ export async function buildFrontendUser(userId: string) {
 - ✅ Frontend receives a denormalized object — no additional API calls needed
 - ✅ Permission resolution (wildcard for admins/staff) encapsulated
 - ✅ No team dependency — role resolved entirely from `user_roles` table
+- ✅ Admin/staff status from direct DB columns — no dependency on role slug naming (v1.6.0+)
 
 **Drawbacks:**
 - ❌ 3 sequential DB queries per call — could be a single JOIN
@@ -255,9 +257,10 @@ this.storeAuth(token, user);  // overwrites active session with target user
 const decoded = jwt.verify(adminRestoreToken, env.JWT_SECRET);
 const adminId = decoded.userId;
 
-// Re-verify admin role (prevents escalation if role was removed during masquerade)
-const adminRole = await db.queryOne('SELECT ... FROM user_roles ... WHERE slug IN ("admin","super_admin")', [adminId]);
-if (!adminRole) return res.status(403).json({ error: 'Not an admin' });
+// v1.6.0: Re-verify admin status via users.is_admin column (no role slug dependency)
+const [rows] = await db.execute('SELECT is_admin FROM users WHERE id = ? LIMIT 1', [adminId]);
+const adminUser = (rows as any[])[0];
+if (!adminUser || !adminUser.is_admin) return res.status(403).json({ error: 'Not an admin' });
 
 // Issue fresh admin JWT
 const token = signAccessToken({ userId: adminId });
@@ -267,7 +270,7 @@ const user = await buildFrontendUser(adminId);
 **Benefits:**
 - ✅ Two independent JWTs — compromise of masquerade token doesn't give admin access
 - ✅ Admin restore token has separate (longer) expiry — admin can return even after masquerade token expires
-- ✅ Exit endpoint re-verifies admin role — prevents privilege escalation if role was revoked during masquerade
+- ✅ Exit endpoint re-verifies admin status via `users.is_admin` column — prevents privilege escalation if admin flag was removed during masquerade (v1.6.0+)
 - ✅ Self-masquerade blocked — admin cannot masquerade as themselves
 - ✅ Clear visual indicator (purple banner) prevents confusion about which session is active
 - ✅ Frontend localStorage keys are separate from normal auth — `clearAuth()` also cleans masquerade state
@@ -299,7 +302,10 @@ const user = await buildFrontendUser(adminId);
 
 ```typescript
 // Backend: GET /auth/2fa/status
-const isStaffOrAdmin = roleRow && ['admin', 'super_admin', 'developer', 'client_manager', 'qa_specialist', 'deployer'].includes(roleRow.slug);
+// v1.6.0: Staff/admin detection via users.is_admin/is_staff columns (not role slugs)
+const [rows] = await db.execute('SELECT is_admin, is_staff FROM users WHERE id = ? LIMIT 1', [req.user.id]);
+const userRow = (rows as any[])[0];
+const isStaffOrAdmin = userRow && (userRow.is_admin || userRow.is_staff);
 const availableMethods = isStaffOrAdmin ? ['totp', 'email', 'sms'] : ['totp', 'email'];
 
 return res.json({
@@ -389,21 +395,434 @@ export function invalidateTransporter() {
 
 ---
 
+### 2.9 Push-to-Approve 2FA Pattern (v1.7.0)
+
+**Context:** TOTP code entry requires the user to open their authenticator app, read a 6-digit code, switch to the browser, and type it — all within 30 seconds. Push-to-approve provides a single-tap alternative for users with the mobile app installed.
+
+**Implementation:**
+
+```typescript
+// auth.ts — During login, after detecting TOTP method:
+let challengeId: string | null = null;
+try {
+  challengeId = await createPushChallenge(
+    user.id, input.rememberMe, user.email, user.name
+  );
+} catch (err) {
+  console.error('[Auth] Push challenge failed (non-fatal):', err);
+}
+
+return res.json({
+  requires_2fa: true,
+  two_factor_method: method,
+  temp_token: tempToken,
+  ...(challengeId ? { challenge_id: challengeId } : {}),
+  message: challengeId
+    ? 'Approve the login on your mobile app, or enter your authenticator code.'
+    : 'Two-factor authentication required.',
+});
+```
+
+```typescript
+// twoFactor.ts — createPushChallenge()
+export async function createPushChallenge(
+  userId: string, rememberMe: boolean, userEmail: string, userName?: string
+): Promise<string | null> {
+  const challengeId = crypto.randomBytes(32).toString('hex');
+
+  await db.execute(
+    `INSERT INTO mobile_auth_challenges (id, user_id, status, remember_me, source)
+     VALUES (?, ?, 'pending', ?, 'push')`,
+    [challengeId, userId, rememberMe ? 1 : 0]
+  );
+
+  const result = await sendPushToUser(userId, {
+    type: 'login_approval',
+    challenge_id: challengeId,
+    user_email: userEmail,
+    title: 'Login Approval Request',
+    body: `Tap to approve login for ${userEmail}`,
+  });
+
+  if (!result || result.successCount === 0) return null;
+  return challengeId;
+}
+```
+
+```typescript
+// twoFactor.ts — POST /auth/2fa/push-approve (mobile app endpoint)
+// Validates: JWT ownership, source='push', pending status, not expired
+// Sets status to 'completed' (approve) or 'denied' (deny)
+
+// twoFactor.ts — POST /auth/2fa/push-status (web frontend polling endpoint)
+// Validates: temp_token JWT with purpose='2fa'
+// Returns: { status: 'pending' | 'denied' | 'expired' }
+//   OR on 'completed': issues full JWT (same shape as /auth/2fa/verify)
+```
+
+**Flow Diagram:**
+
+```
+  Web Login          Backend              Mobile App         FCM
+     │                  │                     │               │
+     │── POST /login ──▶│                     │               │
+     │                  │── createPushChallenge()              │
+     │                  │── INSERT challenge ──▶ DB            │
+     │                  │── sendPushToUser() ─────────────▶│
+     │                  │                     │◀── FCM push ──┘
+     │◀── { requires_2fa,│                     │
+     │   challenge_id } │                     │
+     │                  │                     │
+     │                  │  POST /push-approve  │
+     │                  │◀── { approve } ─────┘
+     │                  │── status='completed' ▶ DB
+     │                  │                     │
+     │── POST /push-status ▶│                  │
+     │                  │── status='completed'
+     │                  │── issue JWT ─────▶
+     │◀── { token, user }│
+     │                  │
+```
+
+**Benefits:**
+- ✅ Single-tap approval — no code transcription needed
+- ✅ Non-breaking, additive change — existing TOTP code entry still works as fallback
+- ✅ Non-fatal push — `createPushChallenge()` wrapped in try/catch; FCM failure never blocks login
+- ✅ Parallel paths — web frontend can poll push-status while also accepting manual TOTP code entry
+- ✅ Ownership enforced — only the challenge owner (by JWT userId) can approve/deny
+- ✅ Source guard — only `source='push'` challenges accepted by push-approve endpoint
+- ✅ Time-limited — 5-minute expiry matches temp_token TTL
+- ✅ Deny support — user can explicitly deny suspicious login attempts
+- ✅ Same JWT issuance path — push-status uses `buildFrontendUser()` + `signAccessToken()` (identical to /auth/2fa/verify)
+- ✅ Reuses existing infrastructure — `mobile_auth_challenges` table, `fcm_tokens` table, `firebaseService.ts`
+
+**Drawbacks:**
+- ❌ Polling-based — push-status requires frontend to poll every 2-3 seconds (no WebSocket/SSE push to web)
+- ❌ Requires FCM setup — Firebase Admin SDK must be configured; mobile app must register FCM tokens
+- ❌ No challenge cleanup — expired/completed challenges accumulate in DB (should add periodic purge)
+- ❌ Same JWT_SECRET for temp and real tokens — inherits existing weakness from temp token pattern
+
+---
+
+### 2.10 Alternative Authentication Fallback Pattern (v1.8.0)
+
+**Context:** A user's preferred 2FA method may be temporarily unavailable (e.g., TOTP push requires a mobile app the user doesn't have nearby, SMS requires phone reception, email may be inaccessible). The system needs a way to fall back to any other available method without changing the user's permanent preference.
+
+**Implementation:**
+
+```typescript
+// Backend: POST /auth/2fa/send-alt-otp
+const decoded = jwt.verify(input.temp_token, env.JWT_SECRET);
+if (decoded.purpose !== '2fa') throw badRequest('Invalid temporary token.');
+
+const method = input.method; // 'email' or 'sms'
+const otp = generateOTP(); // 6-digit random
+const otpHash = crypto.createHash('sha256').update(otp).digest('hex');
+
+// Store OTP using the user's existing 2FA row (does NOT change preferred_method)
+await db.execute(
+  'UPDATE user_two_factor SET otp_code = ?, otp_expires_at = DATE_ADD(NOW(), INTERVAL 5 MINUTE) WHERE user_id = ?',
+  [otpHash, decoded.userId]
+);
+
+// Send via the requested alternative method
+if (method === 'email') {
+  await sendTwoFactorOtp(user.email, otp);
+} else if (method === 'sms') {
+  await sendSms(user.phone, `Your verification code is: ${otp}`);
+}
+```
+
+```typescript
+// Backend: POST /auth/2fa/verify — Universal TOTP validation
+// v1.8.0: Always try TOTP first, regardless of preferred_method
+let isValid = false;
+
+// 1. Try TOTP (always, for any 6-digit numeric code)
+if (input.code.length === 6 && /^\d+$/.test(input.code)) {
+  const totp = createTOTP(twoFactorRow.secret, user.email);
+  const delta = totp.validate({ token: input.code, window: 1 });
+  if (delta !== null) isValid = true;
+}
+
+// 2. Try email/SMS OTP (if TOTP didn't match)
+if (!isValid && twoFactorRow.otp_code) { /* check OTP hash + expiry */ }
+
+// 3. Try backup code (if neither matched)
+if (!isValid) { /* check SHA-256 hash against backup_codes JSON */ }
+```
+
+```typescript
+// Frontend: AuthPage.tsx — Dynamic alternative method buttons
+const handleSendAltOtp = async (method: 'email' | 'sms') => {
+  setSendingAltOtp(true);
+  try {
+    await AuthModel.sendAltOtp(twoFaTempToken, method);
+    setShowManualCode(true); // Switch to code entry screen
+    // Show success message based on method
+  } catch (err) { /* show error */ }
+  finally { setSendingAltOtp(false); }
+};
+
+// On push screen or manual code screen, show the OTHER two methods:
+// If preferred=totp: show Email + SMS buttons
+// If preferred=email: show Authenticator + SMS buttons
+// If preferred=sms: show Authenticator + Email buttons
+```
+
+**Benefits:**
+- ✅ Non-destructive — does NOT change `preferred_method`, just sends a one-time OTP
+- ✅ Universal verify — TOTP codes work regardless of which method was used to send OTP
+- ✅ Full coverage — user always has at least 2 fallback options (email, SMS, or authenticator app)
+- ✅ Same temp_token — reuses the existing 5-minute temp_token pattern
+- ✅ Backup codes always work — 8-char hex codes accepted as final fallback regardless of method
+- ✅ Frontend dynamically shows only the alternative methods (not the current one)
+
+**Drawbacks:**
+- ❌ SMS availability depends on user having a phone number on file
+- ❌ Overwriting `otp_code` — if user requests multiple alternatives, only the latest OTP is valid
+- ❌ No tracking of which alternative method was used for audit purposes
+
+---
+
+### 2.11 Push-to-Approve Frontend Polling Pattern (v1.8.0)
+
+**Context:** The push-to-approve flow requires the web frontend to detect when the mobile app has approved/denied the challenge. Since the system doesn't use WebSockets, the frontend must poll.
+
+**Implementation:**
+
+```typescript
+// AuthPage.tsx — Push-to-approve polling useEffect
+useEffect(() => {
+  if (!challengeId || !twoFaTempToken || pushStatus === 'denied' || pushStatus === 'expired') return;
+  if (showManualCode) return; // Stop polling when user switches to manual entry
+
+  const interval = setInterval(async () => {
+    try {
+      const response = await AuthModel.pollPushStatus(twoFaTempToken, challengeId);
+
+      if (response.success && response.data?.token) {
+        // Approved! Auto-complete login
+        clearInterval(interval);
+        AuthModel.storeAuth(response.data.token, response.data.user);
+        // ... navigate to dashboard
+      } else if (response.status === 'denied') {
+        setPushStatus('denied');
+        clearInterval(interval);
+      } else if (response.status === 'expired') {
+        setPushStatus('expired');
+        clearInterval(interval);
+      }
+      // 'pending' — continue polling
+    } catch (err) {
+      // Token expired — stop polling
+      clearInterval(interval);
+    }
+  }, 3000); // Poll every 3 seconds
+
+  return () => clearInterval(interval); // Cleanup on unmount
+}, [challengeId, twoFaTempToken, pushStatus, showManualCode]);
+```
+
+```typescript
+// State management
+const [challengeId, setChallengeId] = useState<string | null>(null);
+const [pushStatus, setPushStatus] = useState<string>('');
+const [showManualCode, setShowManualCode] = useState(false);
+
+// On login response:
+if (data.challenge_id) {
+  setChallengeId(data.challenge_id);
+  // Show push waiting screen
+}
+
+// User actions:
+// "Enter code manually" → setShowManualCode(true)  // stops polling
+// "Back to push approval" → setShowManualCode(false)  // resumes polling
+// "Use Email Instead" → handleSendAltOtp('email')
+// "Use SMS Instead" → handleSendAltOtp('sms')
+```
+
+**UI States:**
+
+| State | pushStatus | showManualCode | Screen |
+|-------|-----------|----------------|--------|
+| Waiting for approval | `''` (empty) | false | Spinning indicator + "Waiting for approval on your mobile device..." + "Enter code manually" link + Alt method buttons |
+| Push denied | `'denied'` | false | Red message "Login was denied on your mobile device" + "Try Again" + "Enter code manually" link |
+| Push expired | `'expired'` | false | Yellow message "The approval request has expired" + "Try Again" + "Enter code manually" link |
+| Manual code entry | any | true | Code input field + "Verify" button + "Back to push approval" link + Alt method buttons |
+| Login complete | — | — | Navigates to `/dashboard` |
+
+**Benefits:**
+- ✅ Simple polling approach — no WebSocket complexity
+- ✅ Automatic cleanup — interval cleared on unmount, status change, or navigation
+- ✅ Parallel paths — user can enter TOTP code manually while push is pending
+- ✅ Graceful degradation — denied/expired show clear messages with recovery options
+- ✅ Alternative methods always available — user never gets stuck on push screen
+- ✅ 3-second interval balances responsiveness vs server load
+
+**Drawbacks:**
+- ❌ Polling — not real-time (up to 3-second delay after approval)
+- ❌ Server load — continuous polling for duration of challenge (max ~100 requests over 5 minutes)
+- ❌ No exponential backoff — constant 3-second interval regardless of time elapsed
+
+---
+
+### 2.12 PIN Quick Login Pattern (v1.9.0)
+
+**Context:** Returning users on trusted devices must enter their full email and password every login. For frequent users (e.g., staff checking in multiple times per day), this creates unnecessary friction. A 4-digit PIN provides a faster alternative credential without compromising security.
+
+**Implementation:**
+
+```typescript
+// Backend: Auto-migration on module load
+async function ensurePinTable() {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS user_pins (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+      pin_hash VARCHAR(255) NOT NULL,
+      failed_attempts INT DEFAULT 0,
+      locked_until DATETIME NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_pin (user_id),
+      CONSTRAINT fk_user_pins_user FOREIGN KEY (user_id)
+        REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+ensurePinTable(); // Called on module load — zero manual migration
+```
+
+```typescript
+// Backend: POST /auth/pin/set — UPSERT pattern
+const pinHash = await bcrypt.hash(pin, 10);
+await db.execute(
+  `INSERT INTO user_pins (user_id, pin_hash, failed_attempts, locked_until)
+   VALUES (?, ?, 0, NULL)
+   ON DUPLICATE KEY UPDATE pin_hash = VALUES(pin_hash),
+     failed_attempts = 0, locked_until = NULL`,
+  [userId, pinHash]
+);
+// Single query handles both initial set and PIN change
+// Also resets failed attempts and lockout on change
+```
+
+```typescript
+// Backend: POST /auth/pin/verify — Rate-limited with per-user lockout
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCKOUT_MINUTES = 15;
+
+// 1. Find user by email (don't reveal if email exists)
+const user = await findUserByEmail(email);
+if (!user) return res.status(401).json({ error: 'Invalid email or PIN' });
+
+// 2. Find PIN (don't reveal if PIN is set)
+const pinRow = await findPinByUserId(user.id);
+if (!pinRow) return res.status(401).json({ error: 'Invalid email or PIN' });
+
+// 3. Check lockout
+if (pinRow.locked_until && new Date(pinRow.locked_until) > new Date()) {
+  return res.status(429).json({ error: 'Too many attempts. Try again later.' });
+}
+
+// 4. Verify PIN
+const valid = await bcrypt.compare(pin, pinRow.pin_hash);
+if (!valid) {
+  const newAttempts = pinRow.failed_attempts + 1;
+  if (newAttempts >= PIN_MAX_ATTEMPTS) {
+    // Lock for 15 minutes
+    await db.execute(
+      'UPDATE user_pins SET failed_attempts = ?, locked_until = DATE_ADD(NOW(), INTERVAL ? MINUTE) WHERE user_id = ?',
+      [newAttempts, PIN_LOCKOUT_MINUTES, user.id]
+    );
+  } else {
+    await db.execute('UPDATE user_pins SET failed_attempts = ? WHERE user_id = ?',
+      [newAttempts, user.id]);
+  }
+  return res.status(401).json({ error: 'Invalid email or PIN' });
+}
+
+// 5. Reset attempts on success
+await db.execute('UPDATE user_pins SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?', [user.id]);
+
+// 6. Check 2FA — PIN does NOT bypass 2FA
+if (twoFactorRow?.is_enabled) {
+  // Issue temp_token + auto-send push/OTP (same as password login)
+  return res.json({ requires_2fa: true, temp_token, ... });
+}
+
+// 7. No 2FA — issue JWT directly
+const token = signAccessToken({ userId: user.id });
+const frontendUser = await buildFrontendUser(user.id);
+return res.json({ success: true, data: { token, user: frontendUser } });
+```
+
+```typescript
+// Frontend: Returning user detection
+const lastEmail = AuthModel.getLastEmail(); // localStorage
+if (lastEmail) {
+  const { has_pin } = await AuthModel.checkPinByEmail(lastEmail);
+  if (has_pin) {
+    // Show PIN pad instead of password form
+    setLoginMode('pin');
+  }
+}
+// "Not you?" → clears lastEmail, shows normal login
+// "Use password instead" → switches to password form
+```
+
+**Security Model:**
+
+| Aspect | Implementation |
+|--------|---------------|
+| PIN storage | bcrypt (10 rounds) — same as passwords |
+| Brute force | 5 failed attempts → 15-minute lockout (per-user, not per-IP) |
+| Error messages | Deliberately vague — "Invalid email or PIN" for all failure modes |
+| 2FA integration | PIN does NOT bypass 2FA — if 2FA is enabled, PIN login triggers the same 2FA flow as password login |
+| Email enumeration | `GET /pin/check/:email` returns `{ has_pin: false }` for non-existent emails (doesn't reveal existence) |
+| PIN complexity | 4 digits (10,000 combinations) — acceptable given lockout policy |
+| Table creation | Auto-migration with explicit collation matching `users.id` column |
+
+**Benefits:**
+- ✅ Zero backend changes needed for existing auth — purely additive
+- ✅ PIN is an alternative to password, not a replacement — full password login always available
+- ✅ 2FA not bypassed — same security guarantees as password login
+- ✅ UPSERT handles set/change in single query — no separate "update" vs "create" logic
+- ✅ Per-user lockout tracks attempts in DB — survives server restarts, not bypassable by switching IPs
+- ✅ Auto-migration on module load — no manual migration step required
+- ✅ Collation explicitly set — prevents FK mismatch with `users.id` on MySQL 8.0 (utf8mb4_0900_ai_ci default vs utf8mb4_unicode_ci)
+- ✅ Returning user detection via localStorage — seamless UX for repeat visitors
+- ✅ Frontend auto-submits on 4th digit — fastest possible PIN entry
+
+**Drawbacks:**
+- ❌ 4-digit PIN has only 10,000 combinations — relying entirely on lockout policy for brute force protection
+- ❌ No server-side rate limiting on `/pin/verify` — only per-user lockout (no IP-based throttling)
+- ❌ `lastEmail` in localStorage — reveals which email was used on this browser (acceptable for trusted devices)
+- ❌ No PIN expiry — PIN remains valid indefinitely (user must manually remove)
+- ❌ No PIN change notification — user not notified via email when PIN is changed
+
+---
+
 ## 3. Anti-Patterns Found
 
 ### 3.1 Sequential Queries in buildFrontendUser
 
 **Description:** 3 sequential database queries to build a single user object.
 
-**Current Code:**
+**Current Code (v1.6.0):**
 
 ```typescript
-const user = await db.queryOne('SELECT ... FROM users WHERE id = ?', [userId]);
+// Query 1: User data + is_admin/is_staff from users table columns
+const user = await db.queryOne('SELECT id, email, name, ..., is_admin, is_staff FROM users WHERE id = ?', [userId]);
+// Query 2: Role name/slug for display (user_roles is now supplementary)
 const roleRow = await db.queryOne('SELECT ... FROM user_roles JOIN roles ...', [userId]);
+// Query 3: Granular permissions
 const permissions = await db.query('SELECT ... FROM role_permissions JOIN permissions ...', [roleId]);
 ```
 
-**Impact:** 🟡 WARNING — 3 round trips to MySQL per login/me request. Under load, this multiplies connection usage.
+**Impact:** 🟡 WARNING — 3 round trips to MySQL per login/me request. Under load, this multiplies connection usage. Note: admin/staff detection no longer depends on the role query (v1.6.0+), but the query is still needed for role display name and permission resolution.
 
 **Recommended Fix:**
 
@@ -461,7 +880,7 @@ authRouter.post('/login', loginLimiter, async (req, res, next) => { ... });
 
 ### 3.4 Collation Hack in user_roles Query
 
-**Description:** The user_roles query uses explicit `COLLATE utf8mb4_unicode_ci` to work around a collation mismatch.
+**Description:** The user_roles query uses explicit `COLLATE utf8mb4_unicode_ci` to work around a collation mismatch. Note: since v1.6.0, `buildFrontendUser()` no longer uses this query for admin/staff detection (reads from `users` columns directly), but the collation hack remains in the role name/slug lookup.
 
 **Current Code:**
 

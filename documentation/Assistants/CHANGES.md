@@ -1,7 +1,7 @@
 # Assistants Module — Changelog & Known Issues
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-09
+**Version:** 2.3.0  
+**Last Updated:** 2026-03-13
 
 ---
 
@@ -9,6 +9,10 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-13 | 2.3.0 | Voice interaction awareness — VOICE INTERACTION section added to STAFF_CORE_DEFAULT and CLIENT_CORE_DEFAULT; AI no longer claims it "can't hear" users or formats responses with markdown when used via mobile voice |
+| 2026-03-12 | 2.2.0 | AI Telemetry — POPIA-compliant anonymized chat analytics, PII sanitization, consent API, frontend consent modal with opt-out for paid users |
+| 2026-03-10 | 2.1.0 | Task tools rewired — 22 tools (up from 4), dual-path architecture (local reads + proxy writes), source-level API keys, full lifecycle support |
+| 2026-03-10 | 2.0.0 | Vision/multimodal support (image analysis), bidirectional voice (TTS + STT), image attachment UI |
 | 2026-03-09 | 1.9.0 | GLM-first 3-tier routing (GLM→OpenRouter→Ollama), chat history sidebar, conversation preview API |
 | 2026-03-09 | 1.8.0 | Tier-based OpenRouter routing for paid-tier assistant chat (portal + mobile) |
 | 2026-03-08 | 1.7.0 | Chat persistence, SSE fixes, tool reliability (35/35), collation fix, model pre-warming, actionable errors |
@@ -22,7 +26,458 @@
 
 ---
 
-## 1.9 v1.9.0 — GLM-First 3-Tier Routing + Chat History Sidebar
+## 2.00 v2.3.0 — Voice Interaction Awareness
+
+**Date:** 2026-03-13  
+**Scope:** Fix two voice-related bugs: (1) AI says "I can't hear you" when user tests mic via voice, (2) TTS reads asterisks as the word "asterisk" because model outputs markdown.
+
+### Summary
+
+The mobile app uses speech-to-text to transcribe user voice into text, passes it to the AI, and reads the AI's text reply back via TTS. Two bugs emerged:
+
+1. **"Can you hear me?" bug** — The `STAFF_CORE_DEFAULT` and `CLIENT_CORE_DEFAULT` prompt constants in `mobileAIProcessor.ts` had no mention of the voice pipeline. When a user said "can you hear me?" the model responded literally: "I'm a text-only model, I can't hear you." In reality, the user's voice IS transcribed and the reply IS spoken back.
+
+2. **Asterisk/markdown bug** — Without instructions to avoid markdown, the model formatted responses with `**bold**`, `* bullets`, and `#` headers. While `stripMarkdownForSpeech()` strips most of these, some patterns (especially when the model writes the `*` character mid-sentence) result in TTS reading "asterisk" aloud.
+
+Both bugs had the same root cause: the compiled `.js` files were stale and missing the VOICE INTERACTION section that existed in the `.ts` source.
+
+### Changes — Backend
+
+#### Modified: `src/services/mobileAIProcessor.ts` (~387 → ~418 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **`STAFF_CORE_DEFAULT`** | Added `VOICE INTERACTION:` section (6 rules) — tells AI it receives voice via STT, responds via TTS, should never claim it "can't hear", must avoid markdown formatting, use commas/periods for pauses, and say "dash" instead of hyphen markers |
+| **`CLIENT_CORE_DEFAULT`** | Added matching `VOICE INTERACTION:` section (5 rules) — same voice awareness but slightly shorter |
+| **Compiled `.js` sync** | Both `.ts` constants and `.js` compiled output now include the VOICE INTERACTION section |
+
+**`STAFF_CORE_DEFAULT` additions:**
+
+```
+VOICE INTERACTION:
+- Users interact with you via voice (speech-to-text). Your replies are read aloud via text-to-speech.
+- If someone says "can you hear me?", "is this working?", "hello?", or tests their mic — YES, you can
+  receive their voice input. Respond warmly: "Yes, I can hear you! How can I help?"
+- Do NOT say you are text-only, cannot hear, or lack audio capabilities.
+- Do NOT use markdown formatting (no asterisks, underscores, hash symbols, backticks, or bullet symbols).
+  Write in plain natural sentences since your response will be spoken aloud.
+- Use commas and periods for pauses instead of bullet points or numbered lists.
+- Say "dash" or skip the character entirely instead of using hyphens as list markers.
+```
+
+**`CLIENT_CORE_DEFAULT` additions:**
+
+```
+VOICE INTERACTION:
+- Users interact with you via voice (speech-to-text). Your replies are read aloud via text-to-speech.
+- If someone says "can you hear me?", "is this working?", or tests their mic — YES, respond warmly.
+- Do NOT say you are text-only or cannot hear.
+- Do NOT use markdown formatting (no asterisks, hash symbols, backticks, or bullet symbols).
+- Use commas and periods for pauses instead of bullet points or numbered lists.
+```
+
+### Root Cause Analysis
+
+The project does not use `outDir` in `tsconfig.json` — compiled `.js` files sit alongside `.ts` source files. PM2 runs the `.js` files. When the `.ts` source was updated with the VOICE INTERACTION section (during v2.0.0 bidirectional voice work), the `.js` files were not recompiled. The stale `.js` had the old prompts without any voice awareness.
+
+### Verification
+
+- ✅ `STAFF_CORE_DEFAULT` in `.js` contains "VOICE INTERACTION" (6 rules)
+- ✅ `CLIENT_CORE_DEFAULT` in `.js` contains "VOICE INTERACTION" (5 rules)
+- ✅ `node -c src/services/mobileAIProcessor.js` passes syntax check
+- ✅ `node -c src/utils/stripMarkdown.js` passes syntax check
+- ✅ Both `.ts` and `.js` now in sync
+
+### Files Changed
+
+| File | Changes | LOC |
+|------|---------|-----|
+| `src/services/mobileAIProcessor.ts` | Already had VOICE INTERACTION (source of truth) | 418 |
+| `src/services/mobileAIProcessor.js` | Synced: added VOICE INTERACTION to both core defaults, removed duplicate dangling blocks | 297 |
+
+---
+
+## 2.0 v2.2.0 — AI Telemetry (POPIA-Compliant Analytics)
+
+**Date:** 2026-03-12  
+**Scope:** Anonymized AI chat logging across all 3 chat routes, PII sanitization, MySQL consent tracking, frontend consent modal with paid-user opt-out
+
+### Summary
+
+All AI chat interactions (portal SSE chat, widget chat, enterprise webhooks) are now logged to a SQLite analytics table with full PII sanitization. Personal data — email addresses, South African phone numbers, SA ID numbers, credit card numbers, account numbers, and street addresses — is automatically stripped from prompts and responses before storage. Users must accept a telemetry consent modal before creating their first assistant. Paid-tier users get an additional opt-out toggle.
+
+### Changes — Backend
+
+**NEW: `src/utils/analyticsLogger.ts` (~160 LOC):**
+
+| Export | Purpose |
+|--------|---------|
+| `sanitizeText(text)` | Strips PII via regex: emails → `[EMAIL REMOVED]`, SA phones → `[PHONE REMOVED]`, SA IDs (13 digits) → `[SA_ID REMOVED]`, credit cards → `[CARD REMOVED]`, account numbers → `[ACCOUNT REMOVED]`, street addresses → `[ADDRESS REMOVED]` |
+| `logAnonymizedChat(clientId, rawPrompt, rawResponse, options?)` | Fire-and-forget SQLite insert into `ai_analytics_logs`. Options: `source` (portal/widget/enterprise), `model`, `provider`, `durationMs` |
+
+- Auto-creates `ai_analytics_logs` table in `/var/opt/backend/data/vectors.db` on first call
+- All errors caught silently (fire-and-forget — never breaks chat flow)
+- Uses `better-sqlite3` for synchronous writes
+
+**NEW: `src/db/migrations/026_ai_telemetry.ts`:**
+
+| Column Added | Table | Type | Default |
+|-------------|-------|------|---------|
+| `telemetry_consent_accepted` | `users` | TINYINT(1) | 0 |
+| `telemetry_opted_out` | `users` | TINYINT(1) | 0 |
+| `telemetry_consent_date` | `users` | DATETIME | NULL |
+
+**MODIFIED: `src/routes/assistants.ts` (+80 LOC → ~1,108 LOC):**
+
+| Change | Detail |
+|--------|--------|
+| Added import | `import { logAnonymizedChat } from '../utils/analyticsLogger.js'` |
+| SSE chat telemetry | After stream completes, JOINs `users` table to check `telemetry_opted_out`; if not opted out, calls `logAnonymizedChat()` with source `'portal'` |
+| `GET /telemetry-consent` | Returns `{ consent: { accepted, optedOut, consentDate }, assistantCount }` for authenticated user |
+| `POST /telemetry-consent` | Accepts `{ accepted: boolean, optOut?: boolean }`, updates `users` table consent columns |
+
+**MODIFIED: `src/routes/widgetChat.ts` (+5 LOC → ~338 LOC):**
+
+| Change | Detail |
+|--------|--------|
+| Added import | `import { logAnonymizedChat } from '../utils/analyticsLogger.js'` |
+| Widget chat telemetry | Calls `logAnonymizedChat(clientId, message, assistantMessage, { source: 'widget', model, provider })` before response |
+
+**MODIFIED: `src/routes/enterpriseWebhook.ts` (+8 LOC → ~345 LOC):**
+
+| Change | Detail |
+|--------|--------|
+| Added import | `import { logAnonymizedChat } from '../utils/analyticsLogger.js'` |
+| Webhook telemetry | Step 9 (new): logs anonymized chat with source `'enterprise'`, model, provider, durationMs. Response send renumbered to step 10. |
+
+### Changes — Frontend
+
+**MODIFIED: `src/pages/portal/CreateAssistant.tsx` (+66 LOC → ~1,259 LOC):**
+
+| Change | Detail |
+|--------|--------|
+| New imports | `ShieldCheckIcon`, `EyeSlashIcon` from Heroicons; `useAppStore` from Zustand |
+| State additions | `showTelemetryModal`, `telemetryConsent` (loaded/accepted/optedOut/assistantCount), `telemetryOptOut`, `isPaidUser` |
+| Consent check | `useEffect` on mount: `GET /api/assistants/telemetry-consent` — loads consent status |
+| Modal intercept | `handleNext` at step 0 for new assistants: if consent not yet accepted, shows modal instead of proceeding |
+| Consent modal | POPIA compliance info box, terms text (what is collected, what is sanitized), opt-out toggle for paid users, Cancel/Accept buttons |
+| Consent submit | `POST /api/assistants/telemetry-consent` with accepted=true + optOut flag, then proceeds to `proceedWithSave()` |
+
+### New Database Objects
+
+**SQLite table `ai_analytics_logs`** (in vectors.db):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | PK, autoincrement |
+| client_id | TEXT | User/client identifier |
+| source | TEXT | `portal`, `widget`, or `enterprise` |
+| sanitized_prompt | TEXT | PII-stripped user message |
+| sanitized_response | TEXT | PII-stripped AI response |
+| model | TEXT | LLM model used (nullable) |
+| provider | TEXT | LLM provider used (nullable) |
+| duration_ms | INTEGER | Request duration in ms (nullable) |
+| created_at | TEXT | ISO timestamp (DEFAULT CURRENT_TIMESTAMP) |
+
+**MySQL columns on `users` table** (migration 026):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| telemetry_consent_accepted | TINYINT(1) | 1 = user accepted telemetry terms |
+| telemetry_opted_out | TINYINT(1) | 1 = paid user opted out of logging |
+| telemetry_consent_date | DATETIME | When consent was given/updated |
+
+### PII Sanitization Patterns
+
+| Pattern | Regex | Replacement |
+|---------|-------|-------------|
+| Email addresses | `/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g` | `[EMAIL REMOVED]` |
+| SA phone numbers | `/(?:\+27\|0)[\s-]?\d{2}[\s-]?\d{3}[\s-]?\d{4}/g` | `[PHONE REMOVED]` |
+| SA ID numbers | `/\b\d{13}\b/g` (13 consecutive digits) | `[SA_ID REMOVED]` |
+| Credit cards | `/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g` | `[CARD REMOVED]` |
+| Account numbers | `/\b\d{7,12}\b/g` (7–12 digits) | `[ACCOUNT REMOVED]` |
+| Street addresses | `/\d+\s+[A-Z][a-z]+\s+(Street\|St\|Avenue\|Ave\|Road\|Rd\|Drive\|Dr\|Lane\|Ln\|Boulevard\|Blvd)/gi` | `[ADDRESS REMOVED]` |
+
+### Verification
+
+- ✅ Sent message with phone `0821234567`, email `john@test.com`, SA ID `9501015001087` — all stripped to `[PHONE REMOVED]`, `[EMAIL REMOVED]`, `[SA_ID REMOVED]`
+- ✅ Portal SSE chat logs to `ai_analytics_logs` with source `'portal'`
+- ✅ Widget chat logs with source `'widget'`
+- ✅ Enterprise webhook logs with source `'enterprise'`
+- ✅ Opted-out users (telemetry_opted_out=1) are NOT logged from portal chat
+- ✅ Frontend consent modal shows before first assistant creation
+- ✅ Paid users see opt-out toggle; free users do not
+- ✅ Backend compiles clean, frontend compiles clean
+
+---
+
+## 2.1 v2.1.0 — Task Tools Rewired (Full Lifecycle Support)
+
+**Date:** 2026-03-10  
+**Scope:** Complete rewiring of staff AI assistant task tools from the broken v1.x pattern (per-user software tokens, 4 tools, external-only) to the new Tasks v2.0 architecture (source-level API keys, 22 tools, local DB reads + proxy writes).
+
+### Summary
+
+The 4 original task tools (`list_tasks`, `create_task`, `update_task`, `add_task_comment`) used a per-user software token from `staff_software_tokens` to proxy ALL operations to external APIs. This pattern was broken because: (1) the Tasks system was rewritten to use source-level API keys from `task_sources`, (2) tasks are now synced to a local `local_tasks` MySQL table, and (3) the old `/api/development/tasks/` endpoints no longer exist.
+
+The rewiring replaces all 4 tools with 22 comprehensive tools organized into 7 categories:
+- **Core CRUD** (5): list_tasks, get_task, create_task, update_task, delete_task
+- **Comments** (2): get_task_comments, add_task_comment
+- **Local Enhancements** (4): bookmark_task, set_task_priority, set_task_color, set_task_tags
+- **Workflow Actions** (3): start_task, complete_task, approve_task
+- **Stats & Queries** (3): get_task_stats, get_pending_approvals, get_task_tags
+- **Sync** (2): sync_tasks, get_sync_status
+- **Invoice Staging** (3): stage_tasks_for_invoice, get_staged_invoices, process_staged_invoices
+
+### Architecture Change
+
+```
+OLD (v1.4.0 — broken):
+  getStaffSoftwareToken(userId)
+    → SELECT token FROM staff_software_tokens WHERE user_id = ?
+  taskProxy(apiUrl, '/api/development/tasks/', 'Bearer', token)
+    ❌ Per-user tokens — no longer used
+    ❌ All operations hit external API — slow for reads
+    ❌ Only 4 tools — minimal coverage
+
+NEW (v2.1.0):
+  READ:  Direct SQL to local_tasks table (synced data)
+  WRITE: resolveTaskSourceForTools() → taskProxyV2(baseUrl, path, 'X-API-Key', apiKey)
+  LOCAL: Direct SQL for bookmark/priority/tags/color (no external call)
+    ✅ Source-level API keys from task_sources table
+    ✅ Fast local reads — no external API call needed
+    ✅ 22 tools — full task lifecycle coverage
+    ✅ Local enhancements — bookmark, priority, tags, colors
+    ✅ Sync integration — trigger/check syncs from voice
+    ✅ Invoice staging — stage/review/process from voice
+```
+
+### Changes — Backend
+
+#### Rewritten: `src/services/mobileTools.ts` (~1211 → ~1580 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **Removed** | 4 old task tool definitions (LIST_TASKS, CREATE_TASK, UPDATE_TASK, ADD_TASK_COMMENT) |
+| **Added** | 22 new task tool definitions across 7 categories |
+| **list_tasks** | Now supports: status, type, priority, workflow_phase, bookmarked, tag, search, assignedToMe, limit filters |
+| **get_task** | New tool — full task detail display including priority, tags, bookmark, description, notes |
+| **delete_task** | New tool — soft-delete with dirty flag |
+| **get_task_comments** | New tool — fetch comments from external source |
+| **bookmark_task** | New tool — toggle bookmark (local enhancement) |
+| **set_task_priority** | New tool — set priority level (urgent/high/normal/low) |
+| **set_task_color** | New tool — set/clear color label |
+| **set_task_tags** | New tool — set tags (comma-separated, replaces existing) |
+| **start_task** | New tool — start task (external workflow action) |
+| **complete_task** | New tool — complete task (external workflow action) |
+| **approve_task** | New tool — approve task (external workflow action) |
+| **get_task_stats** | New tool — aggregated stats by status/type/phase |
+| **get_pending_approvals** | New tool — list tasks awaiting approval |
+| **get_task_tags** | New tool — list all unique tags in use |
+| **sync_tasks** | New tool — trigger syncAllSources() |
+| **get_sync_status** | New tool — sync metadata per source |
+| **stage_tasks_for_invoice** | New tool — stage tasks for billing |
+| **get_staged_invoices** | New tool — view staged tasks |
+| **process_staged_invoices** | New tool — finalize billing |
+| **software_id param** | create_task accepts optional software_id to target a specific source |
+| **staffTaskTools array** | New separate array in getToolsForRole() for task tools |
+
+#### Rewritten: `src/services/mobileActionExecutor.ts` (~2128 → ~2680 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **Removed** | `SoftwareTokenRow` interface, `getStaffSoftwareToken()`, `taskProxy()` |
+| **Added** | `TaskSourceRow` interface, `resolveTaskSourceForTools()`, `taskProxyV2()`, `resolveLocalTask()` |
+| **Auth pattern** | `X-API-Key` header with source-level key (was: `Authorization: Bearer` with per-user token) |
+| **Read pattern** | Direct SQL queries to `local_tasks` table (was: HTTP GET to external API) |
+| **Write pattern** | `taskProxyV2()` → external `/api/tasks-api/*` endpoints (was: `/api/development/tasks/`) |
+| **Local pattern** | Direct SQL UPDATE for bookmark/priority/tags/color (no external call) |
+| **resolveLocalTask()** | Resolves task by local DB `id` OR `external_id` — flexible ID handling |
+| **Notifications** | Assignment notifications via `createNotificationWithPush` on task updates |
+| **Post-create sync** | After create_task, triggers `syncAllSources()` fire-and-forget |
+| **Graceful fallback** | If external proxy fails on update, local changes still persist (dirty flag) |
+| **New imports** | `syncAllSources` from taskSyncService, `createNotificationWithPush` from firebaseService |
+| **22 new switch cases** | Full dispatch table for all task operations |
+
+### Changes — Frontend
+
+#### Updated: `src/pages/general/Profile.tsx`
+
+| Change | Detail |
+|--------|--------|
+| **Task Management category** | Tools list expanded from 4 to 15 display items |
+| **Category description** | Updated: "Full task lifecycle — CRUD, workflow, local enhancements, sync & invoicing" |
+| **Tool count** | All hardcoded "41 tools" references updated to "59 tools" |
+| **totalTools computed** | Auto-calculated from STAFF_TOOL_CATEGORIES — accurately reflects new count |
+
+### Changes — Documentation
+
+| File | Change |
+|------|--------|
+| `README.md` Section 3.6 | Updated tool counts: Staff 53 tools (22 task), Client 17 tools |
+| `README.md` Section 3.7 | Complete rewrite — documents new dual-path architecture with all 22 tools |
+| `README.md` Section 4.7 | Updated from 4 tools to 22, describes new auth pattern |
+| `README.md` Section 4.10 | Updated tool counts in Staff Capabilities Dashboard |
+| `README.md` Security table | Task proxy auth updated to source-level API key |
+| `README.md` Key Statistics | Tool count 59, added task tables to MySQL table list |
+
+---
+
+## 1.9 v2.0.0 — Vision/Multimodal Support + Bidirectional Voice
+
+**Date:** 2026-03-10  
+**Scope:** Image analysis via GPT-4o / Gemini Flash / Ollama qwen2.5vl. Bidirectional voice with OpenAI neural TTS and browser STT. Image attachment UI in staff chat. Express body limit increased for base64 payloads.
+
+### Summary
+
+`assistantAIRouter.ts` extended from ~435 LOC to ~751 LOC with a full vision subsystem. When a user attaches an image, the router bypasses the text-only GLM pipeline and routes directly to vision-capable models: **GPT-4o → Gemini 2.0 Flash → Ollama qwen2.5vl:7b** (paid tier) or **Ollama qwen2.5vl:7b** (free tier). Images are sent as base64 data-URIs in the OpenAI `content[]` array format (OpenRouter) or Ollama's `images[]` field. The staff chat modal in `Profile.tsx` gains an image attach button (📎), preview strip, and automatic vision routing. A new `/api/v1/mobile/tts` endpoint provides OpenAI-compatible neural TTS for mobile voice output. Browser-native Web Speech API handles STT input.
+
+### Changes — Backend
+
+#### Extended: `src/services/assistantAIRouter.ts` (~435 → ~751 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **`VisionChatMessage` type** | Extends `ChatMessage` with `images?: string[]` — base64 data-URIs |
+| **`ContentBlock` type** | Union of `{type:'text', text}` and `{type:'image_url', image_url:{url}}` for OpenAI/OpenRouter format |
+| **`VisionProvider` type** | `'openrouter' \| 'openrouter-fallback' \| 'ollama-vision'` |
+| **`stripDataUri()`** | Removes `data:image/*;base64,` prefix for Ollama (expects raw base64) |
+| **`buildOpenRouterVisionMessages()`** | Converts messages to OpenAI `content[]` array format with `image_url` blocks |
+| **`buildOllamaVisionMessages()`** | Converts messages to Ollama format with separate `images` field (raw base64) |
+| **`openRouterVisionChat()` / `openRouterVisionStream()`** | Non-streaming / streaming calls to OpenRouter with vision models |
+| **`ollamaVisionChat()` / `ollamaVisionStream()`** | Non-streaming / streaming calls to Ollama with vision model |
+| **`chatCompletionWithVision()`** | Non-streaming, tier-based fallback: Paid → OpenRouter GPT-4o → Gemini Flash → Ollama qwen2.5vl; Free → Ollama qwen2.5vl |
+| **`chatCompletionStreamWithVision()`** | Streaming variant with same tier-based fallback chain |
+| **3 new env vars** | `VISION_OLLAMA_MODEL`, `VISION_OPENROUTER_MODEL`, `VISION_OPENROUTER_FALLBACK` |
+
+#### Modified: `src/routes/assistants.ts` (~996 → ~1028 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **Import** | Added `chatCompletionStreamWithVision`, `VisionChatMessage` |
+| **`chatRequestSchema`** | Added `image: z.string().optional()` field |
+| **Vision detection** | `hasImage = typeof image === 'string' && image.startsWith('data:image/')` |
+| **Vision routing** | When `hasImage`, builds `VisionChatMessage[]` with `images` on last user message, routes to `chatCompletionStreamWithVision()` |
+| **Stream parser** | Extended: `provider === 'openrouter-fallback'` → OpenAI SSE; default (includes `ollama-vision`) → NDJSON |
+
+#### Modified: `src/services/mobileAIProcessor.ts` (~385 → ~387 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **Import** | Added `chatCompletionWithVision`, `VisionChatMessage` |
+| **`MobileIntentRequest`** | Added `image?: string` field |
+| **Vision routing** | On round 0, if `hasImage`, routes to `chatCompletionWithVision()` instead of text `chatCompletion()` |
+| **Debug logging** | `[MobileAI] Image attached (XXkB base64), routing to vision model` |
+
+#### Modified: `src/routes/mobileIntent.ts` (~241 → ~338 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **Image extraction** | Destructures `image` from `req.body` |
+| **Validation** | Must be `data:image/*` format; max 15M chars (~10MB base64) |
+| **Pass-through** | `image` included in `processMobileIntent()` request object |
+
+#### Modified: `src/config/env.ts`
+
+| Change | Detail |
+|--------|--------|
+| **`VISION_OLLAMA_MODEL`** | New env var — `z.string().default('qwen2.5vl:7b')` |
+| **`VISION_OPENROUTER_MODEL`** | New env var — `z.string().default('openai/gpt-4o')` |
+| **`VISION_OPENROUTER_FALLBACK`** | New env var — `z.string().default('google/gemini-2.0-flash-001')` |
+
+#### Modified: `src/app.ts`
+
+| Change | Detail |
+|--------|--------|
+| **Body limit** | `express.json({ limit: '20mb' })` (was `10mb`) — accommodates base64-encoded images |
+
+### Changes — Frontend
+
+#### Modified: `src/pages/general/Profile.tsx` (~1858 → ~2227 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **New imports** | `PaperClipIcon`, `PhotoIcon` from `@heroicons/react` |
+| **`attachedImage` state** | Base64 data-URI of attached image |
+| **`attachedImageName` state** | Display filename of attached image |
+| **`fileInputRef`** | Hidden `<input type="file" accept="image/*">` ref |
+| **`handleFileSelect()`** | Validates image/*, max 10MB, reads via FileReader → base64 |
+| **`removeAttachedImage()`** | Clears image state |
+| **Image preview strip** | Blue gradient bar above input showing thumbnail + filename + remove ✕ |
+| **📎 Attach button** | Between mic button and textarea in chat input area |
+| **Send with image** | `sendChatMessage()` captures image, sends via `MobileModel.sendIntent()`, clears after send |
+| **Default prompt** | If image attached with no text, defaults to "What is in this image?" |
+| **📎 in chat bubbles** | Messages starting with `📎` render PhotoIcon + filename + optional text |
+
+#### Modified: `src/models/SystemModels.ts`
+
+| Change | Detail |
+|--------|--------|
+| **`MobileIntentRequest`** | Added `image?: string` field with JSDoc comment |
+
+### Vision Routing Matrix (v2.0.0)
+
+| Caller | Tier | Fallback Chain | Stream Format |
+|--------|------|----------------|---------------|
+| Portal chat (`assistants.ts`) — with image | free | Ollama qwen2.5vl:7b | NDJSON |
+| Portal chat (`assistants.ts`) — with image | paid | OpenRouter GPT-4o → Gemini Flash → Ollama qwen2.5vl:7b | OpenAI SSE / NDJSON |
+| Mobile intent (`mobileAIProcessor.ts`) — with image | free | Ollama qwen2.5vl:7b | Non-streaming |
+| Mobile intent (`mobileAIProcessor.ts`) — with image | paid | OpenRouter GPT-4o → Gemini Flash → Ollama qwen2.5vl:7b | Non-streaming |
+| Portal/Mobile — text only | free | GLM → Ollama (unchanged from v1.9.0) | Anthropic SSE / NDJSON |
+| Portal/Mobile — text only | paid | GLM → OpenRouter → Ollama (unchanged from v1.9.0) | Anthropic SSE / OpenAI SSE / NDJSON |
+
+### Vision Provider Details
+
+| Provider | API Style | Model | Image Format | Auth |
+|----------|-----------|-------|--------------|------|
+| **OpenRouter (primary)** | OpenAI Chat Completions | `openai/gpt-4o` | `content[]` array with `image_url` blocks (data-URI) | `Authorization: Bearer` |
+| **OpenRouter (fallback)** | OpenAI Chat Completions | `google/gemini-2.0-flash-001` | `content[]` array with `image_url` blocks (data-URI) | `Authorization: Bearer` |
+| **Ollama (local)** | Ollama native | `qwen2.5vl:7b` | `images[]` field with raw base64 (no data-URI prefix) | None |
+
+### .env Vision Configuration
+
+| Variable | Default | Used By |
+|----------|---------|---------|
+| `VISION_OLLAMA_MODEL` | `qwen2.5vl:7b` | assistantAIRouter (free-tier vision + last resort) |
+| `VISION_OPENROUTER_MODEL` | `openai/gpt-4o` | assistantAIRouter (paid-tier primary vision) |
+| `VISION_OPENROUTER_FALLBACK` | `google/gemini-2.0-flash-001` | assistantAIRouter (paid-tier vision fallback) |
+
+### Files Changed
+
+| File | Lines Changed | Summary |
+|------|--------------|--------|
+| `backend/src/services/assistantAIRouter.ts` | +316 | Vision subsystem — types, message builders, chat/stream functions, tier routing |
+| `backend/src/routes/assistants.ts` | +32 | Image field in schema, vision detection, stream routing for vision providers |
+| `backend/src/services/mobileAIProcessor.ts` | +2 | Image field, vision routing on round 0 |
+| `backend/src/routes/mobileIntent.ts` | +97 | Image extraction, validation (type + size), pass-through |
+| `backend/src/config/env.ts` | +3 | 3 new vision env vars with defaults |
+| `backend/src/app.ts` | ~1 | Body limit 10mb → 20mb |
+| `frontend/src/pages/general/Profile.tsx` | +369 | Image attach UI, preview, 📎 button, send-with-image, chat bubble rendering |
+| `frontend/src/models/SystemModels.ts` | +1 | image field on MobileIntentRequest |
+| **Total** | **~821** | |
+
+### How to Send an Image (Code Example)
+
+```typescript
+import { chatCompletionWithVision, VisionChatMessage } from '../services/assistantAIRouter.js';
+
+const tier = assistant.tier; // 'free' or 'paid'
+const messages: VisionChatMessage[] = [
+  { role: 'system', content: 'Describe what you see.' },
+  { role: 'user', content: 'What is in this image?', images: ['data:image/png;base64,...'] },
+];
+
+const result = await chatCompletionWithVision(tier, messages);
+// result.content  — the AI description of the image
+// result.model    — e.g. 'openai/gpt-4o' or 'qwen2.5vl:7b'
+// result.provider — 'openrouter' | 'openrouter-fallback' | 'ollama-vision'
+```
+
+For streaming, use `chatCompletionStreamWithVision()` and check `result.provider` to select the parser.
+
+---
+
+## 1.10 v1.9.0 — GLM-First 3-Tier Routing + Chat History Sidebar
 
 **Date:** 2026-03-09  
 **Scope:** Complete rewrite of the AI routing layer. GLM (ZhipuAI) via Anthropic-compatible API is now the primary provider for ALL tiers. Chat history sidebar added to staff assistant modal. Conversation list API returns first-message previews.

@@ -26,6 +26,22 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Multimodal content block for OpenAI-compatible APIs (OpenRouter) */
+export interface ContentBlock {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string; detail?: 'auto' | 'low' | 'high' };
+}
+
+/**
+ * A chat message that may carry an image attachment.
+ * `images` is an array of base64 data-URIs (data:image/png;base64,...).
+ * Only the user role should carry images.
+ */
+export interface VisionChatMessage extends ChatMessage {
+  images?: string[];   // base64 data-URI strings
+}
+
 export interface ChatOptions {
   temperature?: number;
   top_p?: number;
@@ -34,6 +50,7 @@ export interface ChatOptions {
 }
 
 export type PaidProvider = 'glm' | 'openrouter' | 'ollama';
+export type VisionProvider = 'openrouter' | 'openrouter-fallback' | 'ollama-vision';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -44,6 +61,11 @@ const GLM_MODEL = env.GLM_MODEL || 'glm-4.6';
 const OPENROUTER_FALLBACK_MODEL = env.OPENROUTER_FALLBACK_MODEL || 'openai/gpt-4o-mini';
 const KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE;
 const keepAliveValue = KEEP_ALIVE === '-1' ? -1 : KEEP_ALIVE === '0' ? 0 : KEEP_ALIVE;
+
+// Vision model constants
+const VISION_OLLAMA_MODEL = env.VISION_OLLAMA_MODEL || 'qwen2.5vl:7b';
+const VISION_OPENROUTER_MODEL = env.VISION_OPENROUTER_MODEL || 'openai/gpt-4o';
+const VISION_OPENROUTER_FALLBACK = env.VISION_OPENROUTER_FALLBACK || 'google/gemini-2.0-flash-001';
 
 // ─── Key Cache ───────────────────────────────────────────────────────────────
 
@@ -132,7 +154,7 @@ function buildGLMBody(messages: ChatMessage[], opts: ChatOptions, stream = false
   return body;
 }
 
-async function glmChat(
+export async function glmChat(
   messages: ChatMessage[],
   opts: ChatOptions,
 ): Promise<{ content: string; model: string; provider: 'glm' }> {
@@ -432,4 +454,299 @@ export async function chatCompletionStream(
   // ── 3. Ollama (last resort) ──
   console.warn('[AssistantRouter] All external stream providers failed — using Ollama');
   return ollamaStream(messages, opts, modelOverride);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Vision (Multimodal) — File/Image Reading
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Free tier:  Ollama qwen2.5vl:7b (local, 0 cost)
+// Paid tier:  OpenRouter gpt-4o → OpenRouter gemini-2.0-flash → Ollama qwen2.5vl:7b
+//
+// GLM (text-only) is intentionally skipped for vision requests.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Strip the data-URI prefix and return raw base64.
+ *   "data:image/png;base64,iVBOR..." → "iVBOR..."
+ */
+function stripDataUri(dataUri: string): string {
+  const idx = dataUri.indexOf(',');
+  return idx >= 0 ? dataUri.slice(idx + 1) : dataUri;
+}
+
+/**
+ * Build OpenAI-compatible multimodal messages for OpenRouter.
+ * Converts VisionChatMessage[] to the content-array format.
+ */
+function buildOpenRouterVisionMessages(
+  messages: VisionChatMessage[],
+): { role: string; content: string | ContentBlock[] }[] {
+  return messages.map(m => {
+    if (m.images && m.images.length > 0 && m.role === 'user') {
+      const content: ContentBlock[] = [
+        { type: 'text', text: m.content },
+        ...m.images.map(img => ({
+          type: 'image_url' as const,
+          image_url: { url: img, detail: 'auto' as const },
+        })),
+      ];
+      return { role: m.role, content };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/**
+ * Build Ollama multimodal messages.
+ * Ollama uses a separate `images` field (raw base64, no data-URI prefix).
+ */
+function buildOllamaVisionMessages(
+  messages: VisionChatMessage[],
+): { role: string; content: string; images?: string[] }[] {
+  return messages.map(m => {
+    if (m.images && m.images.length > 0 && m.role === 'user') {
+      return {
+        role: m.role,
+        content: m.content,
+        images: m.images.map(stripDataUri),
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+// ─── Vision: OpenRouter (gpt-4o / gemini-flash) ──────────────────────────────
+
+async function openRouterVisionChat(
+  messages: VisionChatMessage[],
+  opts: ChatOptions,
+  modelOverride?: string,
+): Promise<{ content: string; model: string; provider: VisionProvider }> {
+  const apiKey = await getOpenRouterKey();
+  if (!apiKey) throw new Error('OpenRouter key not available for vision');
+
+  const model = modelOverride || VISION_OPENROUTER_MODEL;
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://softaware.net.za',
+      'X-Title': 'Softaware Assistant Vision',
+    },
+    body: JSON.stringify({
+      model,
+      messages: buildOpenRouterVisionMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 2048,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    if (res.status === 401 || res.status === 403) _openRouterKey = null;
+    throw new Error(`OpenRouter vision ${res.status}: ${err.slice(0, 200)}`);
+  }
+
+  const data: any = await res.json();
+  const provider: VisionProvider = model === VISION_OPENROUTER_MODEL ? 'openrouter' : 'openrouter-fallback';
+  return {
+    content: (data.choices?.[0]?.message?.content ?? '').trim(),
+    model,
+    provider,
+  };
+}
+
+async function openRouterVisionStream(
+  messages: VisionChatMessage[],
+  opts: ChatOptions,
+  modelOverride?: string,
+): Promise<{ stream: ReadableStream<Uint8Array>; model: string; provider: VisionProvider }> {
+  const apiKey = await getOpenRouterKey();
+  if (!apiKey) throw new Error('OpenRouter key not available for vision');
+
+  const model = modelOverride || VISION_OPENROUTER_MODEL;
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://softaware.net.za',
+      'X-Title': 'Softaware Assistant Vision',
+    },
+    body: JSON.stringify({
+      model,
+      messages: buildOpenRouterVisionMessages(messages),
+      temperature: opts.temperature ?? 0.3,
+      max_tokens: opts.max_tokens ?? 2048,
+      stream: true,
+    }),
+  });
+
+  if (!res.ok || !res.body) {
+    const err = await res.text().catch(() => '');
+    if (res.status === 401 || res.status === 403) _openRouterKey = null;
+    throw new Error(`OpenRouter vision stream ${res.status}: ${err.slice(0, 200)}`);
+  }
+
+  const provider: VisionProvider = model === VISION_OPENROUTER_MODEL ? 'openrouter' : 'openrouter-fallback';
+  return { stream: res.body, model, provider };
+}
+
+// ─── Vision: Ollama (qwen2.5vl:7b) ──────────────────────────────────────────
+
+async function ollamaVisionChat(
+  messages: VisionChatMessage[],
+  opts: ChatOptions,
+): Promise<{ content: string; model: string; provider: 'ollama-vision' }> {
+  const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: VISION_OLLAMA_MODEL,
+      messages: buildOllamaVisionMessages(messages),
+      stream: false,
+      keep_alive: keepAliveValue,
+      options: {
+        temperature: opts.temperature ?? 0.3,
+        top_p: opts.top_p ?? 0.9,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Ollama vision ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data: any = await res.json();
+  return {
+    content: data.message?.content?.trim() || '',
+    model: VISION_OLLAMA_MODEL,
+    provider: 'ollama-vision',
+  };
+}
+
+async function ollamaVisionStream(
+  messages: VisionChatMessage[],
+  opts: ChatOptions,
+): Promise<{ stream: ReadableStream<Uint8Array>; model: string; provider: 'ollama-vision' }> {
+  const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: VISION_OLLAMA_MODEL,
+      messages: buildOllamaVisionMessages(messages),
+      stream: true,
+      keep_alive: keepAliveValue,
+      options: {
+        temperature: opts.temperature ?? 0.3,
+        top_p: opts.top_p ?? 0.9,
+      },
+    }),
+  });
+
+  if (!res.ok || !res.body) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Ollama vision stream ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  return { stream: res.body, model: VISION_OLLAMA_MODEL, provider: 'ollama-vision' };
+}
+
+// ─── Non-Streaming Vision: Tier-Based Fallback ───────────────────────────────
+
+/**
+ * Send a vision (multimodal) chat request with image(s).
+ *
+ * Free tier:  Ollama qwen2.5vl:7b (local)
+ * Paid tier:  OpenRouter gpt-4o → OpenRouter gemini-2.0-flash → Ollama qwen2.5vl:7b
+ */
+export async function chatCompletionWithVision(
+  tier: string,
+  messages: VisionChatMessage[],
+  opts: ChatOptions = {},
+): Promise<{ content: string; model: string; provider: VisionProvider }> {
+  // Free tier → local Ollama vision directly
+  if (tier !== 'paid') {
+    console.log(`[VisionRouter] Free tier → Ollama ${VISION_OLLAMA_MODEL}`);
+    return ollamaVisionChat(messages, opts);
+  }
+
+  // ── Paid tier: gpt-4o → gemini-flash → Ollama ──
+  const orKey = await getOpenRouterKey();
+  if (orKey) {
+    // 1. Try gpt-4o
+    try {
+      console.log(`[VisionRouter] Paid tier → OpenRouter ${VISION_OPENROUTER_MODEL}`);
+      return await openRouterVisionChat(messages, opts, VISION_OPENROUTER_MODEL);
+    } catch (err) {
+      console.warn(`[VisionRouter] gpt-4o failed: ${(err as Error).message} — trying Gemini flash`);
+    }
+    // 2. Try gemini-2.0-flash
+    try {
+      console.log(`[VisionRouter] Fallback → OpenRouter ${VISION_OPENROUTER_FALLBACK}`);
+      return await openRouterVisionChat(messages, opts, VISION_OPENROUTER_FALLBACK);
+    } catch (err) {
+      console.warn(`[VisionRouter] Gemini flash failed: ${(err as Error).message} — falling back to Ollama`);
+    }
+  }
+
+  // 3. Ollama (last resort)
+  console.warn('[VisionRouter] All cloud vision providers failed — using Ollama');
+  return ollamaVisionChat(messages, opts);
+}
+
+// ─── Streaming Vision: Tier-Based Fallback ───────────────────────────────────
+
+/**
+ * Stream a vision (multimodal) chat response.
+ *
+ * Free tier:  Ollama qwen2.5vl:7b
+ * Paid tier:  OpenRouter gpt-4o → OpenRouter gemini-2.0-flash → Ollama qwen2.5vl:7b
+ *
+ * OpenRouter returns OpenAI-compatible SSE.
+ * Ollama returns NDJSON.
+ * The caller checks `provider` to choose the right parser:
+ *   - 'openrouter' / 'openrouter-fallback' → OpenAI SSE
+ *   - 'ollama-vision' → NDJSON
+ */
+export async function chatCompletionStreamWithVision(
+  tier: string,
+  messages: VisionChatMessage[],
+  opts: ChatOptions = {},
+): Promise<{
+  stream: ReadableStream<Uint8Array>;
+  model: string;
+  provider: VisionProvider;
+}> {
+  // Free tier → local Ollama vision
+  if (tier !== 'paid') {
+    console.log(`[VisionRouter] Free stream → Ollama ${VISION_OLLAMA_MODEL}`);
+    return ollamaVisionStream(messages, opts);
+  }
+
+  // ── Paid tier: gpt-4o → gemini-flash → Ollama ──
+  const orKey = await getOpenRouterKey();
+  if (orKey) {
+    // 1. Try gpt-4o
+    try {
+      console.log(`[VisionRouter] Paid stream → OpenRouter ${VISION_OPENROUTER_MODEL}`);
+      return await openRouterVisionStream(messages, opts, VISION_OPENROUTER_MODEL);
+    } catch (err) {
+      console.warn(`[VisionRouter] gpt-4o stream failed: ${(err as Error).message} — trying Gemini flash`);
+    }
+    // 2. Try gemini-flash
+    try {
+      console.log(`[VisionRouter] Fallback stream → OpenRouter ${VISION_OPENROUTER_FALLBACK}`);
+      return await openRouterVisionStream(messages, opts, VISION_OPENROUTER_FALLBACK);
+    } catch (err) {
+      console.warn(`[VisionRouter] Gemini flash stream failed: ${(err as Error).message} — falling back to Ollama`);
+    }
+  }
+
+  // 3. Ollama (last resort)
+  console.warn('[VisionRouter] All cloud vision stream providers failed — using Ollama');
+  return ollamaVisionStream(messages, opts);
 }

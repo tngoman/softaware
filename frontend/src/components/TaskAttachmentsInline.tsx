@@ -11,11 +11,14 @@ interface Attachment {
   mime_type?: string;
   comment_id?: number | null;
   is_from_ticket?: number;
+  download_url?: string;
 }
 
 const IMAGE_EXT = /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i;
 
 function buildFileUrl(apiUrl: string, att: Attachment): string {
+  // Prefer the download_url returned by the external API
+  if (att.download_url) return att.download_url;
   if (att.file_path?.startsWith('http')) return att.file_path;
   try {
     const baseUrl = new URL(apiUrl).origin;
@@ -47,7 +50,8 @@ const TaskAttachmentsInline: React.FC<{
   apiUrl: string;
   softwareId?: number;
   onImageClick?: (url: string) => void;
-}> = ({ taskId, apiUrl, softwareId, onImageClick }) => {
+  onGalleryOpen?: (images: { url: string; name?: string }[], index: number) => void;
+}> = ({ taskId, apiUrl, softwareId, onImageClick, onGalleryOpen }) => {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   useEffect(() => {
@@ -78,6 +82,21 @@ const TaskAttachmentsInline: React.FC<{
   const shown = attachments.slice(0, 4);
   const extra = attachments.length - 4;
 
+  // Build the full image list for gallery navigation
+  const imageList = attachments
+    .filter(att => IMAGE_EXT.test(att.file_name || '') || att.mime_type?.startsWith('image/'))
+    .map(att => ({ url: buildFileUrl(apiUrl, att), name: att.file_name }));
+
+  const handleImageClick = (e: React.MouseEvent, url: string) => {
+    e.stopPropagation();
+    if (onGalleryOpen && imageList.length > 0) {
+      const idx = imageList.findIndex(img => img.url === url);
+      onGalleryOpen(imageList, idx >= 0 ? idx : 0);
+    } else {
+      onImageClick?.(url);
+    }
+  };
+
   return (
     <div className="flex items-center gap-1.5 mt-2">
       {shown.map(att => {
@@ -85,12 +104,12 @@ const TaskAttachmentsInline: React.FC<{
         const isImage = IMAGE_EXT.test(att.file_name || '') || att.mime_type?.startsWith('image/');
         return isImage ? (
           <img key={att.attachment_id} src={url} alt={att.file_name}
-            onClick={(e) => { e.stopPropagation(); onImageClick?.(url); }}
-            className="w-12 h-12 object-cover rounded border cursor-pointer hover:opacity-80 transition-opacity bg-gray-100"
+            onClick={(e) => handleImageClick(e, url)}
+            className="w-12 h-12 object-cover rounded border dark:border-dark-600 cursor-pointer hover:opacity-80 transition-opacity bg-gray-100 dark:bg-dark-700"
             loading="lazy" />
         ) : (
           <span key={att.attachment_id}
-            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] bg-gray-100 border rounded text-gray-500 max-w-[100px] truncate">
+            className="inline-flex items-center gap-1 px-2 py-1 text-[10px] bg-gray-100 dark:bg-dark-700 border dark:border-dark-600 rounded text-gray-500 dark:text-gray-400 max-w-[100px] truncate">
             <PaperClipIcon className="h-3 w-3 shrink-0" /> {att.file_name}
           </span>
         );
