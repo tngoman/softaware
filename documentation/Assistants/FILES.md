@@ -1,7 +1,7 @@
 # Assistants Module — File Inventory
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine.
 
@@ -12,7 +12,7 @@
 | Metric | Value |
 |--------|-------|
 | **Total files** | 26 (18 source + 3 migration + 3 static widget + 2 new frontend) |
-| **Total LOC** | ~12,106 (source) |
+| **Total LOC** | ~12,400 (source) |
 | **Backend route files** | 5 (~2,620 LOC) |
 | **Backend service files** | 9 (~4,600 LOC) |
 | **Backend migration files** | 3 (77 + 62 + 45 LOC) |
@@ -23,7 +23,7 @@
 
 ```
 Backend:
-  src/routes/assistants.ts                 (1108 LOC) ⭐ vision-aware SSE streaming + telemetry consent
+  src/routes/assistants.ts                 (1541 LOC) ⭐ inline widget chat UI + theme color + proactive greeting + SSE streaming + telemetry consent
   src/routes/assistantIngest.ts            (224 LOC)
   src/routes/myAssistant.ts                (~340 LOC) ⭐ NEW — unified assistant CRUD (staff + clients)
   src/routes/staffAssistant.ts             (382 LOC)  ⚠️ DEPRECATED — use myAssistant.ts
@@ -44,7 +44,7 @@ Backend:
 Frontend:
   src/pages/portal/Dashboard.tsx           (564 LOC)  ⭐ recently modified
   src/pages/portal/AssistantsPage.tsx      (592 LOC)  ⭐ ENHANCED (v1.7.0) — SSE fixes, per-assistant chat persistence, trash icon
-  src/pages/portal/CreateAssistant.tsx     (1259 LOC) ⭐ 4-step creation wizard + telemetry consent modal
+  src/pages/portal/CreateAssistant.tsx     (1537 LOC) ⭐ 4-step wizard + widget config (theme, greeting, proactive toggle) + telemetry consent modal
   src/pages/general/Profile.tsx            (2227 LOC) ⭐ ENHANCED (v2.0.0) — image attachment, voice, chat history sidebar
   src/components/KnowledgeHealthBadge.tsx  (107 LOC)
   src/components/KnowledgeHealthScore.tsx  (275 LOC)
@@ -68,8 +68,8 @@ Brand Assets:
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/assistants.ts` |
-| **LOC** | ~1,108 |
-| **Purpose** | Full CRUD, knowledge health, chat (SSE + RAG + vision), widget delivery, admin model management, delete with KB option, **telemetry consent API + chat analytics logging** |
+| **LOC** | ~1,541 |
+| **Purpose** | Full CRUD, knowledge health, chat (SSE + RAG + vision), inline widget delivery with dynamic theming, admin model management, delete with KB option, **telemetry consent API + chat analytics logging**, widget customization (theme color, proactive greeting, custom welcome message) |
 | **Dependencies** | express, zod, axios, db/mysql, services/vectorStore, services/knowledgeCategorizer, config/personaTemplates, services/actionRouter, middleware/statusCheck, **utils/analyticsLogger** |
 | **Exports** | `assistantsRouter`, `unloadAssistantModel()` |
 

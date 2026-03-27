@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { db } from '../db/mysql.js';
 import { sendPushToUser, createNotificationWithPush } from '../services/firebaseService.js';
 
@@ -124,6 +125,17 @@ notificationsRouter.post('/', requireAuth, async (req: AuthRequest, res, next) =
   try {
     const input = CreateNotificationSchema.parse(req.body);
     const targetUserId = input.user_id || req.userId!;
+
+    // If targeting another user, require admin
+    if (input.user_id && input.user_id !== req.userId) {
+      const adminRow = await db.queryOne<{ is_admin: number }>(
+        'SELECT is_admin FROM users WHERE id = ?',
+        [req.userId]
+      );
+      if (!adminRow?.is_admin) {
+        return res.status(403).json({ success: false, error: 'Admin required to send notifications to other users' });
+      }
+    }
 
     if (input.send_push) {
       await createNotificationWithPush(targetUserId, {

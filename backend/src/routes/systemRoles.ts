@@ -5,14 +5,18 @@
 import { Router, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 
 export const rolesRouter = Router();
 
+// All role-management routes require admin
+rolesRouter.use(requireAuth, requireAdmin);
+
 /**
  * GET /roles — List all roles with permission counts
  */
-rolesRouter.get('/', requireAuth, async (_req: AuthRequest, res: Response, next) => {
+rolesRouter.get('/', async (_req: AuthRequest, res: Response, next) => {
   try {
     const roles = await db.query<any>(
       `SELECT r.*, 
@@ -28,7 +32,7 @@ rolesRouter.get('/', requireAuth, async (_req: AuthRequest, res: Response, next)
 /**
  * GET /roles/:id — Get single role with its permissions
  */
-rolesRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.get('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const role = await db.queryOne<any>('SELECT * FROM roles WHERE id = ?', [id]);
@@ -51,7 +55,7 @@ rolesRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, nex
 /**
  * POST /roles — Create role
  */
-rolesRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.post('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const { name, slug, description } = req.body;
     if (!name) throw badRequest('name is required');
@@ -76,7 +80,7 @@ rolesRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next)
 /**
  * PUT /roles/:id — Update role
  */
-rolesRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.put('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { name, slug, description } = req.body;
@@ -104,11 +108,17 @@ rolesRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, nex
 /**
  * DELETE /roles/:id — Delete role
  */
-rolesRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.delete('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const role = await db.queryOne<any>('SELECT * FROM roles WHERE id = ?', [id]);
     if (!role) throw notFound('Role not found');
+
+    // Prevent deletion of built-in system roles
+    const PROTECTED_SLUGS = ['admin', 'super_admin', 'developer', 'staff', 'viewer'];
+    if (PROTECTED_SLUGS.includes(role.slug)) {
+      throw badRequest(`Cannot delete built-in role "${role.name}"`);
+    }
 
     await db.execute('DELETE FROM role_permissions WHERE role_id = ?', [id]);
     await db.execute('DELETE FROM user_roles WHERE role_id = ?', [id]);
@@ -123,7 +133,7 @@ rolesRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, 
 /**
  * POST /roles/:id/assign — Assign role to user
  */
-rolesRouter.post('/:id/assign', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.post('/:id/assign', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { user_id } = req.body;
@@ -149,7 +159,7 @@ rolesRouter.post('/:id/assign', requireAuth, async (req: AuthRequest, res: Respo
 /**
  * POST /roles/:id/remove — Remove role from user
  */
-rolesRouter.post('/:id/remove', requireAuth, async (req: AuthRequest, res: Response, next) => {
+rolesRouter.post('/:id/remove', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { user_id } = req.body;

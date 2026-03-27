@@ -25,7 +25,7 @@ const Quotations: React.FC = () => {
   const [pdfPath, setPdfPath] = useState<string | null>(null);
   const [pagination, setPagination] = useState({ page: 0, limit: 10, total: 0 });
   const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState('quotation_id');
+  const [sortBy, setSortBy] = useState('quotation_date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   // Helper function for quote status badge
@@ -236,10 +236,38 @@ const Quotations: React.FC = () => {
         }
         const data = await QuotationModel.convertToInvoice(quotation.quotation_id);
         notify.success('Quotation converted to invoice');
-        navigate(`/invoices/${data.invoice_id}`);
+        navigate(`/invoices/${data.data?.invoice_id || data.data?.id}`);
       } catch (error) {
         console.error('Error converting quotation:', error);
         notify.error('Failed to convert quotation');
+      }
+    }
+  };
+
+  const convertToProforma = async (quotation: Quotation) => {
+    const result = await Swal.fire({
+      title: 'Create Proforma Invoice?',
+      text: 'This will create a proforma invoice from this quotation with banking details.',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonColor: '#F59E0B',
+      cancelButtonColor: '#6b7280',
+      confirmButtonText: 'Yes, create it!',
+      cancelButtonText: 'Cancel'
+    });
+
+    if (result.isConfirmed) {
+      try {
+        if (!quotation.quotation_id) {
+          notify.error('Invalid quotation ID');
+          return;
+        }
+        const data = await QuotationModel.convertToProforma(quotation.quotation_id);
+        notify.success('Proforma invoice created');
+        navigate(`/invoices/${data.data?.id || data.data?.invoice_id}`);
+      } catch (error) {
+        console.error('Error creating proforma:', error);
+        notify.error('Failed to create proforma invoice');
       }
     }
   };
@@ -302,17 +330,15 @@ const Quotations: React.FC = () => {
     }
   };
 
-  const handleSendEmail = async (data: { to: string; subject: string; body: string }) => {
+  const handleSendEmail = async (data: { to: string; cc?: string; subject: string; body: string }) => {
     if (!selectedQuote || !selectedQuote.quotation_id) return;
     
-    try {
-      await QuotationModel.sendEmail(selectedQuote.quotation_id, data);
-      notify.success('Email sent successfully');
-      setEmailModalOpen(false);
-    } catch (error: any) {
-      console.error('Error sending email:', error);
-      notify.error(error.response?.data?.error || 'Failed to send email');
-      throw error; // Re-throw to keep modal open
+    await QuotationModel.sendEmail(selectedQuote.quotation_id, data);
+    // Reload to get updated status (draft → sent)
+    loadQuotations();
+    if (selectedQuote.quotation_id) {
+      const updated = await QuotationModel.getById(selectedQuote.quotation_id);
+      setSelectedQuote(updated);
     }
   };
 
@@ -401,6 +427,16 @@ const Quotations: React.FC = () => {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                   </svg>
                   Edit Quotation
+                </button>
+              </Can>
+              <Can permission="quotations.approve">
+                <button
+                  onClick={() => convertToProforma(selectedQuote)}
+                  disabled={selectedQuote.quotation_status === 2}
+                  className="inline-flex items-center px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-md transition-all"
+                >
+                  <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+                  {selectedQuote.quotation_status === 2 ? 'Already Converted' : 'Create Proforma'}
                 </button>
               </Can>
               <Can permission="quotations.approve">

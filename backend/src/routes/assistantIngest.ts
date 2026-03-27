@@ -13,6 +13,7 @@ import multer from 'multer';
 import { deleteByJob as deleteVecByJob } from '../services/vectorStore.js';
 import { createRequire } from 'module';
 import { db, toMySQLDate } from '../db/mysql.js';
+import { enforceKnowledgePageLimit } from '../middleware/packageEnforcement.js';
 
 const router = express.Router({ mergeParams: true });
 
@@ -66,7 +67,7 @@ async function assertAssistantExists(assistantId: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // POST /url — enqueue a URL crawl job
 // ---------------------------------------------------------------------------
-router.post('/url', async (req, res) => {
+router.post('/url', enforceKnowledgePageLimit, async (req, res) => {
   try {
     const params = req.params as Record<string, string>;
     const { assistantId } = params;
@@ -113,7 +114,7 @@ router.post('/url', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /file — upload + enqueue a file ingestion job
 // ---------------------------------------------------------------------------
-router.post('/file', upload.single('file'), async (req, res) => {
+router.post('/file', enforceKnowledgePageLimit, upload.single('file'), async (req, res) => {
   try {
     const { assistantId } = req.params;
     const { tier = 'free' } = req.body as { tier?: string };

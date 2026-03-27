@@ -1,652 +1,374 @@
-# Subscription Module - Patterns
+# Subscription Patterns & Architecture
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-03-04
-
----
-
-## 1. Overview
-
-This document catalogs the **architectural patterns** and **anti-patterns** found in the Subscription module, covering:
-
-- Subscription plan management (trials, billing cycles, cancellations)
-- AI credit system (packages, balance tracking, deductions)
-- Payment gateway integration (PayFast, Yoco)
-- Widget subscription tiers
+> **v3.0.0 — Hybrid Package Catalog**
+> The legacy middleware-based credit deduction pattern remains permanently removed.
+> Package resolution has been rebuilt as a hybrid system: DB-first with static fallback.
+>
+> **Terminology:** "Actions" = unified billing metric (chatbot response OR webhook execution).
+> "System Actions" = technical AI function calls (`email_capture`, `payment_gateway_hook`, etc.).
 
 ---
 
-## 2. Architectural Patterns
+## Pattern 1: Hybrid Tier Resolution (DB-First + Static Fallback)
 
-### Pattern 1: Service Layer Abstraction
+**The single most important pattern in the subscription system.**
 
-**Context:**  
-Business logic for subscriptions and credits is separated from route handlers into dedicated service modules.
+Tier limits are resolved through a **hybrid** pipeline. The `packages` table holds admin-editable overrides. When a column is NULL, the static fallback from `config/tiers.ts` is used.
 
-**Implementation:**
+### 1a. Package-Based Resolution (Primary Path)
 
-```typescript
-// routes/subscription.ts
-import * as subscriptionService from '../services/subscription.js';
+For any authenticated user, the system resolves their active package through a chain:
 
-subscriptionRouter.get('/current', requireAuth, async (req: AuthRequest, res, next) => {
-  try {
-    const subscription = await subscriptionService.getTeamSubscription(teamId);
-    res.json({ subscription });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// services/subscription.ts
-export async function getTeamSubscription(teamId: string) {
-  const subscription = await db.queryOne(`
-    SELECT s.*, sp.* 
-    FROM subscriptions s 
-    JOIN subscription_plans sp ON s.planId = sp.id 
-    WHERE s.teamId = ?
-  `, [teamId]);
-  
-  return subscription;
-}
+```
+User → users.contact_id (or user_contact_link) → contact_packages (ACTIVE/TRIAL) → packages row → TierLimits
 ```
 
-**Benefits:**
-- ✅ Route handlers stay thin and focused on HTTP concerns
-- ✅ Business logic reusable across multiple routes
-- ✅ Easier to unit test service functions independently
-- ✅ Clear separation of concerns
+```typescript
+import { getActivePackageForUser } from '../services/packageResolver.js';
 
-**Drawbacks:**
-- ❌ Extra layer of indirection
-- ❌ Requires careful interface design between layers
+const resolved = await getActivePackageForUser(userId);
+// resolved.limits — fully merged TierLimits (DB overrides + static fallbacks)
+// resolved.packageSlug — e.g. 'pro'
+// resolved.packageStatus — 'ACTIVE' or 'TRIAL'
+// resolved.contactId — resolved contact ID
+```
 
----
+The SQL query in `getActivePackageForUser()`:
+1. Resolves user → contact via `users.contact_id` or `user_contact_link` (prioritized by role: OWNER > ADMIN > MEMBER > STAFF)
+2. JOINs to `contact_packages` (status IN 'ACTIVE', 'TRIAL')
+3. JOINs to `packages` (is_active = 1)
+4. Returns the highest-priority active package
 
-### Pattern 2: Middleware-Based Credit Deduction
-
-**Context:**  
-AI requests automatically deduct credits using middleware that wraps route handlers.
-
-**Implementation:**
+### 1b. Package Row → TierLimits Merge (Fallback Logic)
 
 ```typescript
-// middleware/credits.ts
-export function deductCredits(requestType: RequestType) {
-  return async (req: AuthRequest, res: Response, next: NextFunction) => {
-    const teamId = await getTeamIdFromRequest(req);
-    const balance = await getTeamCreditBalance(teamId);
-    
-    const estimatedCost = REQUEST_PRICING[requestType].baseCost;
-    
-    if (balance.credits < estimatedCost) {
-      return res.status(402).json({ 
-        error: 'Insufficient credits',
-        required: estimatedCost,
-        current: balance.credits
-      });
-    }
-    
-    // Store pre-request balance for rollback
-    req.creditCheckpoint = { teamId, balance: balance.credits };
-    next();
-  };
-}
+import { packageRowToTierLimits } from '../services/packageResolver.js';
 
-// routes/ai.ts
-aiRouter.post('/chat', 
-  requireApiKey, 
-  deductCredits('TEXT_CHAT'),  // ← Middleware
-  async (req: ApiKeyRequest, res) => {
-    const response = await chatService.execute(req.body.message);
-    
-    // Deduct actual cost after execution
-    const actualCost = calculateCreditCost('TEXT_CHAT', response.tokens);
-    await deductCreditsFromBalance(req.creditCheckpoint.teamId, actualCost);
-    
-    res.json(response);
-  }
+const limits = packageRowToTierLimits(packageRow);
+// For each field: DB value wins if non-NULL, otherwise static fallback for slug
+```
+
+Merge order for each field:
+1. Check the DB column (e.g. `packages.max_sites`)
+2. If NULL, fall back to legacy column mapping (e.g. `max_landing_pages` → `maxSites`)
+3. If still NULL, use `getLimitsForTier(slug)` from `config/tiers.ts`
+
+### 1c. Static-Only Resolution (Fallback Path)
+
+When no package chain exists (e.g. widget tier checks), the static path is still available:
+
+```typescript
+import { getLimitsForTier, TierName } from '../config/tiers.js';
+
+const limits = getLimitsForTier(user.plan_type);
+// Returns static limits for the tier, defaults to 'free' for invalid input
+```
+
+**Anti-pattern (REMOVED in v2.0.0 — still removed):**
+```typescript
+// ❌ NEVER DO THIS — the subscription_tier_limits table no longer exists
+const limits = await db.queryOne(
+  'SELECT * FROM subscription_tier_limits WHERE tier = ?', [tierName]
 );
 ```
 
-**Benefits:**
-- ✅ Credit checks happen before expensive operations
-- ✅ Consistent credit validation across all AI routes
-- ✅ Pre-flight check prevents wasted API calls
-- ✅ Automatic rollback on route errors
+---
 
-**Drawbacks:**
-- ❌ Two-phase deduction (estimate + actual) adds complexity
-- ❌ Race condition if multiple concurrent requests
+## Pattern 2: Package Access Enforcement
+
+Two middleware functions enforce that users have an active contact→package link:
+
+### requireActivePackageAccess (User-Scoped)
+
+Checks that the **authenticated user** has an active package via `requireActivePackageForUser()`. If no active package chain exists, returns 403 with `PACKAGE_LINK_REQUIRED` error.
+
+```typescript
+import { requireActivePackageAccess } from '../middleware/packageAccess.js';
+
+// Apply to routes that require an active package:
+router.post('/some-gated-action', requireAuth, requireActivePackageAccess, handler);
+```
+
+### requireOwnerPackageAccess (Resource-Scoped)
+
+Checks that the **owner** of a resource (assistant or widget client) has an active package. Resolves owner via `assistants.userId` or `widget_clients.user_id`.
+
+```typescript
+import { requireOwnerPackageAccess } from '../middleware/packageAccess.js';
+
+// Apply to routes where the resource owner (not necessarily requester) needs a package:
+router.post('/chat/:assistantId', requireOwnerPackageAccess, handler);
+```
 
 ---
 
-### Pattern 3: Webhook Signature Validation
+## Pattern 3: Admin Package Management
 
-**Context:**  
-Payment webhooks (PayFast, Yoco) must be validated to prevent fraud.
+### CRUD Lifecycle
 
-**Implementation:**
+```
+Admin → POST /admin/packages (create)
+Admin → PUT /admin/packages/:id (update) → syncUsersForContactPackage() for all linked contacts
+Admin → POST /admin/packages/:id/assign-contact → cancel old assignments → create/reactivate → syncUsers
+```
+
+### Contact Assignment Flow
+
+```
+1. Admin selects package + contact
+2. Backend cancels any existing active package for that contact (status → 'CANCELLED')
+3. Creates or reactivates contact_packages row (status → 'ACTIVE', billing period set)
+4. syncUsersForContactPackage() updates all users with that contact_id:
+   → users.plan_type = mapPackageToTierName(slug)
+   → users.storage_limit_bytes = limits.maxStorageBytes
+```
+
+### Package → Tier Name Mapping
 
 ```typescript
-// routes/credits.ts
-creditsRouter.post('/webhook/payfast', async (req, res, next) => {
-  try {
-    // 1. Validate PayFast signature
-    const signature = req.body.signature;
-    delete req.body.signature;
-    
-    const dataString = Object.keys(req.body)
-      .sort()
-      .map(key => `${key}=${encodeURIComponent(req.body[key])}`)
-      .join('&');
-    
-    const expectedSignature = crypto
-      .createHash('md5')
-      .update(dataString)
-      .digest('hex');
-    
-    if (signature !== expectedSignature) {
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
-    
-    // 2. Validate payment amounts match
-    const transactionId = req.body.custom_str1;
-    const transaction = await getTransaction(transactionId);
-    
-    if (Math.abs(parseFloat(req.body.amount_gross) - transaction.amount / 100) > 0.01) {
-      throw new Error('Amount mismatch');
-    }
-    
-    // 3. Process payment
-    if (req.body.payment_status === 'COMPLETE') {
-      await addCredits(transaction.teamId, transaction.credits, {
-        type: 'PURCHASE',
-        transactionId,
-        paymentProvider: 'PAYFAST',
-      });
-    }
-    
-    res.json({ success: true });
-  } catch (err) {
-    next(err);
-  }
+import { mapPackageToTierName } from '../services/packageResolver.js';
+
+mapPackageToTierName('pro', 'CONSUMER');    // → 'pro'
+mapPackageToTierName('staff', 'STAFF');     // → 'enterprise'
+mapPackageToTierName('unknown', 'CONSUMER'); // → 'free' (safe fallback)
+```
+
+---
+
+## Pattern 4: Public Pricing API
+
+The landing page fetches live pricing from the database with a hardcoded fallback:
+
+### Backend
+
+```typescript
+// routes/publicPackages.ts
+GET /api/public/packages
+  → SELECT * FROM packages WHERE is_active = 1 AND is_public = 1
+  → formatPublicPackage() transforms each row (camelCase, resolved limits, parsed features)
+```
+
+### Frontend
+
+```typescript
+// LandingPage.tsx
+useEffect(() => {
+  fetch('/api/public/packages')
+    .then(data => setPricingPlans(data.packages))
+    .catch(() => setPricingPlans(hardcodedFallback)); // Matches Pricing.md exactly
+}, []);
+```
+
+**Key design decision:** The hardcoded fallback in `LandingPage.tsx` matches `Pricing.md` exactly. If the API is down, users still see correct pricing.
+
+---
+
+## Pattern 5: Trial Engine (Start → Enforce → Freeze)
+
+The trial system has three phases:
+
+### Phase 1: Activation (`routes/billing.ts`)
+```
+User calls POST /api/v1/billing/start-trial
+  → Check has_used_trial (permanent flag)
+  → Check not already on paid plan
+  → SET plan_type = 'starter', has_used_trial = TRUE, trial_expires_at = NOW() + 14 days
+  → Return tier limits to frontend
+```
+
+### Phase 2: Background Sweep (`services/trialEnforcer.ts`)
+```
+Every 60 minutes (setInterval):
+  → SELECT users WHERE trial_expires_at < NOW()
+  → For each expired user:
+    → SET plan_type = 'free', trial_expires_at = NULL
+    → Call freezeOverLimitAssets(userId)
+    → has_used_trial stays TRUE (permanent)
+```
+
+### Phase 3: Graceful Freeze (`services/trialEnforcer.ts`)
+```
+freezeOverLimitAssets(userId):
+  → Get free tier limits from config/tiers.ts
+  → SELECT sites ORDER BY created_at ASC
+  → Keep oldest N (where N = freeLimits.maxSites), freeze rest → 'locked_tier_limit'
+  → SELECT widgets ORDER BY created_at ASC
+  → Keep oldest N (where N = freeLimits.maxWidgets), freeze rest → 'suspended'
+```
+
+**Key design decisions:**
+- `has_used_trial` is **permanent** — no admin reset, no second chances
+- Oldest assets survive (deterministic, user-predictable)
+- No data is deleted during freeze — only status changes
+- Sweep runs at boot + hourly (catches downtime gaps)
+
+---
+
+## Pattern 5b: Trial Frontend UX (4 Entry Points)
+
+The trial system has four frontend touchpoints, all converging on the same backend:
+
+### Entry 1: Landing Page Hero CTA
+```
+LandingPage.tsx → "Start 14-Day Free Trial" button
+  → Links to /register?trial=true
+  → Starter pricing card badge: "14-Day Free Trial"
+  → Starter card CTA: "Start 14-Day Free Trial" → /register?trial=true
+  → Other cards: "Get Started" → /register (no trial flag)
+```
+
+### Entry 2: Registration Page
+```
+RegisterPage.tsx reads useSearchParams()
+  → If ?trial=true:
+    → Heading: "Start Your 14-Day Free Trial"
+    → Badge: "14 days free • Downgrades to Free automatically"
+    → Submit button: "Start Free Trial" (instead of "Create Account")
+    → Calls AuthModel.register({ ...data, trial: true })
+  → Backend auto-activates trial during user creation (no second API call)
+```
+
+### Entry 3: Portal Dashboard (Free → Trial)
+```
+Dashboard.tsx fetches GET /dashboard/metrics
+  → If metrics.trial.canStartTrial (free tier, never trialled):
+    → Shows blue gradient banner: "Unlock More with a Free Trial"
+    → CTA button: "Start 14-Day Free Trial" → POST /billing/start-trial
+    → On success: SweetAlert confirmation, reload metrics
+  → If metrics.trial.isOnTrial:
+    → Shows amber gradient banner: "Starter Trial — N days remaining"
+    → CTA link: "Upgrade Now — R349/mo" → /portal/billing
+```
+
+### Entry 4: Site Builder Queue Skip
+```
+SiteBuilderEditor.tsx → handleGenerate(tier: 'free' | 'paid')
+  → If tier === 'paid': standard priority build Swal
+  → If tier !== 'paid': queued generation Swal with upsell:
+    → "⚡ Want to skip the queue?"
+    → "Start a free 14-day Starter trial for priority builds"
+    → Confirm: POST /billing/start-trial → success Swal → navigate
+    → Cancel: stays in queue → navigate to /portal/sites
+```
+
+---
+
+## Pattern 6: Payment Fulfilment (Yoco)
+
+Two parallel fulfilment paths ensure no payment is missed:
+
+### Path A: Webhook (Push)
+```
+Yoco server → POST /api/v1/webhooks/yoco
+  → Verify Svix 3-header signature
+  → Extract checkoutId from payload
+  → Lookup yoco_checkouts record
+  → Read softaware_target_tier from metadata JSON
+  → UPDATE users SET plan_type = target_tier
+  → UPDATE yoco_checkouts SET status = 'completed'
+```
+
+### Path B: Status Polling (Pull)
+```
+Frontend redirect-back → GET /api/v1/yoco/checkout/:id/status
+  → Lookup yoco_checkouts record
+  → If still pending, poll Yoco API for fresh status
+  → If completed/successful:
+    → Same fulfilment as webhook path
+  → Return status to frontend
+```
+
+**Idempotency:** Both paths check `record.status !== 'completed'` before fulfilling, so double-fulfilment is impossible.
+
+---
+
+## Pattern 7: Widget Tier Enrichment
+
+When listing widget clients, each row is enriched with its static tier limits:
+
+```typescript
+const rows = await db.query('SELECT * FROM widget_clients WHERE user_id = ?', [userId]);
+
+const enriched = rows.map((wc) => {
+  const limits = getLimitsForTier(wc.subscription_tier);
+  return {
+    ...wc,
+    max_pages: limits.maxKnowledgePages,
+    max_actions_per_month: limits.maxActionsPerMonth,
+    lead_capture: limits.allowedSystemActions.includes('email_capture'),
+    tone_control: true,
+    daily_recrawl: wc.subscription_tier !== 'free',
+    document_uploads: wc.subscription_tier !== 'free',
+  };
 });
 ```
 
-**Benefits:**
-- ✅ Prevents fake payment notifications
-- ✅ Validates data integrity
-- ✅ Idempotent (safe to retry)
-
-**Drawbacks:**
-- ❌ Signature algorithms differ per gateway
-- ❌ Failed webhooks require manual reconciliation
-
 ---
 
-### Pattern 4: Dual Billing Systems (Subscriptions + Credits)
+## Pattern 8: Feature Gating via allowedSystemActions
 
-**Context:**  
-The platform has TWO independent billing systems running in parallel:
-
-1. **Subscription Plans** — Recurring monthly/annual billing for desktop app access
-2. **Credit System** — Prepaid credits for per-request AI usage
-
-**Implementation:**
+Tier-specific features are gated via the `allowedSystemActions` string array:
 
 ```typescript
-// Separate tables
-// subscriptions → Recurring plans (PERSONAL, TEAM, ENTERPRISE)
-// credit_balances → Prepaid AI credits
+const limits = getLimitsForTier(client.subscription_tier);
 
-// services/subscription.ts
-export async function getTeamSubscription(teamId: string) {
-  return db.queryOne('SELECT * FROM subscriptions WHERE teamId = ?', [teamId]);
-}
-
-// services/credits.ts
-export async function getTeamCreditBalance(teamId: string) {
-  return db.queryOne('SELECT * FROM credit_balances WHERE teamId = ?', [teamId]);
-}
-
-// A team can have:
-// - Active subscription (TEAM plan, R1,500/mo)
-// - Separate credit balance (8,450 credits)
-```
-
-**Benefits:**
-- ✅ Clear separation of concerns
-- ✅ Credits can be sold independently (no subscription required)
-- ✅ Subscriptions can include bonus credits
-- ✅ Different payment flows (recurring vs one-time)
-
-**Drawbacks:**
-- ❌ Two separate invoicing systems
-- ❌ Risk of confusion (users may think subscription includes credits)
-- ❌ Double the billing complexity
-
----
-
-### Pattern 5: Trial Period with Grace Period
-
-**Context:**  
-New teams get 14-day trials that automatically expire but don't immediately block access.
-
-**Implementation:**
-
-```typescript
-subscriptionRouter.get('/current', requireAuth, async (req: AuthRequest, res, next) => {
-  const subscription = await subscriptionService.getTeamSubscription(teamId);
-  
-  let effectiveStatus = subscription.status;
-  
-  // Check if trial expired
-  if (subscription.status === 'TRIAL' && subscription.trialEndsAt) {
-    if (new Date() > subscription.trialEndsAt) {
-      effectiveStatus = 'EXPIRED';  // Soft expiry
-    }
-  }
-  
-  res.json({
-    subscription: {
-      ...subscription,
-      effectiveStatus,  // Display status
-      status,           // Database status (still "TRIAL")
-    },
+if (leadCaptureEnabled && !limits.allowedSystemActions.includes('email_capture')) {
+  return res.status(403).json({
+    error: 'Lead capture requires a higher tier',
+    upgrade: 'Upgrade to enable lead capture',
   });
-});
-
-// Desktop app checks effectiveStatus and shows upgrade prompt
-// But doesn't block access until admin manually downgrades
-```
-
-**Benefits:**
-- ✅ Graceful degradation (users don't lose access instantly)
-- ✅ Admin can manually review expired trials
-- ✅ Prevents accidental lockouts
-
-**Drawbacks:**
-- ❌ Requires manual cleanup of expired trials
-- ❌ Users can abuse extended grace period
-
----
-
-### Pattern 6: Price Display with Currency Formatting
-
-**Context:**  
-Prices stored in cents (integer) but displayed in Rand (decimal with currency symbol).
-
-**Implementation:**
-
-```typescript
-subscriptionRouter.get('/plans', async (req, res, next) => {
-  const plans = await subscriptionService.getPlans();
-  
-  const formattedPlans = plans.map((plan) => ({
-    ...plan,
-    priceMonthlyDisplay: `R${(plan.priceMonthly / 100).toLocaleString()}`,
-    priceAnnuallyDisplay: plan.priceAnnually 
-      ? `R${(plan.priceAnnually / 100).toLocaleString()}` 
-      : null,
-    priceMonthlyFromAnnual: plan.priceAnnually 
-      ? `R${((plan.priceAnnually / 100) / 12).toFixed(0)}` 
-      : null,
-  }));
-  
-  res.json({ plans: formattedPlans });
-});
-
-// Database: priceMonthly = 150000 (integer cents)
-// API: priceMonthlyDisplay = "R1,500" (string)
-```
-
-**Benefits:**
-- ✅ Avoids floating-point rounding errors in database
-- ✅ Consistent currency formatting across API
-- ✅ Easy to calculate discounts/taxes
-
-**Drawbacks:**
-- ❌ Requires conversion in every API response
-- ❌ Frontend must handle both raw cents and formatted strings
-
----
-
-### Pattern 7: API Key vs JWT Authentication
-
-**Context:**  
-Different auth methods for different client types:
-
-- **JWT (requireAuth)** — Web app users (short-lived, user-scoped)
-- **API Key (requireApiKey)** — Desktop apps (long-lived, team-scoped)
-
-**Implementation:**
-
-```typescript
-// middleware/auth.ts
-export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  const decoded = jwt.verify(token, JWT_SECRET);
-  req.userId = decoded.userId;
-  next();
-}
-
-// middleware/apiKey.ts
-export function requireApiKey(req: ApiKeyRequest, res: Response, next: NextFunction) {
-  const apiKey = req.headers['x-api-key'];
-  const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-  const apiKeyRecord = await db.queryOne('SELECT * FROM api_keys WHERE key_hash = ?', [keyHash]);
-  req.apiKey = apiKeyRecord;
-  next();
-}
-
-// Usage:
-subscriptionRouter.get('/current', requireAuth, ...);        // Web app
-creditsRouter.get('/balance', requireApiKey, ...);           // Desktop app
-```
-
-**Benefits:**
-- ✅ Web users get short-lived tokens (better security)
-- ✅ Desktop apps get persistent keys (better UX)
-- ✅ Clear separation of client types
-
-**Drawbacks:**
-- ❌ Two authentication systems to maintain
-- ❌ API key rotation more complex than JWT refresh
-
----
-
-## 3. Anti-Patterns Found
-
-### Anti-Pattern 1: Manual Team Lookup in Every Route
-
-**Problem:**  
-Every API key endpoint repeats the same team lookup logic.
-
-**Current Code:**
-
-```typescript
-creditsRouter.get('/balance', requireApiKey, async (req: ApiKeyRequest, res, next) => {
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
-    [req.apiKey.userId]
-  );
-  const teamId = membership?.teamId;
-  // ... rest of logic
-});
-
-creditsRouter.post('/purchase', requireApiKey, async (req: ApiKeyRequest, res, next) => {
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
-    [req.apiKey.userId]
-  );
-  const teamId = membership?.teamId;
-  // ... rest of logic
-});
-
-// Repeated in 10+ endpoints! 🔴
-```
-
-**Impact:**
-- 🔴 Code duplication across 10+ routes
-- 🔴 Extra database query per request
-- 🔴 Inconsistent error messages
-
-**Recommended Fix:**
-
-```typescript
-// middleware/apiKey.ts (extend existing middleware)
-export function requireApiKey(req: ApiKeyRequest, res: Response, next: NextFunction) {
-  const apiKey = req.headers['x-api-key'];
-  const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-  const apiKeyRecord = await db.queryOne('SELECT * FROM api_keys WHERE key_hash = ?', [keyHash]);
-  req.apiKey = apiKeyRecord;
-  
-  // ✅ Add team lookup here
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
-    [apiKeyRecord.userId]
-  );
-  req.teamId = membership?.teamId;
-  
-  next();
-}
-
-// Now routes can just use req.teamId:
-creditsRouter.get('/balance', requireApiKey, async (req: ApiKeyRequest, res, next) => {
-  const balance = await getTeamCreditBalance(req.teamId);  // ✅ Clean!
-  res.json({ balance });
-});
-```
-
-**Effort:** 🟢 LOW (1-2 hours)
-
----
-
-### Anti-Pattern 2: Price Formatting in Every Endpoint
-
-**Problem:**  
-Price formatting logic duplicated across multiple routes.
-
-**Current Code:**
-
-```typescript
-// In subscriptions/plans:
-priceMonthlyDisplay: `R${(plan.priceMonthly / 100).toLocaleString()}`,
-
-// In subscriptions/current:
-priceMonthlyDisplay: `R${priceMonthly.toLocaleString()}`,
-
-// In credits/packages:
-formattedPrice: `R${(pkg.price / 100).toFixed(2)}`,
-
-// In invoices:
-total: `R${(inv.total / 100).toFixed(2)}`,
-```
-
-**Impact:**
-- 🟡 Inconsistent formatting (toLocaleString vs toFixed)
-- 🟡 Hard to change currency or locale
-- 🟡 Clutters response mapping
-
-**Recommended Fix:**
-
-```typescript
-// utils/currency.ts
-export function formatZAR(cents: number, options?: { decimals?: number }): string {
-  const amount = cents / 100;
-  const decimals = options?.decimals ?? (amount % 1 === 0 ? 0 : 2);
-  return `R${amount.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
-}
-
-// Usage:
-import { formatZAR } from '../utils/currency.js';
-
-subscriptionRouter.get('/plans', async (req, res, next) => {
-  const formattedPlans = plans.map(plan => ({
-    ...plan,
-    priceMonthlyDisplay: formatZAR(plan.priceMonthly),  // ✅ Clean!
-    priceAnnuallyDisplay: plan.priceAnnually ? formatZAR(plan.priceAnnually) : null,
-  }));
-});
-```
-
-**Effort:** 🟢 LOW (2 hours)
-
----
-
-### Anti-Pattern 3: No Idempotency for Webhook Processing
-
-**Problem:**  
-Webhook endpoints can process the same payment twice if retried.
-
-**Current Code:**
-
-```typescript
-creditsRouter.post('/webhook/payfast', async (req, res, next) => {
-  // Validate signature...
-  
-  if (req.body.payment_status === 'COMPLETE') {
-    await addCredits(transaction.teamId, transaction.credits, {
-      type: 'PURCHASE',
-      transactionId,
-    });  // ❌ No check if already processed!
-  }
-  
-  res.json({ success: true });
-});
-```
-
-**Impact:**
-- 🔴 CRITICAL: Credits can be added multiple times for one payment
-- 🔴 Financial loss if webhook retries
-
-**Recommended Fix:**
-
-```typescript
-creditsRouter.post('/webhook/payfast', async (req, res, next) => {
-  const transactionId = req.body.custom_str1;
-  
-  // ✅ Check if already processed
-  const transaction = await db.queryOne(
-    'SELECT * FROM credit_transactions WHERE id = ?',
-    [transactionId]
-  );
-  
-  if (transaction.status === 'COMPLETED') {
-    return res.json({ success: true, message: 'Already processed' });  // ✅ Idempotent
-  }
-  
-  if (req.body.payment_status === 'COMPLETE') {
-    await db.transaction(async (trx) => {
-      // Update transaction status
-      await trx.update('credit_transactions', { status: 'COMPLETED' }, { id: transactionId });
-      // Add credits
-      await addCredits(transaction.teamId, transaction.credits, { transactionId });
-    });
-  }
-  
-  res.json({ success: true });
-});
-```
-
-**Effort:** 🟡 MEDIUM (4 hours + testing)
-
----
-
-### Anti-Pattern 4: Mixed Responsibility in Pricing Routes
-
-**Problem:**  
-The `pricing.ts` routes are for general business pricing items (unrelated to subscriptions/credits) but live alongside subscription routes.
-
-**Current Code:**
-
-```typescript
-// routes/pricing.ts
-// These are for quoting/invoicing general services (hosting, consulting, etc.)
-// NOT related to subscription plans or AI credits
-
-pricingRouter.get('/', requireAuth, async (req, res) => {
-  const items = await db.query('SELECT * FROM pricing WHERE category_id = ?', [category]);
-  res.json({ items });
-});
-```
-
-**Impact:**
-- 🟡 Confusing module organization (not part of Subscription domain)
-- 🟡 Makes Subscription module documentation misleading
-
-**Recommended Fix:**
-
-Move `pricing.ts` to a separate `Quotations` or `Services` module since it's used for general business pricing, not platform subscriptions.
-
-```bash
-# Current:
-/routes/subscription.ts       → Subscriptions module ✅
-/routes/credits.ts             → Subscriptions module ✅
-/routes/pricing.ts             → Subscriptions module ❌ (wrong domain)
-
-# Proposed:
-/routes/subscription.ts       → Subscriptions module
-/routes/credits.ts             → Subscriptions module
-/routes/services/pricing.ts   → Services/Quotations module
-```
-
-**Effort:** 🟢 LOW (1 hour)
-
----
-
-### Anti-Pattern 5: No Credit Balance Threshold Alerts
-
-**Problem:**  
-Users only discover they're out of credits when API requests fail (bad UX).
-
-**Current Code:**
-
-```typescript
-// middleware/credits.ts
-if (balance.credits < estimatedCost) {
-  return res.status(402).json({ error: 'Insufficient credits' });
-  // ❌ No proactive notification!
 }
 ```
 
-**Impact:**
-- 🟡 Poor user experience (unexpected failures)
-- 🟡 Missed opportunities to prompt credit purchases
+**Available System Actions by tier:**
 
-**Recommended Fix:**
+| System Action | Free | Starter | Pro | Advanced | Enterprise |
+|---------------|------|---------|-----|----------|------------|
+| `email_capture` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `payment_gateway_hook` | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `api_webhook` | ❌ | ❌ | ❌ | ✅ | ✅ |
+| `custom_middleware` | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+---
+
+## Pattern 9: Auto-Recharge Overage
+
+Tiers with `allowAutoRecharge: true` (Starter and above) can exceed their `maxActionsPerMonth` cap. When a client goes over the limit, the system can charge `OVERAGE_CONFIG.priceZAR` (R99) for each additional `OVERAGE_CONFIG.actionPackSize` (1,000) actions via the Yoco gateway.
+
+**Free tier has `allowAutoRecharge: false`** — it hits a hard cap at 500 actions.
+
+---
+
+## Pattern 10: Credential Vault (Yoco Keys)
+
+API keys are stored encrypted (AES-256-GCM) in the `credential_vault` table. The active mode (`live` vs `test`) is controlled by `sys_settings.yoco_mode`:
 
 ```typescript
-// services/credits.ts
-export async function checkLowBalanceAlert(teamId: string, currentBalance: number) {
-  const THRESHOLD = 500;  // Alert when < 500 credits
-  
-  if (currentBalance < THRESHOLD) {
-    const alerted = await db.queryOne(
-      'SELECT * FROM low_balance_alerts WHERE teamId = ? AND createdAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)',
-      [teamId]
-    );
-    
-    if (!alerted) {
-      // Send email/notification
-      await notificationService.send({
-        teamId,
-        type: 'LOW_CREDIT_BALANCE',
-        message: `Your credit balance is low (${currentBalance} remaining). Purchase more to continue using AI features.`,
-      });
-      
-      await db.insertOne('low_balance_alerts', { teamId, balance: currentBalance });
-    }
-  }
-}
+import { getYocoActiveConfig } from '../services/credentialVault.js';
 
-// Call after every credit deduction:
-await deductCreditsFromBalance(teamId, cost);
-await checkLowBalanceAlert(teamId, newBalance);
+const config = await getYocoActiveConfig();
+// config.secretKey — decrypted Yoco secret key for the active mode
+// config.publicKey — decrypted Yoco public key
+// config.webhookSecret — decrypted Svix webhook secret
 ```
 
-**Effort:** 🟡 MEDIUM (6 hours + email templates)
+**Never hard-code Yoco API keys.** Always resolve through the vault.
 
 ---
 
-## 4. Summary
+## Removed Patterns (v2.0.0 — still removed)
 
-| Pattern | Type | Status | Priority |
-|---------|------|--------|----------|
-| Service Layer Abstraction | ✅ Good | Implemented | — |
-| Middleware Credit Deduction | ✅ Good | Implemented | — |
-| Webhook Signature Validation | ✅ Good | Implemented | — |
-| Dual Billing Systems | ✅ Good | Implemented | — |
-| Trial Grace Period | ✅ Good | Implemented | — |
-| Price Display Formatting | ✅ Good | Implemented | — |
-| API Key vs JWT Auth | ✅ Good | Implemented | — |
-| Manual Team Lookup (Anti) | 🔴 Anti | Fix Needed | HIGH |
-| Price Formatting Duplication (Anti) | 🟡 Anti | Refactor | LOW |
-| No Webhook Idempotency (Anti) | 🔴 Anti | Fix Needed | CRITICAL |
-| Mixed Pricing Responsibility (Anti) | 🟡 Anti | Refactor | LOW |
-| No Low Balance Alerts (Anti) | 🟡 Anti | Feature Missing | MEDIUM |
+| Pattern | Description | Replacement |
+|---------|-------------|-------------|
+| Credit deduction middleware | `middleware/credits.ts` checked balance before each AI request | Gone — usage governed by `maxActionsPerMonth` per tier |
+| Dynamic package pricing | `config/credits.ts` mapped model→cost per request | Gone — flat monthly action cap per tier |
+| PayFast IPN | `services/payment.ts` handled PayFast instant payment notifications | Gone — Yoco is sole gateway |
+| Credit purchase flow | User buys credit bundle → balance increases → deducted per request | Gone — no credits, no balances, no deductions |
 
----
+## Restored Patterns (v3.0.0)
 
-*This document is maintained alongside code changes. Update patterns as the codebase evolves.*
+| Pattern | v2.0.0 Status | v3.0.0 Status |
+|---------|--------------|---------------|
+| Package enforcement middleware | Removed | Rebuilt as `middleware/packageAccess.ts` (contact→package link enforcement, not credit-based) |
+| Package CRUD routes | Removed | Rebuilt as `routes/adminPackages.ts` (admin CRUD + contact assignment) |
+| Contact-package management | Removed | Rebuilt as `services/packageResolver.ts` (hybrid resolver with static fallback) |

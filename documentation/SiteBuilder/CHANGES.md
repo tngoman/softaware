@@ -1,7 +1,151 @@
 # Site Builder Module — Changelog
 
-**Version:** 2.1.0  
-**Last Updated:** 2026-03-08
+**Version:** 3.1.0  
+**Last Updated:** 2026-03-15
+
+---
+
+## Version 3.1.0 — Configurable Forms, Submissions System & Conditional Rendering (2026-03-15)
+
+### New Features
+
+| Feature | Description |
+|---------|-------------|
+| **Configurable contact form** | Users can toggle form inclusion on/off, configure custom form fields (text, email, phone, textarea, select), set destination email, auto-reply message, and submit button text via the SiteBuilderEditor UI. |
+| **Form submission processing** | Public `POST /forms/submit` endpoint receives form data from generated sites, stores in `site_form_submissions` table, sends notification email to site owner, and sends auto-reply to submitter. |
+| **Honeypot bot detection** | Hidden `bot_check_url` field traps bots — non-empty value returns silent success without storing. |
+| **IP rate limiting** | In-memory rate limiter: max 10 submissions per IP per site per 10 minutes via `Map<string, { count, resetAt }>`. |
+| **Free tier submission cap** | Free-tier sites limited to 50 total form submissions (enforced server-side via `resolveUserTier()`). |
+| **Form submissions viewer** | New `FormSubmissions.tsx` portal page with inbox-style UI: unread/all filter, detail modal, mark-as-read, delete, pagination. |
+| **Submissions button** | WebsiteManager header now includes a "Submissions" button linking to the FormSubmissions page. |
+| **Conditional assistant widget** | AI chat widget is now opt-in (default: off) via `includeAssistant` toggle. Widget only injected when enabled AND a valid assistant clientId is provided. |
+| **Conditional contact form** | Contact section, navigation "Contact" link, and hero CTA button are all conditionally rendered based on `includeForm` flag. |
+| **Dynamic form fields** | Template generates form fields dynamically from `formConfig.fields` array. Supports text, email, tel, textarea, and select field types with validation. |
+| **Form config persistence** | `form_config` JSON, `include_form`, and `include_assistant` stored in `generated_sites` table and restored on site edit. |
+| **Email notifications** | Notification email to site owner includes HTML-formatted field summary, timestamp, IP, and link to submissions dashboard. Auto-reply uses configured message text. |
+
+### Backend Changes
+
+| File | LOC | Change |
+|------|-----|--------|
+| siteBuilder.ts | 2,118 (+346) | Added `POST /forms/submit` (public, rate-limited), `GET /:siteId/submissions` (paginated), `PATCH /:siteId/submissions/:id/read`, `DELETE /:siteId/submissions/:id`; form_config/include_form/include_assistant auto-migration; updated generate-ai, skip-queue, page-generate to pass form/assistant flags |
+| siteBuilderTemplate.ts | 369 (+95) | Added FormFieldConfig/FormConfig interfaces; conditional form rendering; conditional assistant widget; dynamic form fields; JavaScript fetch submission to /forms/submit; honeypot hidden field |
+| siteBuilderService.ts | 910 (+20) | Added form_config, include_form, include_assistant to GeneratedSite/SiteData interfaces; updateSite() handles new fields |
+
+### Frontend Changes
+
+| File | LOC | Change |
+|------|-----|--------|
+| FormSubmissions.tsx | 334 (NEW) | Inbox-style form submissions viewer — list with unread filter, detail modal, mark-as-read, delete, pagination, empty state |
+| SiteBuilderEditor.tsx | 1,077 (+226) | Added FormField interface, includeForm/includeAssistant toggles, form field builder UI (add/remove fields, type selection), destination email input, auto-reply textarea; updated handleSave/handleGenerate to pass form config |
+| WebsiteManager.tsx | 459 (+8) | Added EnvelopeIcon import; "Submissions" button in header linking to FormSubmissions page |
+| App.tsx | +1 route | `/portal/sites/:siteId/submissions` → FormSubmissions |
+| portal/index.ts | +1 export | Added FormSubmissions export |
+
+### Database Changes
+
+| Change | Type | SQL |
+|--------|------|-----|
+| Add `form_config` | ALTER TABLE | `ALTER TABLE generated_sites ADD COLUMN form_config JSON NULL AFTER generation_error` |
+| Add `include_form` | ALTER TABLE | `ALTER TABLE generated_sites ADD COLUMN include_form TINYINT(1) NOT NULL DEFAULT 1 AFTER form_config` |
+| Add `include_assistant` | ALTER TABLE | `ALTER TABLE generated_sites ADD COLUMN include_assistant TINYINT(1) NOT NULL DEFAULT 0 AFTER include_form` |
+| Create `site_form_submissions` | CREATE TABLE | 7-column table with FK to generated_sites(id) CASCADE, indexes on site_id and submitted_at |
+
+### Security Changes
+
+| Change | Description |
+|--------|-------------|
+| Public form endpoint | `POST /forms/submit` requires no auth (public-facing) but is protected by honeypot, IP rate limiting, and free tier cap |
+| Honeypot bot trap | Hidden `bot_check_url` field — bots filling all fields get silently rejected |
+| IP rate limiting | In-memory Map limits 10 submissions per IP/site per 10 minutes |
+| Free tier cap | Max 50 submissions per site for free-tier users (via `resolveUserTier()`) |
+| Submissions auth | List/read/delete submissions require JWT + site ownership verification |
+| Assistant opt-in | Widget script no longer auto-included — requires explicit `includeAssistant: true` |
+
+### API Changes
+
+| Endpoint | Method | Change |
+|----------|--------|--------|
+| `/forms/submit` | POST | **NEW** — Public form submission with bot detection + rate limiting |
+| `/:siteId/submissions` | GET | **NEW** — List submissions (paginated, unread filter) |
+| `/:siteId/submissions/:id/read` | PATCH | **NEW** — Mark submission as read |
+| `/:siteId/submissions/:id` | DELETE | **NEW** — Delete submission |
+| `/generate-ai` | POST | **UPDATED** — `clientId` no longer required; accepts `includeForm`, `includeAssistant`, `formConfig` |
+
+---
+
+## Version 3.0.0 — Multi-Page Websites, Tier System & Admin Panel (2026-03-10)
+
+### Breaking Changes
+
+| Change | Detail |
+|--------|--------|
+| **Tier resolved server-side** | `req.body.tier` is no longer trusted. `resolveUserTier(userId)` queries `contact_packages → packages` to determine the actual tier. Clients sending `tier` in the request body will have it ignored. |
+| **max_pages column added** | `generated_sites` table now has `max_pages INT NOT NULL DEFAULT 1`. All existing sites default to 1 page (free tier). |
+| **site_pages table added** | New table for multi-page content — auto-created on startup via migration IIFE. |
+| **Admin routes added** | New `/api/admin/sites/*` route group requires admin/staff/developer role. |
+
+### New Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-page websites** | Paid-tier users can create up to 50 pages per site (Starter=5, Pro=15, Enterprise=50). Pages support 8 types: home, about, services, contact, gallery, faq, pricing, custom. |
+| **Page CRUD** | Full REST API for pages: `GET/POST/PUT/DELETE /:siteId/pages[/:pageId]`. Tier-gated creation with quota enforcement. |
+| **Per-page AI generation** | `POST /:siteId/pages/:pageId/generate` generates HTML for individual pages using their content_data. |
+| **Navigation injection** | `injectNavigation()` in siteBuilderService auto-injects a nav bar linking all published pages into each page's HTML. |
+| **GET /tier endpoint** | `GET /api/v1/sites/tier` returns the user's subscription tier info (`tier`, `maxPages`, `packageSlug`, `status`, `daysLeft`). |
+| **Auto max_pages on site creation** | `POST /` now calls `resolveUserTier()` and auto-sets `max_pages` based on the user's subscription. |
+| **Trial auto-downgrade** | `enforceTrialExpiry()` now also downgrades `max_pages → 1` on all expired users' sites via JOIN through `user_contact_link`. |
+| **Trial expiry warnings** | `sendTrialExpiryWarnings()` sends notifications 3 days before trial ends. |
+| **WebsiteManager page** | New portal page at `/portal/sites/:siteId/manage` — page tree, tier-gated "Add Page", quota progress bar, free-tier upsell, trial warning banner. |
+| **PageEditor page** | New portal page at `/portal/sites/:siteId/pages/:pageId` — type-specific content fields, AI generate, save, publish toggle, slug editor, inline preview. |
+| **AdminSites page** | New admin page at `/admin/sites` — 7 stat cards, searchable/filterable paginated table, admin actions (reset failed, edit page limit, delete), trial countdown. |
+| **Admin site stats** | `GET /admin/sites/stats` — aggregate stats: total_sites, by-status counts, total_pages, trial_sites, recent_deployments. |
+| **Admin site list** | `GET /admin/sites` — paginated + searchable + filterable list with owner info, page counts, subscription details. |
+| **Admin override** | `PATCH /admin/sites/:siteId` — admin can override status and max_pages (1–50). |
+| **Admin force-delete** | `DELETE /admin/sites/:siteId` — deletes site + all pages + deployments regardless of ownership. |
+| **Active trials view** | `GET /admin/sites/trials/active` — lists all sites owned by trial users with days_left countdown. |
+
+### Backend Changes
+
+| File | LOC | Change |
+|------|-----|--------|
+| siteBuilder.ts | 1,772 (+1,079) | Added `GET /tier`, server-side `resolveUserTier()`, auto `max_pages` on creation, 6 multi-page endpoints, per-page AI generation |
+| adminSites.ts | 271 (NEW) | Full admin route: stats, list, detail, override, delete, trials |
+| siteBuilderService.ts | 890 (+254) | Added multi-page CRUD (getPagesBySiteId, getPageById, getPageCount, createPage, updatePage, deletePage), getMaxPages, setMaxPages, injectNavigation |
+| packages.ts | 756 (+68) | Added `resolveUserTier()`, updated `enforceTrialExpiry()` to downgrade sites, added `sendTrialExpiryWarnings()` |
+| app.ts | +2 lines | Mounted `adminSitesRouter` at `/admin/sites` with `auditLogger` |
+
+### Frontend Changes
+
+| File | LOC | Change |
+|------|-----|--------|
+| WebsiteManager.tsx | 451 (NEW) | Multi-page management — page tree, tier-gated add, quota bar, upsell, trial warning |
+| PageEditor.tsx | 395 (NEW) | Per-page editor — type-specific content, AI gen, save, publish, preview |
+| AdminSites.tsx | 380 (NEW) | Admin panel — 7 stat cards, search/filter table, pagination, admin actions |
+| SitesPage.tsx | 623 (+249) | Added "Manage" button linking to WebsiteManager, UI improvements |
+| SiteBuilderEditor.tsx | 851 (+72) | Minor integration updates for multi-page flow |
+| App.tsx | +3 routes | `/portal/sites/:siteId/manage`, `/portal/sites/:siteId/pages/:pageId`, `/admin/sites` |
+| portal/index.ts | +2 exports | Added WebsiteManager, PageEditor exports |
+| PortalLayout.tsx | Renamed | "Landing Pages" → "Websites", "Create Landing Page" → "Create Website" |
+| Layout.tsx | +1 link | Added "Sites" link under AI & Enterprise admin section |
+
+### Database Changes
+
+| Change | Type | SQL |
+|--------|------|-----|
+| Add `max_pages` | ALTER TABLE | `ALTER TABLE generated_sites ADD COLUMN max_pages INT NOT NULL DEFAULT 1` |
+| Create `site_pages` | CREATE TABLE | 11-column table with UNIQUE(site_id, page_slug), FK to generated_sites(id) CASCADE |
+
+### Security Changes
+
+| Change | Description |
+|--------|-------------|
+| Server-side tier | `resolveUserTier()` replaces client-supplied `tier` — prevents free users from spoofing paid tier |
+| Page quota enforcement | `POST /:siteId/pages` checks `max_pages` server-side; returns `UPGRADE_REQUIRED` or `PAGE_LIMIT_REACHED` |
+| Admin middleware | `requireAdmin` checks `users.role` for admin/staff/developer before allowing admin endpoints |
+| Audit logging | Admin site routes pass through `auditLogger` middleware for accountability |
+| Slug sanitization | Page slugs are lowercased, non-alphanumeric stripped, UNIQUE constraint prevents duplicates |
 
 ---
 
@@ -173,21 +317,18 @@
 | 002_site_builder.ts | 112 | Database migration |
 | SiteBuilderEditor.tsx | 639 | Frontend page component |
 
-### Known Limitations (resolved in v2.0)
+### Known Limitations (resolved in later versions)
 
 | Issue | Status | Resolution |
 |-------|--------|------------|
-| AI generation takes 30–120s on CPU | ✅ Resolved | Switched to 3B model (~2 min) + async flow eliminates UX blocking |
+| AI generation takes 30–120s on CPU | ✅ Resolved v2.0 | Switched to 3B model (~2 min) + async flow |
 | No image cleanup on site deletion | ⚠ Open | Manual cleanup still needed |
-| Single-page generation only | ⚠ Open | Future: add page management |
-| No preview for template generation | ✅ Resolved v2.1 | Live preview endpoint serves HTML in new tab for any generated site |
-| No way to change assistant after generation | ✅ Resolved v2.1 | Post-gen assistant selector auto-saves immediately |
-| Assistant dropdown resets on reload | ✅ Resolved v2.1 | `widget_client_id` loaded from DB on edit |
+| Single-page generation only | ✅ Resolved v3.0 | Multi-page websites with tier-gated quotas |
+| No preview for template generation | ✅ Resolved v2.1 | Live preview endpoint |
+| No way to change assistant after generation | ✅ Resolved v2.1 | Post-gen assistant selector |
+| Assistant dropdown resets on reload | ✅ Resolved v2.1 | `widget_client_id` loaded from DB |
 | FTP credentials stored per-site | ⚠ Open | Re-enter for each site |
-| No site list page | ✅ Resolved | SitesPage.tsx added with full dashboard |
-
----
-
-## Upcoming
-
-- **v1.1.0 (Planned):** Multi-page site support, global FTP credential profiles, template selection
+| No site list page | ✅ Resolved v2.0 | SitesPage.tsx added |
+| No admin management | ✅ Resolved v3.0 | Full admin panel with stats, search, override |
+| Client-supplied tier trusted | ✅ Resolved v3.0 | Server-side `resolveUserTier()` |
+| No trial lifecycle management | ✅ Resolved v3.0 | Auto-downgrade + 3-day warnings |

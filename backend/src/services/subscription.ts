@@ -4,11 +4,14 @@ type SubscriptionTier = 'PERSONAL' | 'TEAM' | 'ENTERPRISE';
 type SubscriptionStatus = 'TRIAL' | 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'EXPIRED';
 type PaymentProvider = 'PAYFAST' | 'YOCO' | 'MANUAL';
 
-// Pricing in ZAR cents
+// Pricing in ZAR cents — aligned with Pricing.md / config/tiers.ts
+// NOTE: Legacy subscription_plans table still uses PERSONAL/TEAM/ENTERPRISE.
+// The canonical pricing is in config/tiers.ts (free/starter/pro/advanced/enterprise).
+// These values kept for backward compat with existing subscriptions table rows.
 const PLAN_PRICING = {
-  PERSONAL: { monthly: 25000, annually: 250000 },
-  TEAM: { monthly: 150000, annually: 1500000 },
-  ENTERPRISE: { monthly: 500000, annually: 5000000 },
+  PERSONAL: { monthly: 34900, annually: 349000 },    // Maps to "Starter" R349
+  TEAM: { monthly: 69900, annually: 699000 },          // Maps to "Pro" R699
+  ENTERPRISE: { monthly: 149900, annually: 1499000 },  // Maps to "Advanced" R1,499
 } as const;
 
 // Plan features

@@ -9,7 +9,7 @@ interface EmailModalProps {
   onSend: (data: { to: string; cc?: string; subject: string; body: string }) => Promise<void>;
   defaultRecipient?: string;
   defaultSubject: string;
-  documentType: 'Quote' | 'Invoice';
+  documentType: 'Quote' | 'Invoice' | 'Purchase Order';
   documentNumber: string;
 }
 
@@ -27,6 +27,7 @@ const EmailModal: React.FC<EmailModalProps> = ({
   const [subject, setSubject] = useState(defaultSubject);
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendingStatus, setSendingStatus] = useState('');
   const [viewMode, setViewMode] = useState<'edit' | 'preview'>('preview');
   const [loading, setLoading] = useState(true);
 
@@ -81,19 +82,42 @@ Your Company Name`;
     }
 
     setSending(true);
+    setSendingStatus('Generating PDF...');
     try {
-      // Convert plain text to HTML for email
-      const htmlBody = body
-        .split('\n\n')
-        .map(para => `<p>${para.replace(/\n/g, '<br/>')}</p>`)
-        .join('\n');
-      
-      await onSend({ to, cc: cc || undefined, subject, body: htmlBody });
-      onClose();
-    } catch (error) {
-      console.error('Error sending email:', error);
-    } finally {
+      // Short delay so the user sees the first status before network blocks the UI
+      await new Promise(r => setTimeout(r, 100));
+      setSendingStatus('Sending email...');
+
+      // Send raw body text — backend converts to HTML
+      await onSend({ to, cc: cc || undefined, subject, body });
+
       setSending(false);
+      setSendingStatus('');
+
+      await Swal.fire({
+        icon: 'success',
+        title: 'Email Sent!',
+        text: `${documentType} #${documentNumber} has been sent to ${to}`,
+        confirmButtonColor: '#2563eb',
+        timer: 4000,
+        timerProgressBar: true,
+      });
+      onClose();
+    } catch (error: any) {
+      console.error('Error sending email:', error);
+      setSending(false);
+      setSendingStatus('');
+
+      const errorMsg = error?.response?.data?.error
+        || error?.message
+        || 'Failed to send email. Please check your SMTP settings and try again.';
+
+      Swal.fire({
+        icon: 'error',
+        title: 'Email Failed',
+        text: errorMsg,
+        confirmButtonColor: '#2563eb',
+      });
     }
   };
 
@@ -273,7 +297,7 @@ Your Company Name`;
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  Sending...
+                  {sendingStatus || 'Sending...'}
                 </>
               ) : (
                 <>

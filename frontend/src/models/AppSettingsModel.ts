@@ -15,6 +15,7 @@ export interface AppSettings {
   
   // Financial Settings
   site_quote_terms: string;
+  site_quote_terms_web: string;
   default_markup_percentage: string;
   vat_percentage: string;
   email_signature: string;

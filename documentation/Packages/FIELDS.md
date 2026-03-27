@@ -29,17 +29,16 @@
 **Indexes**: `idx_packages_type(package_type)`, `idx_packages_active_order(is_active, display_order)`
 **Unique**: `slug`
 
-### Seed Data (7 packages)
+### Seed Data (5 canonical tiers per `config/tiers.ts` + Staff)
 
 | ID | Slug | Name | Type | Monthly | Credits | Featured |
 |----|------|------|------|---------|---------|----------|
 | 1 | `free` | Free | CONSUMER | R0 | 500 | No |
-| 2 | `starter` | Starter | CONSUMER | R199 | 5,000 | Yes |
-| 3 | `professional` | Professional | CONSUMER | R499 | 25,000 | No |
-| 4 | `byoe` | Bring Your Own Endpoint | ENTERPRISE | R5,000 | 50,000 | No |
-| 5 | `managed` | Managed | ENTERPRISE | R15,000 | 200,000 | Yes |
-| 6 | `custom` | Architecture & Build | ENTERPRISE | Contact | 0 | No |
-| 7 | `staff` | Staff | STAFF | R0 | 100,000 | No |
+| 2 | `starter` | Starter | CONSUMER | R349 | 5,000 | Yes |
+| 3 | `pro` | Pro | CONSUMER | R699 | 25,000 | No |
+| 4 | `advanced` | Advanced | CONSUMER | R1,499 | 50,000 | No |
+| 5 | `enterprise` | Enterprise | ENTERPRISE | Custom | Contact | No |
+| 6 | `staff` | Staff | STAFF | R0 | 100,000 | No |
 
 ---
 

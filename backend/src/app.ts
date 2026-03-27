@@ -18,25 +18,26 @@ import { adminClientManagerRouter } from './routes/adminClientManager.js';
 import { checkAssistantStatus, checkWidgetStatus } from './middleware/statusCheck.js';
 import { mcpRouter } from './routes/mcp.js';
 import { filesRouter } from './routes/files.js';
-import { glmRouter } from './routes/glm.js';
 import { aiRouter } from './routes/ai.js';
 import { apiKeysRouter } from './routes/apiKeys.js';
 import { aiConfigRouter } from './routes/aiConfig.js';
 import { adminConfigRouter } from './routes/adminConfig.js';
 import { adminDashboardRouter } from './routes/adminDashboard.js';
 import { adminAIOverviewRouter } from './routes/adminAIOverview.js';
-import { adminPackagesRouter } from './routes/adminPackages.js';
-import { packagesRouter } from './routes/packages.js';
+import adminPackagesRouter from './routes/adminPackages.js';
 import { codeImplementationRouter } from './routes/codeImplementation.js';
 import { codeWriterRouter } from './routes/codeWriter.js';
 import { gitRouter } from './routes/git.js';
 import { assistantsRouter } from './routes/assistants.js';
 import assistantIngestRouter from './routes/assistantIngest.js';
 import { dashboardRouter } from './routes/dashboard.js';
+import { requireActivePackageAccess } from './middleware/packageAccess.js';
+import publicPackagesRouter from './routes/publicPackages.js';
 import { publicLeadAssistantRouter } from './routes/publicLeadAssistant.js';
 import widgetChatRouter from './routes/widgetChat.js';
 import widgetIngestRouter from './routes/widgetIngest.js';
 import siteBuilderRouter from './routes/siteBuilder.js';
+import siteDataRouter from './routes/siteData.js';
 import contactFormRouter from './routes/contactFormRouter.js';
 import subscriptionTiersRouter from './routes/subscriptionTiers.js';
 import { profileRouter } from './routes/profile.js';
@@ -51,6 +52,8 @@ import { updErrorReportRouter } from './routes/updErrorReport.js';
 import { contactsRouter } from './routes/contacts.js';
 import { quotationsRouter } from './routes/quotations.js';
 import { invoicesRouter } from './routes/invoices.js';
+import { creditNotesRouter } from './routes/creditNotes.js';
+import { purchaseOrdersRouter } from './routes/purchaseOrders.js';
 import { accountingRouter } from './routes/accounting.js';
 import { transactionsRouter } from './routes/transactions.js';
 import { appSettingsRouter } from './routes/appSettings.js';
@@ -58,6 +61,7 @@ import { notificationsRouter } from './routes/notifications.js';
 import { pricingRouter } from './routes/pricing.js';
 import { categoriesRouter } from './routes/categories.js';
 import { paymentsRouter } from './routes/payments.js';
+import { stripeRouter } from './routes/stripe.js';
 import { financialReportsRouter } from './routes/financialReports.js';
 import { expenseCategoriesRouter } from './routes/expenseCategories.js';
 import { reportsRouter } from './routes/reports.js';
@@ -89,7 +93,16 @@ import { staffChatRouter } from './routes/staffChat.js';
 import { webmailRouter } from './routes/webmail.js';
 import { planningRouter } from './routes/planning.js';
 import { adminAuditLogRouter } from './routes/adminAuditLog.js';
+import { adminSitesRouter } from './routes/adminSites.js';
+import { yocoRouter } from './routes/yoco.js';
+import { billingRouter } from './routes/billing.js';
+import { adminPayrollRouter } from './routes/adminPayroll.js';
+import { adminLeaveRouter } from './routes/adminLeave.js';
+import { staffPayrollRouter } from './routes/staffPayroll.js';
+import { staffLeaveRouter } from './routes/staffLeave.js';
 import { startHealthMonitoring } from './services/healthMonitor.js';
+import { startCmsEmbeddingWorker } from './services/cmsEmbeddingQueue.js';
+import { startTrialEnforcer } from './services/trialEnforcer.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { apiErrorTracker } from './middleware/apiErrorTracker.js';
 import { auditLogger } from './middleware/auditLogger.js';
@@ -122,6 +135,11 @@ export function createApp() {
   });
 
   app.use(cookieParser());
+
+  // Yoco webhook needs raw body for Svix signature verification
+  app.use('/api/v1/webhooks/yoco', express.raw({ type: 'application/json' }));
+  app.use('/v1/webhooks/yoco', express.raw({ type: 'application/json' }));
+
   app.use(express.json({ limit: '20mb' }));  // increased for base64 image attachments
   app.use(morgan('dev'));
 
@@ -162,38 +180,39 @@ export function createApp() {
   apiRouter.use('/admin/audit-log', adminAuditLogRouter);
   apiRouter.use('/admin/config', auditLogger as any, adminConfigRouter);
   apiRouter.use('/admin/dashboard', auditLogger as any, adminDashboardRouter);
-  apiRouter.use('/admin/ai-overview', auditLogger as any, adminAIOverviewRouter);
   apiRouter.use('/admin/packages', auditLogger as any, adminPackagesRouter);
+  apiRouter.use('/admin/ai-overview', auditLogger as any, adminAIOverviewRouter);
   apiRouter.use('/admin/clients', auditLogger as any, adminClientManagerRouter);
   apiRouter.use('/admin/enterprise-endpoints', auditLogger as any, adminEnterpriseEndpointsRouter);
   apiRouter.use('/admin/client-api-configs', auditLogger as any, adminClientApiConfigsRouter);
   apiRouter.use('/admin/cases', auditLogger as any, adminCasesRouter);
+  apiRouter.use('/admin/sites', auditLogger as any, adminSitesRouter);
   apiRouter.use('/subscriptions', subscriptionRouter);
   apiRouter.use('/cases', casesRouter);
   apiRouter.use('/mcp', mcpRouter);
   apiRouter.use('/files', filesRouter);
   apiRouter.use('/ai', aiRouter);
-  apiRouter.use('/glm', glmRouter);
   apiRouter.use('/api-keys', apiKeysRouter);
-  apiRouter.use('/packages', packagesRouter);
   apiRouter.use('/ai-config', aiConfigRouter);
   apiRouter.use('/code-implementation', codeImplementationRouter);
   apiRouter.use('/code/git', gitRouter);
   apiRouter.use('/code', codeWriterRouter);
+  apiRouter.use('/public', publicPackagesRouter);
   apiRouter.use('/public/leads', publicLeadAssistantRouter);
-  apiRouter.use('/assistants', checkAssistantStatus, assistantsRouter);
-  apiRouter.use('/assistants/:assistantId/ingest', checkAssistantStatus, assistantIngestRouter);
-  apiRouter.use('/dashboard', dashboardRouter);
+  apiRouter.use('/assistants', requireActivePackageAccess, checkAssistantStatus, assistantsRouter);
+  apiRouter.use('/assistants/:assistantId/ingest', requireActivePackageAccess, checkAssistantStatus, assistantIngestRouter);
+  apiRouter.use('/dashboard', requireActivePackageAccess, dashboardRouter);
   apiRouter.use('/v1/webhook', enterpriseWebhookRouter); // Dynamic enterprise endpoints
   apiRouter.use('/v1/client-api', clientApiGatewayRouter); // Standardized client API proxy gateway
   apiRouter.use('/v1/mobile', mobileIntentRouter);       // Mobile AI assistant
-  apiRouter.use('/v1/mobile/my-assistant', myAssistantRouter);    // Unified assistant CRUD (staff + clients)
-  apiRouter.use('/v1/mobile/staff-assistant', staffAssistantRouter); // Legacy staff-only (deprecated)
+  apiRouter.use('/v1/mobile/my-assistant', requireActivePackageAccess, myAssistantRouter);    // Unified assistant CRUD (staff + clients)
+  apiRouter.use('/v1/mobile/staff-assistant', requireActivePackageAccess, staffAssistantRouter); // Legacy staff-only (deprecated)
   apiRouter.use('/v1', checkWidgetStatus, widgetChatRouter);
   apiRouter.use('/v1/ingest', checkWidgetStatus, widgetIngestRouter);
-  apiRouter.use('/v1/sites', siteBuilderRouter);
+  apiRouter.use('/v1/sites', requireActivePackageAccess, siteBuilderRouter);
   apiRouter.use('/v1', subscriptionTiersRouter); // Subscription tier management
   apiRouter.use('/v1/leads', contactFormRouter);
+  apiRouter.use('/v1/site-data', requireActivePackageAccess, siteDataRouter);
   apiRouter.use('/profile', profileRouter);
 
   // ── Softaware tasks (proxy to external software APIs) ────
@@ -221,6 +240,8 @@ export function createApp() {
   apiRouter.use('/contacts', contactsRouter);
   apiRouter.use('/quotations', quotationsRouter);
   apiRouter.use('/invoices', invoicesRouter);
+  apiRouter.use('/credit-notes', creditNotesRouter);
+  apiRouter.use('/purchase-orders', purchaseOrdersRouter);
   apiRouter.use('/transactions', transactionsRouter);  // VAT transactions - must be before accountingRouter
   apiRouter.use('/accounting', accountingRouter);
   apiRouter.use('/app-settings', appSettingsRouter);
@@ -228,6 +249,13 @@ export function createApp() {
   apiRouter.use('/pricing', pricingRouter);
   apiRouter.use('/categories', categoriesRouter);
   apiRouter.use('/payments', paymentsRouter);
+  apiRouter.use('/v1/stripe', stripeRouter);
+  apiRouter.use('/v1/yoco', yocoRouter);
+  apiRouter.use('/billing', billingRouter);
+  apiRouter.use('/admin/payroll', auditLogger as any, adminPayrollRouter);
+  apiRouter.use('/admin/leave', auditLogger as any, adminLeaveRouter);
+  apiRouter.use('/staff/payroll', staffPayrollRouter);
+  apiRouter.use('/staff/leave', staffLeaveRouter);
   apiRouter.use('/financial-reports', financialReportsRouter);
   apiRouter.use('/expense-categories', expenseCategoriesRouter);
   apiRouter.use('/reports', reportsRouter);
@@ -262,6 +290,14 @@ export function createApp() {
 
   // Start health monitoring for auto-case creation
   startHealthMonitoring();
+
+  // Start Yoco checkout status poller (safety net for missed webhooks)
+
+  // Start trial enforcer (hourly sweep for expired trials)
+  startTrialEnforcer();
+
+  // Start CMS embedding worker (shadow-writes site data → sqlite-vec)
+  startCmsEmbeddingWorker();
 
   return app;
 }

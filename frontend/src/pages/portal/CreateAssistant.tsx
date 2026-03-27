@@ -17,6 +17,7 @@ import {
 import api from '../../services/api';
 import Swal from 'sweetalert2';
 import { useAppStore } from '../../store';
+import { useTierLimits } from '../../hooks/useTierLimits';
 
 interface IngestSource {
   type: 'url' | 'file' | 'text';
@@ -74,6 +75,10 @@ interface FormData {
   personality: string;
   primaryGoal: string;
   website: string;
+  customGreeting: string;
+  proactiveGreeting: string;
+  proactiveDelay: number;
+  themeColor: string;
 }
 
 const steps = [
@@ -97,7 +102,14 @@ const CreateAssistant: React.FC = () => {
     personality: 'professional',
     primaryGoal: 'customer_support',
     website: '',
+    customGreeting: '',
+    proactiveGreeting: '',
+    proactiveDelay: 5,
+    themeColor: '',
   });
+
+  // Proactive greeting toggle (derived from whether proactiveGreeting has content)
+  const [proactiveEnabled, setProactiveEnabled] = useState(false);
 
   // Knowledge base state
   const [sources, setSources] = useState<IngestSource[]>([]);
@@ -119,6 +131,19 @@ const CreateAssistant: React.FC = () => {
   }>({ accepted: false, optedOut: false, assistantCount: 0, loaded: false });
   const [telemetryOptOut, setTelemetryOptOut] = useState(false);
   const isPaidUser = !!(user?.is_admin || user?.is_staff);
+  const { canCreate, limits, loading: limitsLoading } = useTierLimits();
+
+  // Redirect if user navigated directly to /portal/assistants/new while at limit
+  useEffect(() => {
+    if (!isEdit && !limitsLoading && !canCreate('assistants')) {
+      Swal.fire({
+        icon: 'warning',
+        title: 'Assistant Limit Reached',
+        html: `<p>Your <strong>${limits.tier}</strong> plan allows <strong>${limits.assistants.limit}</strong> assistant(s). Upgrade your plan to create more.</p>`,
+        confirmButtonColor: '#38bdf8',
+      }).then(() => navigate('/portal/assistants'));
+    }
+  }, [isEdit, limitsLoading, canCreate, limits, navigate]);
 
   useEffect(() => {
     if (isEdit) loadAssistant();
@@ -157,7 +182,12 @@ const CreateAssistant: React.FC = () => {
           personality: a.personality || 'professional',
           primaryGoal: a.primaryGoal || 'customer_support',
           website: a.website || '',
+          customGreeting: a.customGreeting || '',
+          proactiveGreeting: a.proactiveGreeting || '',
+          proactiveDelay: a.proactiveDelay ?? 5,
+          themeColor: a.themeColor || '',
         });
+        setProactiveEnabled(!!a.proactiveGreeting);
       }
 
       // Load existing ingestion jobs/sources
@@ -287,6 +317,10 @@ const CreateAssistant: React.FC = () => {
         personality: form.personality,
         primaryGoal: form.primaryGoal,
         website: form.website,
+        customGreeting: form.customGreeting || undefined,
+        proactiveGreeting: proactiveEnabled ? (form.proactiveGreeting || undefined) : undefined,
+        proactiveDelay: proactiveEnabled ? form.proactiveDelay : 5,
+        themeColor: form.themeColor || undefined,
       };
 
       // Step 0 -> 1: Create/update assistant with details
@@ -582,6 +616,151 @@ const CreateAssistant: React.FC = () => {
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* Divider */}
+            <div className="border-t border-gray-200 pt-6">
+              <h3 className="text-sm font-semibold text-gray-900 mb-1">Widget Appearance & Behavior</h3>
+              <p className="text-xs text-gray-500 mb-4">Customize how the chat widget looks and behaves on your website</p>
+            </div>
+
+            {/* Theme Color */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Widget Color</label>
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                  <input
+                    type="color"
+                    value={form.themeColor || '#667eea'}
+                    onChange={(e) => setForm(prev => ({ ...prev, themeColor: e.target.value }))}
+                    className="w-10 h-10 rounded-lg border border-gray-300 cursor-pointer p-0.5"
+                    title="Pick a widget color"
+                  />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { color: '#667eea', label: 'Indigo' },
+                    { color: '#10b981', label: 'Emerald' },
+                    { color: '#f59e0b', label: 'Amber' },
+                    { color: '#ef4444', label: 'Red' },
+                    { color: '#8b5cf6', label: 'Violet' },
+                    { color: '#06b6d4', label: 'Cyan' },
+                    { color: '#ec4899', label: 'Pink' },
+                    { color: '#1e293b', label: 'Dark' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.color}
+                      type="button"
+                      title={preset.label}
+                      onClick={() => setForm(prev => ({ ...prev, themeColor: preset.color }))}
+                      className={`w-7 h-7 rounded-lg border-2 transition-all ${
+                        form.themeColor === preset.color
+                          ? 'border-gray-900 scale-110'
+                          : 'border-transparent hover:border-gray-300'
+                      }`}
+                      style={{ background: preset.color }}
+                    />
+                  ))}
+                  {form.themeColor && (
+                    <button
+                      type="button"
+                      onClick={() => setForm(prev => ({ ...prev, themeColor: '' }))}
+                      className="text-xs text-gray-400 hover:text-gray-600 self-center ml-1"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+              {form.themeColor && (
+                <div className="mt-2 flex items-center gap-2">
+                  <div
+                    className="w-12 h-8 rounded-lg"
+                    style={{ background: `linear-gradient(135deg, ${form.themeColor} 0%, ${form.themeColor}cc 100%)` }}
+                  />
+                  <span className="text-xs text-gray-500 font-mono">{form.themeColor}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Custom Greeting */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Welcome Message</label>
+              <input
+                name="customGreeting"
+                value={form.customGreeting}
+                onChange={handleChange}
+                placeholder="Hi! How can I help you today?"
+                className={inputClass}
+              />
+              <p className="mt-1 text-xs text-gray-400">Shown as the first message when the chat opens</p>
+            </div>
+
+            {/* Proactive Greeting Toggle */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Proactive Greeting</label>
+                  <p className="text-xs text-gray-400">Show a tooltip near the chat button to invite visitors to chat</p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={proactiveEnabled}
+                  onClick={() => {
+                    setProactiveEnabled(prev => !prev);
+                    if (proactiveEnabled) {
+                      // Turning off — clear the greeting text so it's not sent
+                      setForm(prev => ({ ...prev, proactiveGreeting: '' }));
+                    }
+                  }}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-picton-blue focus:ring-offset-2 ${
+                    proactiveEnabled ? 'bg-picton-blue' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform shadow ${
+                      proactiveEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {proactiveEnabled && (
+                <div className="space-y-4 mt-3 pl-0.5">
+                  <div>
+                    <input
+                      name="proactiveGreeting"
+                      value={form.proactiveGreeting}
+                      onChange={handleChange}
+                      placeholder="👋 Need help? I'm here to assist!"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  {/* Proactive Delay */}
+                  {form.proactiveGreeting && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                        Show greeting after <span className="font-bold text-picton-blue">{form.proactiveDelay}</span> seconds
+                      </label>
+                      <input
+                        type="range"
+                        min={1}
+                        max={30}
+                        value={form.proactiveDelay}
+                        onChange={(e) => setForm(prev => ({ ...prev, proactiveDelay: parseInt(e.target.value) }))}
+                        className="w-full accent-picton-blue"
+                      />
+                      <div className="flex justify-between text-xs text-gray-400 mt-1">
+                        <span>1s</span>
+                        <span>15s</span>
+                        <span>30s</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1049,6 +1228,34 @@ const CreateAssistant: React.FC = () => {
                 <div>
                   <span className="text-gray-500 font-medium">Business Type:</span>
                   <p className="text-gray-900 mt-0.5 capitalize">{form.businessType || 'Not specified'}</p>
+                </div>
+                {form.themeColor && (
+                  <div>
+                    <span className="text-gray-500 font-medium">Widget Color:</span>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <div className="w-5 h-5 rounded" style={{ background: form.themeColor }} />
+                      <span className="text-gray-900 font-mono text-xs">{form.themeColor}</span>
+                    </div>
+                  </div>
+                )}
+                {form.customGreeting && (
+                  <div className="col-span-2">
+                    <span className="text-gray-500 font-medium">Welcome Message:</span>
+                    <p className="text-gray-900 mt-0.5">{form.customGreeting}</p>
+                  </div>
+                )}
+                <div className="col-span-2">
+                  <span className="text-gray-500 font-medium">Proactive Greeting:</span>
+                  {proactiveEnabled && form.proactiveGreeting ? (
+                    <p className="text-gray-900 mt-0.5">
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-medium mr-2">● Enabled</span>
+                      {form.proactiveGreeting} <span className="text-gray-400 text-xs">(after {form.proactiveDelay}s)</span>
+                    </p>
+                  ) : (
+                    <p className="text-gray-400 mt-0.5">
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-xs font-medium">○ Disabled</span>
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

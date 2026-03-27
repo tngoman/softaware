@@ -52,6 +52,8 @@ import Swal from 'sweetalert2';
 import { notify } from '../../utils/notify';
 import { getViewAsRole, setViewAsRole, getEffectiveRole, getRoleLabel } from '../../utils/workflowPermissions';
 import RichTextEditor from '../../components/RichTextEditor';
+import PayrollTab from '../../components/Profile/PayrollTab';
+import LeaveTab from '../../components/Profile/LeaveTab';
 
 interface ProfileFormData {
   username: string;
@@ -64,7 +66,7 @@ interface ProfileFormData {
   web_notifications_enabled?: boolean;
 }
 
-type ProfileTab = 'profile' | 'assistant' | 'mailboxes';
+type ProfileTab = 'profile' | 'assistant' | 'mailboxes' | 'payroll' | 'leave';
 
 // ============================================================================
 // Staff Assistant Tab Component
@@ -82,6 +84,15 @@ const VOICE_STYLE_OPTIONS = [
   { value: 'detailed', label: 'Detailed' },
   { value: 'conversational', label: 'Conversational' },
   { value: 'formal', label: 'Formal' },
+];
+
+const TTS_VOICE_OPTIONS = [
+  { value: 'nova', label: 'Nova', desc: 'Warm & friendly female voice' },
+  { value: 'alloy', label: 'Alloy', desc: 'Neutral & balanced' },
+  { value: 'echo', label: 'Echo', desc: 'Smooth & clear male voice' },
+  { value: 'fable', label: 'Fable', desc: 'Expressive British accent' },
+  { value: 'onyx', label: 'Onyx', desc: 'Deep & authoritative male voice' },
+  { value: 'shimmer', label: 'Shimmer', desc: 'Bright & upbeat female voice' },
 ];
 
 const STAFF_TOOL_CATEGORIES = [
@@ -214,6 +225,8 @@ const StaffAssistantTab: React.FC = () => {
   const ttsSupported = true; // Server-side TTS via OpenAI — always available
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [ttsLoading, setTtsLoading] = useState<string | null>(null); // msgId being generated
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null); // voice being previewed
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Form state
   const [formData, setFormData] = useState<StaffAssistantCreate>({
@@ -224,6 +237,7 @@ const StaffAssistantTab: React.FC = () => {
     primary_goal: '',
     custom_greeting: '',
     voice_style: 'concise',
+    tts_voice: 'nova',
     preferred_model: '',
   });
 
@@ -241,6 +255,7 @@ const StaffAssistantTab: React.FC = () => {
           primary_goal: data.primary_goal || '',
           custom_greeting: data.custom_greeting || '',
           voice_style: data.voice_style || 'concise',
+          tts_voice: data.tts_voice || 'nova',
           preferred_model: data.preferred_model || '',
         });
       }
@@ -371,7 +386,7 @@ const StaffAssistantTab: React.FC = () => {
           'Content-Type': 'application/json',
           ...(token && { Authorization: `Bearer ${token}` }),
         },
-        body: JSON.stringify({ text: clean, voice: 'nova' }),
+        body: JSON.stringify({ text: clean, voice: formData.tts_voice || assistant?.tts_voice || 'nova' }),
       });
 
       if (!res.ok) throw new Error(`TTS failed: ${res.status}`);
@@ -417,6 +432,62 @@ const StaffAssistantTab: React.FC = () => {
     setIsSpeaking(false);
     setSpeakingMsgId(null);
     setTtsLoading(null);
+  };
+
+  // ── Voice preview for voice picker ─────────────────────────────────
+  const stopPreview = () => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.currentTime = 0;
+      previewAudioRef.current = null;
+    }
+    setPreviewingVoice(null);
+  };
+
+  const previewVoice = async (voiceName: string) => {
+    // If same voice is already playing, stop it
+    if (previewingVoice === voiceName) {
+      stopPreview();
+      return;
+    }
+    stopPreview();
+    setPreviewingVoice(voiceName);
+
+    try {
+      const token = localStorage.getItem('jwt_token');
+      const res = await fetch('/api/v1/mobile/tts/preview', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token && { Authorization: `Bearer ${token}` }),
+        },
+        body: JSON.stringify({ voice: voiceName }),
+      });
+
+      if (!res.ok) throw new Error(`Preview failed: ${res.status}`);
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      previewAudioRef.current = audio;
+
+      audio.onended = () => {
+        setPreviewingVoice(null);
+        URL.revokeObjectURL(url);
+        previewAudioRef.current = null;
+      };
+      audio.onerror = () => {
+        setPreviewingVoice(null);
+        URL.revokeObjectURL(url);
+        previewAudioRef.current = null;
+      };
+
+      await audio.play();
+    } catch (err) {
+      console.error('[Voice Preview] Error:', err);
+      setPreviewingVoice(null);
+    }
   };
 
   const toggleSpeakMessage = (msgId: string, content: string) => {
@@ -997,6 +1068,7 @@ const StaffAssistantTab: React.FC = () => {
         primary_goal: '',
         custom_greeting: '',
         voice_style: 'concise',
+        tts_voice: 'nova',
         preferred_model: '',
       });
       notify.success('Your assistant has been removed.');
@@ -1127,6 +1199,12 @@ const StaffAssistantTab: React.FC = () => {
                     {assistant.voice_style && (
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-white/10 text-purple-200 ring-1 ring-white/10">
                         {assistant.voice_style}
+                      </span>
+                    )}
+                    {assistant.tts_voice && (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/30">
+                        <SpeakerWaveIcon className="h-3 w-3" />
+                        {assistant.tts_voice}
                       </span>
                     )}
                     {assistant.tier && (
@@ -1354,6 +1432,7 @@ const StaffAssistantTab: React.FC = () => {
                     primary_goal: assistant.primary_goal || '',
                     custom_greeting: assistant.custom_greeting || '',
                     voice_style: assistant.voice_style || 'concise',
+                    tts_voice: assistant.tts_voice || 'nova',
                     preferred_model: assistant.preferred_model || '',
                   });
                 }
@@ -1465,6 +1544,55 @@ const StaffAssistantTab: React.FC = () => {
                       {opt.label}
                     </p>
                   </button>
+                ))}
+              </div>
+            </div>
+
+            {/* TTS Voice Picker */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">TTS Voice</label>
+              <p className="text-xs text-gray-500 mb-2">Choose the voice for text-to-speech playback. Click the play button to preview each voice.</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {TTS_VOICE_OPTIONS.map(opt => (
+                  <div
+                    key={opt.value}
+                    className={`relative p-3 rounded-xl border-2 transition-all cursor-pointer ${
+                      formData.tts_voice === opt.value
+                        ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
+                        : 'border-gray-200 hover:border-gray-300 bg-white'
+                    }`}
+                    onClick={() => handleInputChange('tts_voice', opt.value)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 flex-1">
+                        <p className={`text-sm font-semibold ${formData.tts_voice === opt.value ? 'text-emerald-700' : 'text-gray-900'}`}>
+                          {opt.label}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">{opt.desc}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); previewVoice(opt.value); }}
+                        className={`ml-2 flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                          previewingVoice === opt.value
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700'
+                        }`}
+                        title={previewingVoice === opt.value ? 'Stop preview' : `Preview ${opt.label}`}
+                      >
+                        {previewingVoice === opt.value ? (
+                          <StopCircleIcon className="h-4 w-4" />
+                        ) : (
+                          <PlayIcon className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                    {formData.tts_voice === opt.value && (
+                      <div className="absolute top-1.5 right-1.5">
+                        <CheckCircleIcon className="h-4 w-4 text-emerald-500" />
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -1888,6 +2016,7 @@ const Profile: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ProfileTab>('profile');
 
   const isStaffOrAdmin = user?.is_staff || user?.is_admin;
+  const isStaff = !!user?.is_staff;
 
   const {
     register,
@@ -2041,12 +2170,42 @@ const Profile: React.FC = () => {
               <EnvelopeIcon className="h-4 w-4" />
               Mailboxes
             </button>
+            {isStaff && (
+              <button
+                onClick={() => setActiveTab('payroll')}
+                className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === 'payroll'
+                    ? 'border-picton-blue text-picton-blue'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <CurrencyDollarIcon className="h-4 w-4" />
+                Payroll
+              </button>
+            )}
+            {isStaff && (
+              <button
+                onClick={() => setActiveTab('leave')}
+                className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === 'leave'
+                    ? 'border-picton-blue text-picton-blue'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <CalendarDaysIcon className="h-4 w-4" />
+                Leave
+              </button>
+            )}
           </nav>
         </div>
       )}
 
       {/* Tab Content */}
-      {activeTab === 'mailboxes' && isStaffOrAdmin ? (
+      {activeTab === 'leave' && isStaff ? (
+        <LeaveTab />
+      ) : activeTab === 'payroll' && isStaff ? (
+        <PayrollTab />
+      ) : activeTab === 'mailboxes' && isStaffOrAdmin ? (
         <MailboxesTab />
       ) : activeTab === 'assistant' && isStaffOrAdmin ? (
         <StaffAssistantTab />

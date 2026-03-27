@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   SparklesIcon,
@@ -8,21 +8,36 @@ import {
   PlusIcon,
   ArrowTrendingUpIcon,
   BoltIcon,
+  ClockIcon,
   RocketLaunchIcon,
-  XMarkIcon,
-  PaperAirplaneIcon,
-  UserCircleIcon,
+  CommandLineIcon,
+  SignalIcon,
+  ArrowsRightLeftIcon,
+  CheckCircleIcon,
+  PauseCircleIcon,
+  XCircleIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import Swal from 'sweetalert2';
 import api, { API_BASE_URL } from '../../services/api';
 import KnowledgeHealthBadge from '../../components/KnowledgeHealthBadge';
+import { useTierLimits } from '../../hooks/useTierLimits';
+import { useProducts, type GatewayInfo } from '../../hooks/useProducts';
+import AssistantChatModal from '../../components/AI/AssistantChatModal';
 
 interface DashboardMetrics {
   messages: { used: number; limit: number };
   pagesIndexed: { used: number; limit: number };
   assistants: { count: number; limit: number };
   tier: string;
+  trial?: {
+    hasUsedTrial: boolean;
+    isOnTrial: boolean;
+    expiresAt: string | null;
+    daysRemaining: number;
+    canStartTrial: boolean;
+    packageName?: string;
+  };
 }
 
 interface AssistantSummary {
@@ -34,129 +49,20 @@ interface AssistantSummary {
   pagesIndexed?: number;
 }
 
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-}
-
 const PortalDashboard: React.FC = () => {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [assistants, setAssistants] = useState<AssistantSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const { canCreate, limits } = useTierLimits();
+  const { products, packageInfo, gatewaySummary } = useProducts();
 
   // Chat modal state
   const [chatModal, setChatModal] = useState<AssistantSummary | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  const [activatingTrial, setActivatingTrial] = useState(false);
 
   useEffect(() => {
     loadData();
   }, []);
-
-  // Chat modal effects
-  useEffect(() => {
-    if (chatModal) {
-      setMessages([]);
-      setChatInput('');
-      setTimeout(() => chatInputRef.current?.focus(), 100);
-    }
-  }, [chatModal]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  // Chat functionality
-  const sendMessage = async () => {
-    if (!chatInput.trim() || streaming || !chatModal) return;
-
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: chatInput.trim(),
-    };
-    const assistantMsgId = `assistant-${Date.now()}`;
-    const assistantMsg: ChatMessage = { id: assistantMsgId, role: 'assistant', content: '' };
-
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setChatInput('');
-    setStreaming(true);
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/assistants/chat`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assistantId: chatModal.id, message: userMsg.content }),
-        }
-      );
-
-      const contentType = response.headers.get('content-type') || '';
-
-      if (contentType.includes('text/event-stream') || contentType.includes('text/plain')) {
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let fullText = '';
-
-        if (reader) {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6);
-                if (data === '[DONE]') continue;
-                try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.done) continue;
-                  fullText += parsed.token || parsed.content || parsed.text || '';
-                } catch {
-                  fullText += data;
-                }
-              } else if (line.trim() && !line.startsWith(':')) {
-                fullText += line;
-              }
-            }
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantMsgId ? { ...m, content: fullText } : m))
-            );
-          }
-        }
-      } else {
-        const data = await response.json();
-        const reply = data.response || data.message || data.content || 'No response';
-        setMessages((prev) =>
-          prev.map((m) => (m.id === assistantMsgId ? { ...m, content: reply } : m))
-        );
-      }
-    } catch (err) {
-      console.error('Chat error:', err);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: 'Sorry, I encountered an error. Please try again.' }
-            : m
-        )
-      );
-    } finally {
-      setStreaming(false);
-      chatInputRef.current?.focus();
-    }
-  };
-
-  const handleChatKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
 
   const loadData = async () => {
     setLoading(true);
@@ -171,6 +77,29 @@ const PortalDashboard: React.FC = () => {
       console.error('Failed to load dashboard:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const startTrial = async () => {
+    setActivatingTrial(true);
+    try {
+      const res = await api.post('/billing/start-trial');
+      if (res.data.success) {
+        await Swal.fire({
+          icon: 'success',
+          title: '🎉 Trial Activated!',
+          html: `<p class="text-sm text-gray-600">You now have full <strong>Starter</strong> plan access for 14 days.<br/>3 sites, 3 AI widgets, 2,000 messages/month.</p>`,
+          confirmButtonColor: '#38bdf8',
+          timer: 4000,
+          timerProgressBar: true,
+        });
+        loadData(); // Refresh metrics
+      }
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || 'Could not activate trial.';
+      Swal.fire({ icon: 'error', title: 'Trial Activation Failed', text: msg });
+    } finally {
+      setActivatingTrial(false);
     }
   };
 
@@ -242,32 +171,254 @@ const PortalDashboard: React.FC = () => {
     );
   }
 
-  const tier = metrics?.tier || 'free';
-  const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+  const tier = packageInfo?.tier || metrics?.tier || 'free';
+  const tierLabel = packageInfo?.name || (tier.charAt(0).toUpperCase() + tier.slice(1));
+  const planStatus = packageInfo?.status || '';
 
   // Derive stats from loaded assistants — ensures top cards correlate with cards below
   const totalPages = assistants.reduce((sum, a) => sum + (a.pagesIndexed || 0), 0);
   const pageLimit = metrics?.pagesIndexed.limit ?? 50;
 
+  const GatewayStatusIcon: React.FC<{ status: string }> = ({ status }) => {
+    if (status === 'active') return <CheckCircleIcon className="h-4 w-4 text-emerald-500" />;
+    if (status === 'paused') return <PauseCircleIcon className="h-4 w-4 text-amber-500" />;
+    return <XCircleIcon className="h-4 w-4 text-red-500" />;
+  };
+
   return (
     <div className="space-y-8">
-      {/* Tier + Usage Strip */}
+      {/* Tier + Welcome Strip */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Welcome to your portal</h1>
           <p className="text-gray-500 text-sm mt-1">
             You're on the <span className="font-semibold text-picton-blue">{tierLabel}</span> plan
+            {planStatus === 'TRIAL' && <span className="ml-1.5 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Trial</span>}
           </p>
         </div>
-        <Link
-          to="/portal/assistants/new"
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-        >
-          <PlusIcon className="h-4 w-4" />
-          New Assistant
-        </Link>
+        {products.ai_assistant && (
+          canCreate('assistants') ? (
+            <Link
+              to="/portal/assistants/new"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+            >
+              <PlusIcon className="h-4 w-4" />
+              New Assistant
+            </Link>
+          ) : (
+            <span
+              title={`${limits.tier} plan limit reached (${limits.assistants.used}/${limits.assistants.limit})`}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-300 text-gray-500 text-sm font-semibold rounded-lg cursor-not-allowed"
+            >
+              <PlusIcon className="h-4 w-4" />
+              Limit Reached
+            </span>
+          )
+        )}
       </div>
 
+      {/* Trial Banner — show for free users who haven't used trial */}
+      {metrics?.trial?.canStartTrial && (
+        <div className="bg-gradient-to-r from-picton-blue/10 via-blue-50 to-indigo-50 rounded-xl border border-picton-blue/20 p-5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-picton-blue/20 flex items-center justify-center flex-shrink-0">
+                <RocketLaunchIcon className="h-5 w-5 text-picton-blue" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Unlock More with a Free Trial</h3>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Try the <strong>Starter plan</strong> free for 14 days — 3 sites, 3 AI widgets, 2,000 messages/month.
+                  No credit card required. Downgrades automatically.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={startTrial}
+              disabled={activatingTrial}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm disabled:opacity-50 whitespace-nowrap"
+            >
+              {activatingTrial ? (
+                <>
+                  <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="m4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                  Activating...
+                </>
+              ) : (
+                <>
+                  <RocketLaunchIcon className="h-4 w-4" />
+                  Start 14-Day Free Trial
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Trial Countdown — show for users currently on trial */}
+      {metrics?.trial?.isOnTrial && (
+        <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-xl border border-amber-200 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <ClockIcon className="h-5 w-5 text-amber-600" />
+              <div>
+                <span className="text-sm font-semibold text-gray-900">
+                  {metrics.trial.packageName || tierLabel} Trial
+                  {metrics.trial.daysRemaining > 0 && ` — ${metrics.trial.daysRemaining} day${metrics.trial.daysRemaining !== 1 ? 's' : ''} remaining`}
+                </span>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {metrics.trial.expiresAt
+                    ? `Expires ${new Date(metrics.trial.expiresAt).toLocaleDateString('en-ZA', { day: 'numeric', month: 'long', year: 'numeric' })}.`
+                    : 'Trial in progress.'}
+                  {' '}Upgrade for full access.
+                </p>
+              </div>
+            </div>
+            <Link
+              to="/portal/settings"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 text-white text-sm font-semibold rounded-lg hover:bg-amber-700 transition-colors whitespace-nowrap"
+            >
+              Upgrade Now
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* ════════ AI Gateway Section ════════ */}
+      {products.api_gateway && gatewaySummary && (
+        <div className="space-y-5">
+          <div className="flex items-center gap-2">
+            <ArrowsRightLeftIcon className="h-5 w-5 text-indigo-500" />
+            <h2 className="text-lg font-semibold text-gray-900">API Gateway</h2>
+            <span className="text-xs font-medium text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+              {gatewaySummary.total_gateways} gateway{gatewaySummary.total_gateways !== 1 ? 's' : ''}
+            </span>
+          </div>
+
+          {gatewaySummary.gateways.map((gw: GatewayInfo) => (
+            <div key={gw.client_id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              {/* Gateway Header */}
+              <div className="flex items-center justify-between p-5 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center">
+                    <SignalIcon className="h-5 w-5 text-indigo-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">{gw.client_name}</h3>
+                    <p className="text-xs text-gray-400 font-mono">{gw.client_id}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <GatewayStatusIcon status={gw.status} />
+                  <span className={`text-xs font-semibold capitalize ${
+                    gw.status === 'active' ? 'text-emerald-600' : gw.status === 'paused' ? 'text-amber-600' : 'text-red-600'
+                  }`}>{gw.status}</span>
+                </div>
+              </div>
+
+              {/* Gateway Stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-slate-100">
+                <div className="bg-white p-4 text-center">
+                  <p className="text-2xl font-bold text-gray-900">{gw.tools_count}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Tools</p>
+                </div>
+                <div className="bg-white p-4 text-center">
+                  <p className="text-2xl font-bold text-gray-900">{gw.total_requests.toLocaleString()}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Total Requests</p>
+                </div>
+                <div className="bg-white p-4 text-center">
+                  <p className="text-2xl font-bold text-gray-900">{gw.rate_limit_rpm}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">RPM Limit</p>
+                </div>
+                <div className="bg-white p-4 text-center">
+                  <p className="text-sm font-medium text-gray-900">
+                    {gw.last_request_at ? new Date(gw.last_request_at).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' }) : '—'}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">Last Request</p>
+                </div>
+              </div>
+
+              {/* Tools List */}
+              {gw.tools.length > 0 && (
+                <div className="p-5 border-t border-slate-100">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Registered Tools</p>
+                  <div className="flex flex-wrap gap-2">
+                    {gw.tools.map((tool) => (
+                      <span key={tool} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-mono">
+                        <CommandLineIcon className="h-3 w-3" />
+                        {tool}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Connection Info */}
+              <div className="p-5 bg-slate-50 border-t border-slate-100">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <span className="font-semibold text-gray-500">Target API:</span>
+                    <span className="ml-2 font-mono text-gray-700">{gw.target_base_url}</span>
+                  </div>
+                  <div>
+                    <span className="font-semibold text-gray-500">Auth:</span>
+                    <span className="ml-2 font-medium text-gray-700 capitalize">{gw.auth_type.replace('_', ' ')}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* Gateway Assistant — show assistant(s) for gateway-only users */}
+          {!products.ai_assistant && assistants.length > 0 && (
+            <div>
+              <div className="flex items-center gap-2 mt-6 mb-3">
+                <SparklesIcon className="h-4 w-4 text-indigo-400" />
+                <h3 className="text-sm font-semibold text-gray-700">Gateway AI Assistant</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {assistants.slice(0, 4).map((a) => (
+                  <div
+                    key={a.id}
+                    className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition-all flex flex-col"
+                  >
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center">
+                        <SparklesIcon className="h-5 w-5 text-indigo-500" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900">{a.name}</h4>
+                        <span className="inline-flex items-center text-xs font-medium text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                          Gateway AI
+                        </span>
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-500 line-clamp-2 mb-3">
+                      {a.description || 'AI-powered gateway assistant'}
+                    </p>
+                    <div className="flex items-center gap-2 mt-auto">
+                      <button
+                        onClick={() => setChatModal(a)}
+                        className="flex-1 text-center text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
+                      >
+                        Test Chat
+                      </button>
+                      <Link
+                        to={`/portal/assistants/${a.id}/edit`}
+                        className="flex-1 text-center text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg transition-colors"
+                      >
+                        Edit
+                      </Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ════════ AI Assistant / Website Section ════════ */}
+      {products.ai_assistant && (<>
       {/* Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
         {/* Assistants */}
@@ -342,51 +493,6 @@ const PortalDashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* Quick Actions */}
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <Link
-            to="/portal/assistants/new"
-            className="group bg-white rounded-xl border-2 border-dashed border-slate-200 hover:border-picton-blue/40 p-6 text-center transition-all hover:shadow-md"
-          >
-            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-picton-blue/10 flex items-center justify-center group-hover:bg-picton-blue/20 transition-colors">
-              <SparklesIcon className="h-6 w-6 text-picton-blue" />
-            </div>
-            <h3 className="text-sm font-semibold text-gray-900">New AI Assistant</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Create a custom chatbot for your business
-            </p>
-          </Link>
-
-          <Link
-            to="/portal/sites/new"
-            className="group bg-white rounded-xl border-2 border-dashed border-slate-200 hover:border-emerald-400/40 p-6 text-center transition-all hover:shadow-md"
-          >
-            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-50 flex items-center justify-center group-hover:bg-emerald-100 transition-colors">
-              <GlobeAltIcon className="h-6 w-6 text-emerald-600" />
-            </div>
-            <h3 className="text-sm font-semibold text-gray-900">Create Landing Page</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Build and deploy a website in minutes
-            </p>
-          </Link>
-
-          <Link
-            to="/portal/assistants"
-            className="group bg-white rounded-xl border-2 border-dashed border-slate-200 hover:border-violet-400/40 p-6 text-center transition-all hover:shadow-md"
-          >
-            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-violet-50 flex items-center justify-center group-hover:bg-violet-100 transition-colors">
-              <RocketLaunchIcon className="h-6 w-6 text-violet-600" />
-            </div>
-            <h3 className="text-sm font-semibold text-gray-900">Train Knowledge Base</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Feed your assistant with website data
-            </p>
-          </Link>
-        </div>
-      </div>
-
       {/* Active Assistants */}
       <div>
         <div className="flex items-center justify-between mb-4">
@@ -408,13 +514,20 @@ const PortalDashboard: React.FC = () => {
             <p className="text-sm text-gray-500 mb-4">
               Create your first AI assistant to start engaging visitors on your website.
             </p>
-            <Link
-              to="/portal/assistants/new"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all"
-            >
-              <PlusIcon className="h-4 w-4" />
-              Create Assistant
-            </Link>
+            {canCreate('assistants') ? (
+              <Link
+                to="/portal/assistants/new"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all"
+              >
+                <PlusIcon className="h-4 w-4" />
+                Create Assistant
+              </Link>
+            ) : (
+              <span className="inline-flex items-center gap-2 px-4 py-2 bg-gray-300 text-gray-500 text-sm font-semibold rounded-lg cursor-not-allowed">
+                <PlusIcon className="h-4 w-4" />
+                Limit Reached
+              </span>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -471,96 +584,14 @@ const PortalDashboard: React.FC = () => {
           </div>
         )}
       </div>
+      </>)}
 
       {/* Chat Modal */}
       {chatModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[80vh] max-h-[700px] border border-slate-200 flex flex-col">
-            {/* Modal Header */}
-            <div className="flex items-center gap-3 p-4 border-b border-slate-100">
-              <div className="w-10 h-10 rounded-xl bg-picton-blue/10 flex items-center justify-center">
-                <SparklesIcon className="h-5 w-5 text-picton-blue" />
-              </div>
-              <div className="flex-1">
-                <h3 className="text-base font-semibold text-gray-900">{chatModal.name}</h3>
-                <p className="text-xs text-gray-400">AI Assistant • Test Chat</p>
-              </div>
-              <button
-                onClick={() => { setChatModal(null); setMessages([]); setChatInput(''); }}
-                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.length === 0 && (
-                <div className="text-center py-12">
-                  <SparklesIcon className="h-12 w-12 text-gray-200 mx-auto mb-3" />
-                  <p className="text-gray-400 text-sm">Send a message to start chatting</p>
-                </div>
-              )}
-
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  {msg.role === 'assistant' && (
-                    <div className="w-8 h-8 rounded-full bg-picton-blue/10 flex items-center justify-center flex-shrink-0">
-                      <SparklesIcon className="h-4 w-4 text-picton-blue" />
-                    </div>
-                  )}
-                  <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                      msg.role === 'user'
-                        ? 'bg-picton-blue text-white rounded-br-md'
-                        : 'bg-gray-100 text-gray-800 rounded-bl-md'
-                    }`}
-                  >
-                    {msg.content || (
-                      <span className="inline-flex gap-1">
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </span>
-                    )}
-                  </div>
-                  {msg.role === 'user' && (
-                    <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
-                      <UserCircleIcon className="h-5 w-5 text-gray-500" />
-                    </div>
-                  )}
-                </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-
-            {/* Input */}
-            <div className="border-t border-slate-100 p-4">
-              <div className="flex items-end gap-3">
-                <textarea
-                  ref={chatInputRef}
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={handleChatKeyDown}
-                  placeholder="Type your message…"
-                  rows={1}
-                  className="flex-1 resize-none px-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:border-picton-blue transition-all"
-                  disabled={streaming}
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={!chatInput.trim() || streaming}
-                  className="p-2.5 bg-picton-blue text-white rounded-xl hover:bg-picton-blue/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                >
-                  <PaperAirplaneIcon className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <AssistantChatModal
+          assistant={{ id: chatModal.id, name: chatModal.name }}
+          onClose={() => setChatModal(null)}
+        />
       )}
     </div>
   );

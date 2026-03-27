@@ -52,10 +52,10 @@ router.post('/url', async (req, res) => {
       return res.status(404).json({ error: 'Widget client not found' });
     }
 
-    if (client.pages_ingested >= 50) {
+    if (client.pages_ingested >= (client.max_pages || 50)) {
       return res.status(429).json({
         error: 'Page limit reached',
-        limit: 50,
+        limit: client.max_pages || 50,
         current: client.pages_ingested
       });
     }
@@ -109,10 +109,10 @@ router.post('/file', upload.single('file'), async (req, res) => {
       return res.status(404).json({ error: 'Widget client not found' });
     }
 
-    if (client.pages_ingested >= 50) {
+    if (client.pages_ingested >= (client.max_pages || 50)) {
       return res.status(429).json({
         error: 'Page limit reached',
-        limit: 50,
+        limit: client.max_pages || 50,
         current: client.pages_ingested
       });
     }

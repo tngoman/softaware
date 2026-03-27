@@ -24,7 +24,7 @@ import {
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
 import api from '../../services/api';
-import type { UpdateClient, ClientStatus } from '../../types/updates';
+import type { UpdateClient, ClientStatus, ClientError } from '../../types/updates';
 
 /* ═══════════════════════════════════════════════════════════════
    Client Monitor — Live view of all connected update clients
@@ -58,8 +58,47 @@ const ClientDetailDrawer: React.FC<{
   onClose: () => void;
   onAction: (id: number, action: string, extra?: any) => void;
 }> = ({ client, onClose, onAction }) => {
+  const [clientErrors, setClientErrors] = useState<ClientError[]>([]);
+  const [loadingErrors, setLoadingErrors] = useState(false);
+  const [showErrors, setShowErrors] = useState(false);
+  const [expandedError, setExpandedError] = useState<number | null>(null);
+
+  // Fetch errors when drawer opens or showErrors is toggled on
+  useEffect(() => {
+    if (!client || !showErrors) return;
+    setLoadingErrors(true);
+    api.get(`/updates/clients/${client.id}/errors`)
+      .then((res) => setClientErrors(res.data.errors || []))
+      .catch(() => setClientErrors([]))
+      .finally(() => setLoadingErrors(false));
+  }, [client?.id, showErrors]);
+
   if (!client) return null;
   const st = STATUS_CONFIG[client.status];
+
+  const handleClearError = async (errorId?: number) => {
+    if (!client) return;
+    try {
+      const url = errorId
+        ? `/updates/clients/${client.id}/errors?error_id=${errorId}`
+        : `/updates/clients/${client.id}/errors`;
+      await api.delete(url);
+      notify.success(errorId ? 'Error cleared' : 'All errors cleared');
+      // Refresh errors list
+      const res = await api.get(`/updates/clients/${client.id}/errors`);
+      setClientErrors(res.data.errors || []);
+      // Trigger parent reload to update error_count
+      onAction(client.id, 'refresh');
+    } catch {
+      notify.error('Failed to clear errors');
+    }
+  };
+
+  const LEVEL_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
+    error:   { bg: 'bg-red-50',    text: 'text-red-700',    dot: 'bg-red-500' },
+    warning: { bg: 'bg-yellow-50', text: 'text-yellow-700', dot: 'bg-yellow-500' },
+    notice:  { bg: 'bg-blue-50',   text: 'text-blue-700',   dot: 'bg-blue-500' },
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
@@ -94,6 +133,11 @@ const ClientDetailDrawer: React.FC<{
                 <NoSymbolIcon className="h-3.5 w-3.5" /> Blocked
               </span>
             )}
+            {client.error_count > 0 && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700">
+                <BugAntIcon className="h-3.5 w-3.5" /> {client.error_count} error{client.error_count !== 1 ? 's' : ''}
+              </span>
+            )}
           </div>
 
           {/* Info grid */}
@@ -104,17 +148,8 @@ const ClientDetailDrawer: React.FC<{
             <InfoRow icon={CpuChipIcon} label="Version" value={client.app_version} />
             <InfoRow icon={ClockIcon} label="Last Heartbeat" value={timeAgo(client.seconds_since_heartbeat, client.last_heartbeat)} />
             <InfoRow icon={ClockIcon} label="First Seen" value={client.first_seen ? new Date(client.first_seen).toLocaleDateString() : '—'} />
-            <InfoRow icon={SignalIcon} label="Active Page" value={client.active_page} />
             <InfoRow icon={CpuChipIcon} label="CPU" value={client.cpu_usage != null ? `${client.cpu_usage}%` : null} />
           </div>
-
-          {client.user_name && (
-            <div className="bg-gray-50 rounded-lg p-3">
-              <p className="text-xs text-gray-500 mb-1">Logged-in User</p>
-              <p className="text-sm font-medium text-gray-900">{client.user_name}</p>
-              {client.user_id && <p className="text-xs text-gray-400 font-mono mt-0.5">{client.user_id}</p>}
-            </div>
-          )}
 
           {client.last_update_version && (
             <div className="bg-blue-50 rounded-lg p-3">
@@ -134,6 +169,120 @@ const ClientDetailDrawer: React.FC<{
               <p className="text-sm text-red-800">{client.blocked_reason}</p>
             </div>
           )}
+
+          {/* ── Client Errors Panel ───────────────────────── */}
+          <div className="border rounded-lg overflow-hidden">
+            <button
+              onClick={() => setShowErrors(!showErrors)}
+              className={`w-full flex items-center justify-between px-4 py-3 text-sm font-medium transition ${
+                client.error_count > 0 ? 'bg-red-50 text-red-800 hover:bg-red-100' : 'bg-gray-50 text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              <span className="flex items-center gap-2">
+                <BugAntIcon className="h-4 w-4" />
+                Client Errors
+                {client.error_count > 0 && (
+                  <span className="inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold rounded-full bg-red-600 text-white">
+                    {client.error_count}
+                  </span>
+                )}
+              </span>
+              <span className="text-xs">{showErrors ? '▲' : '▼'}</span>
+            </button>
+
+            {showErrors && (
+              <div className="border-t">
+                {loadingErrors ? (
+                  <div className="p-4 text-center text-xs text-gray-400">
+                    <ArrowPathIcon className="h-4 w-4 mx-auto animate-spin mb-1" />
+                    Loading errors...
+                  </div>
+                ) : clientErrors.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-gray-400">
+                    <CheckCircleIcon className="h-5 w-5 mx-auto mb-1 text-green-400" />
+                    No active errors
+                  </div>
+                ) : (
+                  <div>
+                    {/* Clear All button */}
+                    <div className="px-3 py-2 bg-gray-50 border-b flex items-center justify-between">
+                      <span className="text-xs text-gray-500">{clientErrors.length} unique error{clientErrors.length !== 1 ? 's' : ''}</span>
+                      <button
+                        onClick={() => handleClearError()}
+                        className="text-xs text-red-600 hover:text-red-800 font-medium flex items-center gap-1"
+                      >
+                        <XMarkIcon className="h-3 w-3" /> Clear All
+                      </button>
+                    </div>
+                    <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+                      {clientErrors.map((err) => {
+                        const lc = LEVEL_COLORS[err.error_level] || LEVEL_COLORS.error;
+                        const isExpanded = expandedError === err.id;
+                        return (
+                          <div key={err.id} className="text-xs">
+                            <div
+                              className={`px-3 py-2.5 cursor-pointer hover:bg-gray-50 transition ${isExpanded ? 'bg-gray-50' : ''}`}
+                              onClick={() => setExpandedError(isExpanded ? null : err.id)}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${lc.bg} ${lc.text}`}>
+                                      <span className={`h-1.5 w-1.5 rounded-full ${lc.dot}`} />
+                                      {err.error_level}
+                                    </span>
+                                    <span className="font-medium text-gray-700 truncate">{err.error_type}</span>
+                                  </div>
+                                  <p className="text-gray-600 truncate">{err.error_message}</p>
+                                  <div className="flex items-center gap-3 mt-1 text-gray-400">
+                                    <span title="Occurrences">×{err.occurrences}</span>
+                                    <span>Last: {new Date(err.last_seen_at).toLocaleString()}</span>
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleClearError(err.id); }}
+                                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded shrink-0"
+                                  title="Clear this error"
+                                >
+                                  <XMarkIcon className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                            {isExpanded && (
+                              <div className="px-3 pb-3 space-y-2 bg-gray-50">
+                                {err.error_file && (
+                                  <div>
+                                    <p className="text-[10px] text-gray-400 uppercase font-medium">File</p>
+                                    <p className="text-gray-700 font-mono">{err.error_file}{err.error_line ? `:${err.error_line}` : ''}</p>
+                                  </div>
+                                )}
+                                <div>
+                                  <p className="text-[10px] text-gray-400 uppercase font-medium">Message</p>
+                                  <p className="text-gray-700 whitespace-pre-wrap break-words">{err.error_message}</p>
+                                </div>
+                                {err.error_trace && (
+                                  <div>
+                                    <p className="text-[10px] text-gray-400 uppercase font-medium">Stack Trace</p>
+                                    <pre className="text-[10px] text-gray-600 bg-gray-900 text-gray-300 rounded p-2 overflow-x-auto max-h-40 whitespace-pre-wrap break-words">
+                                      {err.error_trace}
+                                    </pre>
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-4 text-gray-400">
+                                  <span>First seen: {new Date(err.first_seen_at).toLocaleString()}</span>
+                                  <span>Occurrences: {err.occurrences}</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Client Identifier (mono) */}
           <div className="bg-gray-50 rounded-lg p-3">
@@ -173,6 +322,14 @@ const ClientDetailDrawer: React.FC<{
               color="blue"
               onClick={() => onAction(client.id, 'send_message')}
             />
+            {client.error_count > 0 && (
+              <ActionBtn
+                icon={XMarkIcon}
+                label="Clear All Errors"
+                color="red"
+                onClick={() => handleClearError()}
+              />
+            )}
             <ActionBtn
               icon={TrashIcon}
               label="Delete Client"
@@ -240,6 +397,7 @@ const ClientMonitor: React.FC = () => {
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterSoftware, setFilterSoftware] = useState<string>('all');
+  const [filterErrorsOnly, setFilterErrorsOnly] = useState(false);
   const [selectedClient, setSelectedClient] = useState<UpdateClient | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
@@ -268,13 +426,13 @@ const ClientMonitor: React.FC = () => {
   const filtered = clients.filter((c) => {
     if (filterStatus !== 'all' && c.status !== filterStatus) return false;
     if (filterSoftware !== 'all' && c.software_name !== filterSoftware) return false;
+    if (filterErrorsOnly && c.error_count === 0) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
         (c.hostname || '').toLowerCase().includes(q) ||
         (c.machine_name || '').toLowerCase().includes(q) ||
         (c.ip_address || '').toLowerCase().includes(q) ||
-        (c.user_name || '').toLowerCase().includes(q) ||
         (c.app_version || '').toLowerCase().includes(q) ||
         (c.software_name || '').toLowerCase().includes(q)
       );
@@ -290,11 +448,17 @@ const ClientMonitor: React.FC = () => {
     inactive: clients.filter((c) => c.status === 'inactive').length,
     offline: clients.filter((c) => c.status === 'offline').length,
     blocked: clients.filter((c) => c.is_blocked === 1).length,
+    errors: clients.filter((c) => c.error_count > 0).length,
   };
 
   /* ── Actions ───────────────────────────────────────────── */
   const handleAction = async (id: number, action: string, extra?: any) => {
     try {
+      if (action === 'refresh') {
+        loadClients();
+        return;
+      }
+
       if (action === 'view_errors') {
         const client = clients.find((c) => c.id === id);
         const hostname = client?.hostname || '';
@@ -401,13 +565,14 @@ const ClientMonitor: React.FC = () => {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <SummaryCard label="Total" count={counts.total} color="gray" onClick={() => setFilterStatus('all')} active={filterStatus === 'all'} />
-        <SummaryCard label="Online" count={counts.online} color="green" onClick={() => setFilterStatus('online')} active={filterStatus === 'online'} />
-        <SummaryCard label="Recent" count={counts.recent} color="blue" onClick={() => setFilterStatus('recent')} active={filterStatus === 'recent'} />
-        <SummaryCard label="Inactive" count={counts.inactive} color="yellow" onClick={() => setFilterStatus('inactive')} active={filterStatus === 'inactive'} />
-        <SummaryCard label="Offline" count={counts.offline} color="gray" onClick={() => setFilterStatus('offline')} active={filterStatus === 'offline'} />
-        <SummaryCard label="Blocked" count={counts.blocked} color="red" onClick={() => setFilterStatus('all')} active={false} />
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        <SummaryCard label="Total" count={counts.total} color="gray" onClick={() => { setFilterStatus('all'); setFilterErrorsOnly(false); }} active={filterStatus === 'all' && !filterErrorsOnly} />
+        <SummaryCard label="Online" count={counts.online} color="green" onClick={() => { setFilterStatus('online'); setFilterErrorsOnly(false); }} active={filterStatus === 'online'} />
+        <SummaryCard label="Recent" count={counts.recent} color="blue" onClick={() => { setFilterStatus('recent'); setFilterErrorsOnly(false); }} active={filterStatus === 'recent'} />
+        <SummaryCard label="Inactive" count={counts.inactive} color="yellow" onClick={() => { setFilterStatus('inactive'); setFilterErrorsOnly(false); }} active={filterStatus === 'inactive'} />
+        <SummaryCard label="Offline" count={counts.offline} color="gray" onClick={() => { setFilterStatus('offline'); setFilterErrorsOnly(false); }} active={filterStatus === 'offline'} />
+        <SummaryCard label="Blocked" count={counts.blocked} color="red" onClick={() => { setFilterStatus('all'); setFilterErrorsOnly(false); }} active={false} />
+        <SummaryCard label="Has Errors" count={counts.errors} color="red" onClick={() => { setFilterErrorsOnly(!filterErrorsOnly); setFilterStatus('all'); }} active={filterErrorsOnly} />
       </div>
 
       {/* Search + Filters */}
@@ -455,7 +620,6 @@ const ClientMonitor: React.FC = () => {
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Client</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Software</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Version</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Heartbeat</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP / Activity</th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -480,6 +644,12 @@ const ClientMonitor: React.FC = () => {
                             <NoSymbolIcon className="h-3 w-3" />
                           </span>
                         )}
+                        {client.error_count > 0 && (
+                          <span className="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs rounded-full bg-red-100 text-red-600" title={`${client.error_count} active error${client.error_count !== 1 ? 's' : ''}`}>
+                            <BugAntIcon className="h-3 w-3" />
+                            <span className="font-medium">{client.error_count}</span>
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <p className="text-sm font-medium text-gray-900">{client.hostname || client.machine_name || '—'}</p>
@@ -487,11 +657,9 @@ const ClientMonitor: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-700">{client.software_name || '—'}</td>
                       <td className="px-4 py-3 text-sm text-gray-700 font-mono">{client.app_version || '—'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{client.user_name || '—'}</td>
                       <td className="px-4 py-3 text-sm text-gray-500">{timeAgo(client.seconds_since_heartbeat, client.last_heartbeat)}</td>
                       <td className="px-4 py-3 text-sm text-gray-500 font-mono">
                         <div>{client.ip_address || '—'}</div>
-                        {client.active_page && <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[180px]" title={client.active_page}>{client.active_page}</div>}
                       </td>
                       <td className="px-4 py-3 text-center">
                         <button

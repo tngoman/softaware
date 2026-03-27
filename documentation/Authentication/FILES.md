@@ -1,7 +1,7 @@
 # Authentication Module - File Inventory
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -9,16 +9,16 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total files** | 20 |
-| **Total LOC** | ~6,370 |
-| **Backend files** | 6 (~2,300 LOC) |
-| **Frontend files** | 14 (~4,070 LOC) |
+| **Total files** | 21 |
+| **Total LOC** | ~6,890 |
+| **Backend files** | 6 (~2,600 LOC) |
+| **Frontend files** | 15 (~4,290 LOC) |
 
 ### Directory Tree
 
 ```
 Backend:
-  src/routes/auth.ts                       (1253 LOC) — core auth + PIN quick login (v1.9.0)
+  src/routes/auth.ts                       (1563 LOC) — core auth + PIN quick login (v1.9.0) + Google OAuth2 (v2.0.0)
   src/routes/twoFactor.ts                  (1304 LOC) — multi-method 2FA + push-to-approve + alt methods
   src/routes/email.ts                      (178 LOC) — email endpoints
   src/services/emailService.ts             (256 LOC) — centralized email transport
@@ -26,13 +26,14 @@ Backend:
   src/middleware/requireAdmin.ts           (55 LOC)
 
 Frontend:
-  src/pages/public/AuthPage.tsx            (1047 LOC) — login/register + 2FA verify + push-to-approve + PIN login + alt methods
-  src/pages/auth/Login.tsx                 (570 LOC) — legacy login + 2FA verify + alt methods
+  src/pages/public/AuthPage.tsx            (1130 LOC) — login/register + 2FA verify + push-to-approve + PIN login + Google SSO + alt methods
+  src/pages/public/OAuthCallback.tsx       (107 LOC) — Google OAuth redirect handler (v2.0.0)
+  src/pages/auth/Login.tsx                 (613 LOC) — legacy login + 2FA verify + Google SSO + alt methods
   src/pages/public/LoginPage.tsx           (475 LOC) — public login + 2FA verify + alt methods
   src/pages/ForgotPassword.tsx             (302 LOC)
   src/pages/admin/ClientManager.tsx         (~40 LOC masquerade handler)
   src/hooks/useAuth.ts                     (43 LOC)
-  src/models/AuthModel.ts                  (464 LOC) — auth + 2FA + push + mobile QR + PIN API methods
+  src/models/AuthModel.ts                  (490 LOC) — auth + 2FA + push + mobile QR + PIN + Google OAuth API methods
   src/components/TwoFactorSetup.tsx        (503 LOC) — reusable 2FA management + auto-verify
   src/components/PinSetup.tsx              (308 LOC) — PIN setup/change/remove component (v1.9.0)
   src/components/MobileAuthQR.tsx          (208 LOC) — mobile QR auth + short codes (always visible)
@@ -53,9 +54,9 @@ Frontend:
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/backend/src/routes/auth.ts` |
-| **LOC** | 1253 |
-| **Purpose** | Registration, login (with multi-method 2FA gate + push-to-approve challenge creation), PIN-based quick login (v1.9.0), token refresh, user profile resolution, permissions, masquerade exit |
-| **Dependencies** | bcryptjs, jsonwebtoken, zod, db/mysql, middleware/auth, config/env, utils/httpErrors, twoFactor.ts (createPushChallenge) |
+| **LOC** | 1563 |
+| **Purpose** | Registration, login (with multi-method 2FA gate + push-to-approve challenge creation), PIN-based quick login (v1.9.0), Google OAuth2 SSO (v2.0.0), token refresh, user profile resolution, permissions, masquerade exit |
+| **Dependencies** | bcryptjs, jsonwebtoken, zod, google-auth-library (OAuth2Client), db/mysql, middleware/auth, config/env, utils/httpErrors, twoFactor.ts (createPushChallenge) |
 | **Exports** | `authRouter`, `buildFrontendUser` |
 
 #### Methods / Functions
@@ -65,6 +66,7 @@ Frontend:
 | `buildFrontendUser(userId)` | `userId: string` | Frontend user object or null | Resolves user (with `is_admin`/`is_staff` from `users` table columns) → user_roles → role → permissions into frontend-compatible shape. No team dependency. Admin/staff status read directly from DB columns (v1.6.0+). | `SELECT id, email, name, ..., is_admin, is_staff FROM users`, `SELECT FROM user_roles JOIN roles`, `SELECT FROM role_permissions JOIN permissions` |
 | `generateActivationKey(email)` | `email: string` | `string` (e.g., `USER-A3F1B2C8D4E5F6A7`) | SHA-256 hash of email + timestamp, truncated to 16 hex chars | — |
 | `ensurePinTable()` | — | `void` | (v1.9.0) Creates `user_pins` table if it doesn't exist. Uses explicit `utf8mb4_unicode_ci` collation on `user_id` for FK compatibility with `users.id`. Called on module load. | `CREATE TABLE IF NOT EXISTS user_pins (...)` |
+| `ensureOAuthColumns()` | — | `void` | (v2.0.0) Adds `oauth_provider VARCHAR(20)` + `oauth_provider_id VARCHAR(255)` columns and `idx_oauth` composite index to `users` table if missing. Called on module load. | `SHOW COLUMNS FROM users LIKE 'oauth_provider'`, `ALTER TABLE users ADD COLUMN ...` ×2, `ALTER TABLE users ADD INDEX ...` |
 
 #### Endpoints
 
@@ -82,6 +84,9 @@ Frontend:
 | DELETE | /auth/pin | requireAuth | ~L1070-1078 |
 | POST | /auth/pin/verify | None | ~L1080-1230 |
 | GET | /auth/pin/check/:email | None | ~L1232-1253 |
+| GET | /auth/google | None | ~L1306-1325 |
+| GET | /auth/google/callback | None | ~L1326-1450 |
+| POST | /auth/google/token | None | ~L1452-1563 |
 
 #### Code Excerpt — buildFrontendUser
 
@@ -334,9 +339,9 @@ const config = JSON.parse(decrypted);
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/public/AuthPage.tsx` |
-| **LOC** | 1047 |
+| **LOC** | 1130 |
 | **Route** | `/login`, `/register` |
-| **Purpose** | Unified tabbed login/registration page with email auto-append, multi-method 2FA verification, push-to-approve polling (v1.8.0), alternative auth method fallback (v1.8.0), PIN quick login for returning users (v1.9.0) |
+| **Purpose** | Unified tabbed login/registration page with email auto-append, multi-method 2FA verification, push-to-approve polling (v1.8.0), alternative auth method fallback (v1.8.0), PIN quick login for returning users (v1.9.0), Google OAuth2 SSO (v2.0.0) |
 | **Dependencies** | react-router-dom, AuthModel, useAppStore, useAppSettings, sweetalert2 |
 | **Component** | `AuthPage` (React.FC, default export) |
 
@@ -354,6 +359,7 @@ const config = JSON.parse(decrypted);
 | **Push-to-approve** | (v1.8.0) If `challenge_id` returned, polls `POST /auth/2fa/push-status` every 3 seconds. Shows waiting/denied/expired UI. Auto-completes login on approval. |
 | **Alternative methods** | (v1.8.0) On push or manual code screens, shows buttons for the other 2 methods (e.g., "Use Email Instead", "Use SMS Instead"). Calls `AuthModel.sendAltOtp()`. |
 | **PIN login** | (v1.9.0) Detects returning user via `AuthModel.getLastEmail()`. If email has PIN (`checkPinByEmail`), shows PIN pad (4 digit inputs, auto-submit on 4th digit). "Use password instead" and "Not you?" links. Calls `AuthModel.loginWithPin()`. |
+| **Google SSO** | (v2.0.0) "Continue with Google" button below both login and register forms with "or continue with" / "or sign up with" dividers. Calls `AuthModel.getGoogleAuthUrl()` → redirects browser to Google consent screen. `googleLoading` state disables button during redirect. |
 | **2FA resend** | For email/SMS, "Resend verification code" button calls `AuthModel.resend2FAOtp()` |
 | Error display | Inline red error box |
 | Registration | Name + email + password + confirm → `AuthModel.register()` → confirmation screen |
@@ -381,9 +387,9 @@ const [sendingAltOtp, setSendingAltOtp] = useState(false);
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/auth/Login.tsx` |
-| **LOC** | 570 |
+| **LOC** | 613 |
 | **Route** | `/billing-login` |
-| **Purpose** | Legacy login form with email auto-append, branding, redirect if authenticated, multi-method 2FA verification step, push-to-approve polling, alternative auth method fallback (v1.8.0) |
+| **Purpose** | Legacy login form with email auto-append, branding, redirect if authenticated, multi-method 2FA verification step, push-to-approve polling, alternative auth method fallback (v1.8.0), Google OAuth2 SSO (v2.0.0) |
 | **Dependencies** | react-router-dom, AuthModel, AppSettingsModel, useAppStore, sweetalert2 |
 | **Component** | `Login` (React.FC, default export) |
 
@@ -399,6 +405,7 @@ const [sendingAltOtp, setSendingAltOtp] = useState(false);
 | Login flow | Calls `AuthModel.login(finalEmail, password)` → stores token → fetches permissions → navigates |
 | **2FA step** | If `requires_2fa` returned, shows verification UI based on `two_factor_method` (totp/email/sms) |
 | **2FA resend** | For email/SMS, "Resend verification code" button calls `AuthModel.resend2FAOtp()` |
+| **Google SSO** | (v2.0.0) "Continue with Google" button with divider below the Sign In button. Calls `AuthModel.getGoogleAuthUrl()` → redirects to Google consent. `googleLoading` state disables button during redirect. |
 | Error display | SweetAlert2 popup with API error message |
 | Loading state | Disables inputs, shows spinner during login |
 
@@ -450,6 +457,41 @@ Same as Login.tsx — email auto-append, push-to-approve polling, alternative me
 
 ---
 
+### 3.4b `src/pages/public/OAuthCallback.tsx` — Google OAuth Redirect Handler (v2.0.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/pages/public/OAuthCallback.tsx` |
+| **LOC** | 107 |
+| **Route** | `/auth/oauth-callback` |
+| **Purpose** | Handles the redirect from Google OAuth callback. Processes the JWT token from URL, fetches user profile, sets Zustand store state, and navigates to `/dashboard`. |
+| **Dependencies** | react-router-dom, AuthModel, useAppStore |
+| **Component** | `OAuthCallback` (React.FC, default export) |
+| **Added in** | v2.0.0 |
+
+#### Logic
+
+```
+1. Read ?token= from URL search params
+2. If no token → show error screen with "Back to Sign In" button
+3. Store token in localStorage
+4. Call AuthModel.me() to fetch user profile from backend
+5. Call AuthModel.getUserPermissions() to fetch permissions
+6. Set user + permissions in Zustand store
+7. Store email as last_login_email for returning user detection
+8. Navigate to /dashboard (replace: true)
+9. On any error → clear localStorage, show "Sign-in Failed" error screen
+```
+
+#### UI States
+
+| State | Display |
+|-------|---------|
+| Loading | White card with spinning loader, "Completing Sign-In" heading |
+| Error | White card with red error icon, error message, "Back to Sign In" button |
+
+---
+
 ### 3.5 `src/hooks/useAuth.ts` — Auth Initialization Hook
 
 | Property | Value |
@@ -477,8 +519,8 @@ Same as Login.tsx — email auto-append, push-to-approve polling, alternative me
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/models/AuthModel.ts` |
-| **LOC** | 464 |
-| **Purpose** | Static class wrapping all auth, 2FA, push-to-approve, mobile QR, alternative auth, PIN quick login, and masquerade API calls plus localStorage management |
+| **LOC** | 490 |
+| **Purpose** | Static class wrapping all auth, 2FA, push-to-approve, mobile QR, alternative auth, PIN quick login, Google OAuth, and masquerade API calls plus localStorage management |
 | **Dependencies** | services/api.ts (Axios), types/User |
 | **Exports** | `AuthModel` (class), `TwoFactorStatus` (interface), `TwoFactorSetupResult` (interface) |
 
@@ -525,6 +567,13 @@ Same as Login.tsx — email auto-append, push-to-approve polling, alternative me
 | `loginWithPin(email, pin)` | POST | /auth/pin/verify | Login with email + PIN → JWT or 2FA |
 | `setLastEmail(email)` | — | — | Store email in localStorage for returning user detection |
 | `getLastEmail()` | — | — | Get stored email from localStorage |
+
+#### Google OAuth Methods (v2.0.0)
+
+| Method | HTTP | Path | Description |
+|--------|------|------|-------------|
+| `getGoogleAuthUrl()` | GET | /auth/google | Returns Google consent URL; frontend redirects browser to it |
+| `loginWithGoogleToken(idToken)` | POST | /auth/google/token | Verify Google ID token for mobile/SPA flow; returns JWT + user |
 
 #### Masquerade Methods
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { AuthModel } from '../../models';
 import { useAppSettings } from '../../hooks/useAppSettings';
 import { notify } from '../../utils/notify';
@@ -11,6 +11,8 @@ import { notify } from '../../utils/notify';
  */
 const RegisterPage: React.FC = () => {
   const { logoUrl, siteName } = useAppSettings();
+  const [searchParams] = useSearchParams();
+  const wantsTrial = searchParams.get('trial') === 'true';
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -54,6 +56,7 @@ const RegisterPage: React.FC = () => {
         name: formData.name,
         email: formData.email,
         password: formData.password,
+        trial: wantsTrial || undefined,
       });
 
       if (response.success) {
@@ -153,8 +156,22 @@ const RegisterPage: React.FC = () => {
               <img src={logoUrl} alt={siteName} className="h-9 w-auto" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
             )}
           </Link>
-          <h1 className="text-3xl font-bold text-gray-900 mt-6 mb-2">Create Your Account</h1>
-          <p className="text-gray-500">Join thousands getting their business online in minutes</p>
+          <h1 className="text-3xl font-bold text-gray-900 mt-6 mb-2">
+            {wantsTrial ? 'Start Your 14-Day Free Trial' : 'Create Your Account'}
+          </h1>
+          <p className="text-gray-500">
+            {wantsTrial
+              ? 'Get full Starter plan access — 3 sites, 3 AI widgets, 2,000 messages/month. No credit card required.'
+              : 'Join thousands getting their business online in minutes'}
+          </p>
+          {wantsTrial && (
+            <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-picton-blue/10 border border-picton-blue/20 text-sm text-picton-blue font-medium">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              14 days free • Downgrades to Free automatically
+            </div>
+          )}
         </div>
 
         {/* Card */}
@@ -250,7 +267,7 @@ const RegisterPage: React.FC = () => {
                   Creating account...
                 </span>
               ) : (
-                'Create Account'
+                wantsTrial ? 'Start Free Trial' : 'Create Account'
               )}
             </button>
 

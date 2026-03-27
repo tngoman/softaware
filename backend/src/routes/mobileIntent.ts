@@ -15,11 +15,13 @@
 import { Router } from 'express';
 import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { processMobileIntent, resolveUserRole, type MobileIntentRequest } from '../services/mobileAIProcessor.js';
+import { getConfigsByContactId } from '../services/clientApiGateway.js';
 import { HttpError, unauthorized, badRequest, notFound, forbidden } from '../utils/httpErrors.js';
 import { db } from '../db/mysql.js';
 import { getSecret } from '../services/credentialVault.js';
 import { env } from '../config/env.js';
 import { stripMarkdownForSpeech } from '../utils/stripMarkdown.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 
 const router = Router();
 
@@ -139,6 +141,72 @@ router.get('/assistants', requireAuth, async (req: AuthRequest, res) => {
       res.status(err.status).json({ success: false, error: err.message });
     } else {
       console.error('[MobileIntent] Assistants list error:', err);
+      res.status(500).json({ success: false, error: 'Internal server error.' });
+    }
+  }
+});
+
+// ============================================================================
+// GET /gateway-context — Detect if user is a gateway client
+// ============================================================================
+
+router.get('/gateway-context', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) throw unauthorized('Authentication required.');
+
+    // Look up contact_id for this user
+    const userRow = await db.queryOne<{ contact_id: number | null }>(
+      'SELECT contact_id FROM users WHERE id = ?',
+      [userId],
+    );
+
+    if (!userRow?.contact_id) {
+      return res.json({
+        success: true,
+        is_gateway: false,
+        gateways: [],
+      });
+    }
+
+    // Check for gateway configs
+    const gwConfigs = getConfigsByContactId(userRow.contact_id);
+
+    if (gwConfigs.length === 0) {
+      return res.json({
+        success: true,
+        is_gateway: false,
+        gateways: [],
+      });
+    }
+
+    // Build the response with gateway info
+    const gateways = gwConfigs.map(gc => {
+      let tools: string[] = [];
+      try { tools = JSON.parse(gc.allowed_actions || '[]'); } catch {}
+      return {
+        client_id: gc.client_id,
+        client_name: gc.client_name,
+        status: gc.status,
+        tool_count: tools.length,
+        tools,
+        api_url: gc.target_base_url,
+        auth_type: gc.auth_type,
+        total_requests: gc.total_requests || 0,
+        last_request_at: gc.last_request_at,
+      };
+    });
+
+    res.json({
+      success: true,
+      is_gateway: true,
+      gateways,
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ success: false, error: err.message });
+    } else {
+      console.error('[MobileIntent] Gateway context error:', err);
       res.status(500).json({ success: false, error: 'Internal server error.' });
     }
   }
@@ -276,7 +344,18 @@ router.post('/tts', requireAuth, async (req: AuthRequest, res) => {
 
     // Allowed voices: alloy, echo, fable, onyx, nova, shimmer
     const validVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
-    const selectedVoice = validVoices.includes(voice || '') ? voice! : 'nova';
+
+    // Resolve voice: explicit param → user's saved preference → default 'nova'
+    let resolvedVoice = voice;
+    if (!validVoices.includes(resolvedVoice || '')) {
+      // Look up user's saved tts_voice from their staff assistant
+      const pref = await db.queryOne<{ tts_voice: string | null }>(
+        'SELECT tts_voice FROM assistants WHERE userId = ? AND is_staff_agent = 1 LIMIT 1',
+        [userId],
+      );
+      resolvedVoice = pref?.tts_voice || undefined;
+    }
+    const selectedVoice = validVoices.includes(resolvedVoice || '') ? resolvedVoice! : 'nova';
 
     const openaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
@@ -299,6 +378,11 @@ router.post('/tts', requireAuth, async (req: AuthRequest, res) => {
       res.status(502).json({ success: false, error: 'TTS generation failed.' });
       return;
     }
+
+    // Log TTS telemetry (fire-and-forget)
+    logAnonymizedChat('tts', cleanText.slice(0, 200), '[audio/mpeg]', {
+      source: 'mobile-tts', model: 'tts-1', provider: 'openai',
+    });
 
     // Stream audio back to client
     res.setHeader('Content-Type', 'audio/mpeg');
@@ -333,6 +417,90 @@ router.post('/tts', requireAuth, async (req: AuthRequest, res) => {
       res.status(err.status).json({ success: false, error: err.message });
     } else {
       console.error('[TTS] Error:', err);
+      res.status(500).json({ success: false, error: 'Internal server error.' });
+    }
+  }
+});
+
+// ============================================================================
+// POST /tts/preview — Short voice sample for the voice picker UI
+// ============================================================================
+
+router.post('/tts/preview', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) throw unauthorized('Authentication required.');
+
+    const { voice } = req.body as { voice?: string };
+    const validVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+    if (!voice || !validVoices.includes(voice)) {
+      throw badRequest('A valid voice name is required (alloy, echo, fable, onyx, nova, shimmer).');
+    }
+
+    const apiKey = await getSecret('OpenAI', env.OPENAI || env.OPENAI_API_KEY);
+    if (!apiKey) {
+      throw badRequest('TTS service not configured.');
+    }
+
+    // Short preview sentence so the user can hear the voice character
+    const previewText = 'Hi there! This is what I sound like. I can read your messages, summarise tasks, and keep you updated throughout the day.';
+
+    const openaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'tts-1',
+        input: previewText,
+        voice,
+        response_format: 'mp3',
+        speed: 1.0,
+      }),
+    });
+
+    if (!openaiRes.ok) {
+      const errText = await openaiRes.text().catch(() => 'Unknown error');
+      console.error(`[TTS Preview] OpenAI error ${openaiRes.status}:`, errText);
+      res.status(502).json({ success: false, error: 'Voice preview failed.' });
+      return;
+    }
+
+    // Log TTS preview telemetry (fire-and-forget)
+    logAnonymizedChat('tts-preview', '[voice preview]', '[audio/mpeg]', {
+      source: 'tts-preview', model: 'tts-1', provider: 'openai',
+    });
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400'); // cache previews for 24h
+
+    const reader = openaiRes.body as any;
+    if (reader && typeof reader.pipe === 'function') {
+      reader.pipe(res);
+    } else if (reader && typeof reader.getReader === 'function') {
+      const webReader = reader.getReader();
+      const pump = async () => {
+        while (true) {
+          const { done, value } = await webReader.read();
+          if (done) { res.end(); return; }
+          res.write(value);
+        }
+      };
+      pump().catch(err => {
+        console.error('[TTS Preview] Stream error:', err);
+        if (!res.headersSent) res.status(500).end();
+        else res.end();
+      });
+    } else {
+      const buf = Buffer.from(await openaiRes.arrayBuffer());
+      res.send(buf);
+    }
+  } catch (err) {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ success: false, error: err.message });
+    } else {
+      console.error('[TTS Preview] Error:', err);
       res.status(500).json({ success: false, error: 'Internal server error.' });
     }
   }

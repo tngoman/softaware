@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import crypto from 'crypto';
 
-import { prisma } from '../db/prisma.js';
+import { db } from '../db/mysql.js';
 
 export const activationRouter = Router();
 
@@ -38,7 +39,7 @@ function entitlementsForTier(tier: 'Personal' | 'Team' | 'Enterprise') {
   }
 }
 
-function prismaTier(tier: 'Personal' | 'Team' | 'Enterprise') {
+function toDbTier(tier: 'Personal' | 'Team' | 'Enterprise') {
   switch (tier) {
     case 'Team':
       return 'TEAM' as const;
@@ -49,25 +50,52 @@ function prismaTier(tier: 'Personal' | 'Team' | 'Enterprise') {
   }
 }
 
+/** MySQL-compatible upsert for device_activations */
+async function upsertDeviceActivation(data: {
+  deviceId: string;
+  appVersion: string;
+  isActive: boolean;
+  tier: 'PERSONAL' | 'TEAM' | 'ENTERPRISE';
+  activationKeyId?: string | null;
+  userId?: string | null;
+}) {
+  const existing = await db.queryOne(
+    'SELECT id FROM device_activations WHERE deviceId = ?',
+    [data.deviceId]
+  );
+  const now = new Date();
+
+  if (existing) {
+    await db.execute(
+      `UPDATE device_activations
+          SET appVersion = ?, isActive = ?, tier = ?,
+              activationKeyId = ?, userId = ?, lastSeenAt = ?
+        WHERE id = ?`,
+      [data.appVersion, data.isActive ? 1 : 0, data.tier,
+       data.activationKeyId ?? null, data.userId ?? null, now,
+       existing.id]
+    );
+  } else {
+    const id = crypto.randomUUID();
+    await db.execute(
+      `INSERT INTO device_activations
+          (id, deviceId, appVersion, isActive, tier, activationKeyId, userId, lastSeenAt, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, data.deviceId, data.appVersion, data.isActive ? 1 : 0, data.tier,
+       data.activationKeyId ?? null, data.userId ?? null, now, now]
+    );
+  }
+}
+
 async function resolveActivation(input: z.infer<typeof CheckSchema>) {
   // Offline mode => treat as Personal inactive.
   if (input.offlineMode) {
-    await prisma.deviceActivation.upsert({
-      where: { deviceId: input.deviceId },
-      create: {
-        deviceId: input.deviceId,
-        appVersion: input.appVersion,
-        isActive: false,
-        tier: 'PERSONAL',
-        lastSeenAt: new Date(),
-      },
-      update: {
-        appVersion: input.appVersion,
-        isActive: false,
-        tier: 'PERSONAL',
-        lastSeenAt: new Date(),
-        activationKeyId: null,
-      },
+    await upsertDeviceActivation({
+      deviceId: input.deviceId,
+      appVersion: input.appVersion,
+      isActive: false,
+      tier: 'PERSONAL',
+      activationKeyId: null,
     });
 
     const ent = entitlementsForTier('Personal');
@@ -91,10 +119,10 @@ async function resolveActivation(input: z.infer<typeof CheckSchema>) {
   let userId: string | null = null;
   const activationKey = input.activationKey?.trim();
   if (activationKey) {
-    const key = await prisma.activationKey.findUnique({ 
-      where: { code: activationKey },
-      include: { createdByUser: true }
-    });
+    const key: any = await db.queryOne(
+      'SELECT * FROM activation_keys WHERE code = ? LIMIT 1',
+      [activationKey]
+    );
     if (key && key.isActive) {
       isActive = true;
       activationKeyId = key.id;
@@ -121,7 +149,10 @@ async function resolveActivation(input: z.infer<typeof CheckSchema>) {
   let maxUsers = defaultEnt.maxUsers;
 
   if (activationKeyId) {
-    const key = await prisma.activationKey.findUnique({ where: { id: activationKeyId } });
+    const key: any = await db.queryOne(
+      'SELECT * FROM activation_keys WHERE id = ? LIMIT 1',
+      [activationKeyId]
+    );
     if (key) {
       cloudSyncAllowed = key.cloudSyncAllowed;
       vaultAllowed = key.vaultAllowed;
@@ -130,25 +161,13 @@ async function resolveActivation(input: z.infer<typeof CheckSchema>) {
     }
   }
 
-  await prisma.deviceActivation.upsert({
-    where: { deviceId: input.deviceId },
-    create: {
-      deviceId: input.deviceId,
-      appVersion: input.appVersion,
-      isActive,
-      tier: prismaTier(resolvedTier),
-      activationKeyId,
-      userId,
-      lastSeenAt: new Date(),
-    },
-    update: {
-      appVersion: input.appVersion,
-      isActive,
-      tier: prismaTier(resolvedTier),
-      activationKeyId,
-      userId,
-      lastSeenAt: new Date(),
-    },
+  await upsertDeviceActivation({
+    deviceId: input.deviceId,
+    appVersion: input.appVersion,
+    isActive,
+    tier: toDbTier(resolvedTier),
+    activationKeyId,
+    userId,
   });
 
   return {

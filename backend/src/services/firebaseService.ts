@@ -113,6 +113,14 @@ export async function sendPushToUser(userId: string, payload: PushPayload): Prom
 
   const tokens = devices.map((d) => d.token);
 
+  // Merge title/body into data so mobile apps always receive them,
+  // even when the OS suppresses the notification display (background/killed).
+  const dataPayload: Record<string, string> = {
+    ...(payload.data || {}),
+    title: payload.title,
+    body: payload.body,
+  };
+
   const message: admin.messaging.MulticastMessage = {
     tokens,
     notification: {
@@ -120,21 +128,29 @@ export async function sendPushToUser(userId: string, payload: PushPayload): Prom
       body: payload.body,
       ...(payload.imageUrl ? { imageUrl: payload.imageUrl } : {}),
     },
-    data: payload.data || {},
+    data: dataPayload,
     // Android-specific
     android: {
       priority: 'high',
       notification: {
-        channelId: 'softaware_default',
-        sound: 'default',
+        channelId: payload.data?.type?.startsWith('chat_') || payload.data?.type === 'incoming_call'
+          ? 'softaware_chat'
+          : 'softaware_default',
+        sound: payload.data?.sound || 'default',
+        defaultVibrateTimings: true,
       },
     },
     // iOS-specific
     apns: {
+      headers: {
+        'apns-priority': '10',  // immediate delivery
+      },
       payload: {
         aps: {
           sound: 'default',
-          badge: 1,
+          badge: payload.data?.badge ? Number(payload.data.badge) : 1,
+          'content-available': 1,   // wake app in background for silent processing
+          'mutable-content': 1,     // allow notification service extension to modify
         },
       },
     },

@@ -118,6 +118,19 @@ const EnvSchema = z.object({
 
   // Two-Factor Authentication
   TWO_FACTOR_APP_NAME: z.string().default('SoftAware'),
+
+  // Google OAuth2
+  GOOGLE_CLIENT_ID: z.string().default(''),
+  GOOGLE_CLIENT_SECRET: z.string().default(''),
+  GOOGLE_CALLBACK_URL: z.string().default('/api/v1/auth/google/callback'),
+
+  // Stripe — DEPRECATED (gateway is Yoco). Keys kept to avoid env parse errors on legacy .env files.
+  STRIPE_SECRET_KEY: z.string().default(''),
+  STRIPE_WEBHOOK_SECRET: z.string().default(''),
+  STRIPE_PUBLISHABLE_KEY: z.string().default(''),
+
+  // Yoco Payments (credentials via vault; these are optional env fallbacks)
+  YOCO_WEBHOOK_ENDPOINT_URL: z.string().default('https://api.softaware.net.za/v1/webhooks/yoco'),
 });
 
 export const env = EnvSchema.parse(process.env);

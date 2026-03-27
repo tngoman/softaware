@@ -15,8 +15,27 @@ import type { UpdSoftware } from '../db/updatesTypes.js';
 import { requireAuth, getAuth } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
+import fs from 'fs';
+import path from 'path';
 
 export const updSoftwareRouter = Router();
+
+// ─── GET ─ list codebases ─────────────────────────────────────────
+updSoftwareRouter.get('/codebases', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const codeDir = '/var/www/code';
+    if (!fs.existsSync(codeDir)) {
+      return res.json({ success: true, codebases: [] });
+    }
+    const entries = fs.readdirSync(codeDir, { withFileTypes: true });
+    const codebases = entries
+      .filter(dirent => dirent.isDirectory())
+      .map(dirent => path.join(codeDir, dirent.name));
+    res.json({ success: true, codebases });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ─── GET ─ list / single ───────────────────────────────────────────
 updSoftwareRouter.get('/', async (req, res, next) => {
@@ -80,6 +99,7 @@ updSoftwareRouter.post('/', requireAuth, requireAdmin, async (req, res, next) =>
       external_test_url: z.string().optional(),
       external_mode: z.enum(['test', 'live']).optional(),
       external_integration_notes: z.string().optional(),
+      linked_codebase: z.string().optional(),
     }).parse(req.body);
 
     // Check for duplicate key
@@ -92,8 +112,8 @@ updSoftwareRouter.post('/', requireAuth, requireAdmin, async (req, res, next) =>
     const result = await db.insert(
       `INSERT INTO update_software (name, description, software_key, created_by,
         has_external_integration, external_username, external_password,
-        external_live_url, external_test_url, external_mode, external_integration_notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        external_live_url, external_test_url, external_mode, external_integration_notes, linked_codebase)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         body.name,
         body.description || null,
@@ -106,6 +126,7 @@ updSoftwareRouter.post('/', requireAuth, requireAdmin, async (req, res, next) =>
         body.external_test_url || null,
         body.external_mode || 'test',
         body.external_integration_notes || null,
+        body.linked_codebase || null,
       ]
     );
 
@@ -135,6 +156,7 @@ updSoftwareRouter.put('/', requireAuth, requireAdmin, async (req, res, next) => 
       external_test_url: z.string().optional(),
       external_mode: z.enum(['test', 'live']).optional(),
       external_integration_notes: z.string().optional(),
+      linked_codebase: z.string().optional(),
     }).parse(req.body);
 
     const existing = await db.queryOne<UpdSoftware>('SELECT id FROM update_software WHERE id = ?', [body.id]);
@@ -166,6 +188,7 @@ updSoftwareRouter.put('/', requireAuth, requireAdmin, async (req, res, next) => 
     add('external_test_url', body.external_test_url);
     add('external_mode', body.external_mode);
     add('external_integration_notes', body.external_integration_notes);
+    add('linked_codebase', body.linked_codebase);
 
     if (fields.length === 0) throw badRequest('No fields to update');
 

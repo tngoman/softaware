@@ -1,7 +1,7 @@
 # Authentication Module - Database Schema
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -36,11 +36,13 @@
 | isActive | TINYINT(1) | NOT NULL, DEFAULT 1 | Whether account is active |
 | is_admin | TINYINT(1) | NOT NULL, DEFAULT 0 | **Direct admin flag.** `1` = administrator. Checked by `requireAdmin` middleware and all admin-gated operations. Source of truth for admin status (v1.6.0+). |
 | is_staff | TINYINT(1) | NOT NULL, DEFAULT 0 | **Direct staff flag.** `1` = staff member (developer, client manager, QA, deployer). Checked by `requireDeveloper` middleware. Source of truth for staff status (v1.6.0+). |
+| oauth_provider | VARCHAR(20) | NULL | **(v2.0.0)** OAuth provider name (e.g., `'google'`). NULL for password-only accounts. Auto-added by `ensureOAuthColumns()`. |
+| oauth_provider_id | VARCHAR(255) | NULL | **(v2.0.0)** Provider-specific user ID (Google `sub` claim). NULL for password-only accounts. Auto-added by `ensureOAuthColumns()`. |
 | account_status | ENUM('active','suspended','demo_expired') | DEFAULT 'active' | Global account status |
 | createdAt | DATETIME | NOT NULL | Registration timestamp |
 | updatedAt | DATETIME | NOT NULL | Last modification |
 
-**Indexes:** PRIMARY (id), UNIQUE (email)
+**Indexes:** PRIMARY (id), UNIQUE (email), INDEX idx_oauth (oauth_provider, oauth_provider_id) (v2.0.0)
 
 **Relationships:**
 - `user_roles.user_id → users.id` — Role assignment (authoritative)
@@ -56,6 +58,8 @@
 - On registration, user is assigned `viewer` role via `user_roles` (legacy team/team_members records also created for credit balance scoping). `is_admin` and `is_staff` default to `0`.
 - On user create/update via admin UI, `is_admin` and `is_staff` are written directly to the users table. `user_roles` is synced for legacy compatibility.
 - account_status checked by statusCheck middleware on every authenticated request
+- **(v2.0.0)** `oauth_provider` and `oauth_provider_id` are set when a user signs in via Google OAuth. Existing accounts are auto-linked by email on first OAuth sign-in. New OAuth accounts get empty `passwordHash` (`''`).
+- **(v2.0.0)** Columns auto-added by `ensureOAuthColumns()` on backend startup — uses `SHOW COLUMNS` check + `ALTER TABLE` if missing.
 
 **Example Data:**
 
@@ -384,6 +388,8 @@ users ──────────┬──── user_two_factor     (1:1 —
                 │                ├──── team_members ─────── teams       ⚠️ LEGACY (credit scoping only)
                 │     (N:M)                (1:N)
                 │
+                ├──── oauth_provider + oauth_provider_id  (columns on users — Google OAuth, v2.0.0)
+                │
                 └──── sys_password_resets  (1:N — reset tokens)
 
 credentials ────── (standalone — SMTP config, AES-256-GCM encrypted)
@@ -405,9 +411,12 @@ CREATE TABLE IF NOT EXISTS users (
   isActive TINYINT(1) NOT NULL DEFAULT 1,
   is_admin TINYINT(1) NOT NULL DEFAULT 0,
   is_staff TINYINT(1) NOT NULL DEFAULT 0,
+  oauth_provider VARCHAR(20) NULL,
+  oauth_provider_id VARCHAR(255) NULL,
   account_status ENUM('active','suspended','demo_expired') DEFAULT 'active',
   createdAt DATETIME NOT NULL,
-  updatedAt DATETIME NOT NULL
+  updatedAt DATETIME NOT NULL,
+  INDEX idx_oauth (oauth_provider, oauth_provider_id)
 );
 
 CREATE TABLE IF NOT EXISTS user_two_factor (

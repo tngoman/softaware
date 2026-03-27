@@ -1,7 +1,7 @@
 # SoftAware Platform — Codebase Map
 
-**Version:** 2.1.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.2.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -11,14 +11,14 @@ SoftAware is a single-tenant SaaS platform providing business management, AI ass
 
 | Metric | Value |
 |--------|-------|
-| **Total source files** | 398 (200 backend, 198 frontend) |
-| **Total lines of code** | ~139,300 (67,100 backend, 72,200 frontend) |
-| **Backend route files** | 84 |
-| **Backend services** | 42 (+ 4 AI providers) |
-| **Backend middleware** | 12 |
-| **Frontend pages** | ~90 |
+| **Total source files** | 392 (194 backend, 198 frontend) |
+| **Total lines of code** | ~136,600 (65,500 backend, 71,100 frontend) |
+| **Backend route files** | 82 |
+| **Backend services** | 40 (+ 4 AI providers) |
+| **Backend middleware** | 11 |
+| **Frontend pages** | ~89 |
 | **Frontend components** | 46 |
-| **Database tables** | ~69 |
+| **Database tables** | ~66 |
 | **API base URL** | `https://api.softaware.net.za` |
 | **Frontend URL** | `https://softaware.net.za` |
 
@@ -109,7 +109,7 @@ SoftAware is a single-tenant SaaS platform providing business management, AI ass
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                    MIDDLEWARE CHAIN                              │   │
-│  │  apiErrorTracker → requireAuth → requireAdmin → deductCredits  │   │
+│  │  apiErrorTracker → requireAuth → requireAdmin                  │   │
 │  │  requireApiKey → requireDeveloper → statusCheck                │   │
 │  │  usageTracking → auditLogger → packages                        │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
@@ -120,25 +120,25 @@ SoftAware is a single-tenant SaaS platform providing business management, AI ass
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    API ROUTER (84 route files)                   │   │
+│  │                    API ROUTER (82 route files)                   │   │
 │  │  Mounted at both / and /api for dual-access                     │   │
 │  │                                                                  │   │
 │  │  /auth         /dashboard      /contacts       /invoices         │   │
 │  │  /users        /roles          /permissions    /quotations       │   │
 │  │  /accounting   /payments       /ai             /assistants       │   │
 │  │  /v1/sites     /updates/*      /mcp            /admin/*          │   │
-│  │  /credits      /subscriptions  /settings       /notifications    │   │
+│  │  /subscriptions /settings      /notifications                    │   │
 │  │  /v1/webhook   /v1/client-api  /v1/mobile      /staff-chat       │   │
 │  │  /team-chats   /webmail        /planning       /bugs             │   │
 │  │  /packages     /email          /sms            /agents           │   │
 │  │  /code/git                                                       │   │
-│  │  ... (84 route files total)                                      │   │
+│  │  ... (82 route files total)                                      │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    SERVICES (46 files)                           │   │
+│  │                    SERVICES (44 files)                           │   │
 │  │  firebaseService │ crawlerService │ embeddingService            │   │
-│  │  siteBuilderService │ pdfGenerator │ payment │ packages         │   │
+│  │  siteBuilderService │ pdfGenerator │ packages                   │   │
 │  │  ingestionWorker │ vectorStore │ glmService │ ai/*              │   │
 │  │  chatSocket │ teamChatSocket │ healthMonitor │ webmailService   │   │
 │  │  mobileAIProcessor │ mobileActionExecutor │ mobileTools        │   │
@@ -157,7 +157,7 @@ SoftAware is a single-tenant SaaS platform providing business management, AI ass
             ▼                       ▼                       ▼
 ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐
 │   MySQL 8.x      │  │   SQLite-vec     │  │   External Services      │
-│   ~68 tables     │  │   Vector Store   │  │                          │
+│   ~66 tables     │  │   Vector Store   │  │                          │
 │   (mysql2/pool)  │  │   (embeddings)   │  │  Ollama (localhost:11434)│
 │                  │  │                  │  │  GLM-4 API (z.ai)       │
 │  sys_* (system)  │  │  SQLite (enter-  │  │  OpenRouter API          │
@@ -187,7 +187,7 @@ src/
 ├── app.ts                   # Express app factory — middleware + all 83 route mounts
 ├── config/
 │   ├── env.ts               # Zod-validated environment schema (100+ vars)
-│   ├── credits.ts           # Credit cost configuration per request type
+│   ├── tiers.ts             # Canonical tier definitions (Free/Starter/Pro/Advanced/Enterprise) — single source of truth for pricing & limits
 │   └── personaTemplates.ts  # AI persona/prompt templates
 ├── db/
 │   ├── mysql.ts             # Connection pool, db helper (query/insert/execute/transaction), types
@@ -203,9 +203,8 @@ src/
 │   ├── apiKey.ts            # X-API-Key header validation
 │   ├── apiErrorTracker.ts   # Track API error rates for health monitoring
 │   ├── auditLogger.ts       # Admin action audit trail
-│   ├── credits.ts           # Credit deduction after successful response
 │   ├── errorHandler.ts      # Global Express error handler
-│   ├── packages.ts          # Contact-scoped package/credit enforcement
+│   ├── packages.ts          # Contact-scoped package/credit enforcement (includes inline pricing)
 │   ├── requireAdmin.ts      # Admin role enforcement
 │   ├── requireDeveloper.ts  # Developer role enforcement
 │   ├── statusCheck.ts       # Account/assistant/widget suspension check
@@ -226,7 +225,6 @@ src/
 │   ├── codeAgent.ts                   # AI code agent service
 │   ├── crawlerService.ts              # Web page scraping (Cheerio + Puppeteer)
 │   ├── credentialVault.ts             # Vault encryption/decryption
-│   ├── credits.ts                     # Credit balance operations
 │   ├── documentService.ts             # Document parsing (PDF, DOCX, XLSX)
 │   ├── emailService.ts                # SMTP email dispatch
 │   ├── embeddingService.ts            # Text → vector embeddings
@@ -249,7 +247,6 @@ src/
 │   ├── openRouterVision.ts           # Vision model via OpenRouter
 │   ├── packages.ts                   # Package billing operations
 │   ├── payloadNormalizer.ts           # Normalize incoming payloads
-│   ├── payment.ts                     # Payment processing (PayFast, Yoco)
 │   ├── siteBuilderService.ts         # AI website generation
 │   ├── siteBuilderTemplate.ts        # Site builder HTML templates
 │   ├── smsService.ts                 # SMS dispatch via SMSPortal
@@ -435,7 +432,7 @@ src/
 │   │   └── CasesDashboard.tsx
 │   ├── admin/
 │   │   ├── Dashboard.tsx, ClientManager.tsx
-│   │   ├── AdminAIOverview.tsx, AICredits.tsx, AIPackages.tsx
+│   │   ├── AdminAIOverview.tsx, AIPackages.tsx
 │   │   ├── AdminCaseManagement.tsx, AuditLog.tsx
 │   │   ├── EnterpriseEndpoints.tsx, Webmail.tsx
 │   ├── portal/
@@ -478,7 +475,7 @@ src/
 | **Accounting** | accounting.ts, expenseCategories.ts, categories.ts, transactions.ts | finance/Transactions.tsx, finance/AddExpense.tsx, finance/AddIncome.tsx, general/Categories.tsx | transactions, ledger, accounts, categories, expense_categories, tax_rates | [README](Accounting/README.md) |
 | **FinancialReports** | financialReports.ts, vatReports.ts, reports.ts | finance/FinancialDashboard.tsx, finance/ProfitAndLoss.tsx, finance/BalanceSheet.tsx, finance/VatReports.tsx, finance/TransactionListing.tsx, finance/Statement.tsx | — (reads from transactions, ledger) | [README](FinancialReports/README.md) |
 | **Packages** | packages.ts, adminPackages.ts, pricing.ts | general/Pricing.tsx, admin/AIPackages.tsx | packages, contact_packages, package_transactions | [README](Packages/README.md) |
-| **Subscription** | subscription.ts, subscriptionTiers.ts, credits.ts, adminCredits.ts | admin/AICredits.tsx | subscription_tier_limits (⚠️ Legacy — see Packages) | [README](Subscription/README.md) |
+| **~~Subscription~~** | ~~subscription.ts, subscriptionTiers.ts~~ | — | ~~subscription_tier_limits~~ | ⚠️ **LEGACY** (superseded by Packages + `config/tiers.ts`; routes retained for backward compat. Stripe removed — 410 stub. Yoco is the sole active gateway via `routes/yoco.ts`) |
 | **Cases** | cases.ts, adminCases.ts | general/CasesList.tsx, general/CaseDetailView.tsx, cases/CasesDashboard.tsx, admin/AdminCaseManagement.tsx | cases, case_comments, case_activity | [README](Cases/README.md) |
 
 ### Platform Modules (🟡 MED)
@@ -520,13 +517,13 @@ src/
 |--------|-------------|---------------|
 | **Frontend** | Layout.tsx, UI/*, store/*, hooks/*, services/*, models/* | [README](Crosscutting/Frontend/README.md) |
 | **Infrastructure** | mysql.ts, middleware/*, env.ts, errorHandler.ts, healthMonitor.ts | [README](Crosscutting/Infrastructure/README.md) |
-| **Services** | firebaseService.ts, pdfGenerator.ts, crawlerService.ts, payment.ts, emailService.ts, smsService.ts, webmailService.ts, chatSocket.ts, teamChatSocket.ts | [README](Services/README.md) |
+| **Services** | firebaseService.ts, pdfGenerator.ts, crawlerService.ts, emailService.ts, smsService.ts, webmailService.ts, chatSocket.ts, teamChatSocket.ts | [README](Services/README.md) |
 
 ---
 
 ## 6. Database Schema Overview
 
-**~69 tables** across three naming conventions plus SQLite databases:
+**~66 tables** across three naming conventions plus SQLite databases:
 
 | Prefix | Purpose | Tables |
 |--------|---------|--------|
@@ -571,7 +568,6 @@ src/
 - `checkAccountStatus` → Blocks suspended/demo-expired accounts
 - `checkAssistantStatus` → Blocks suspended assistants
 - `checkWidgetStatus` → Blocks suspended widget clients
-- `deductCreditsMiddleware` → Post-response credit deduction
 - `trackUsage` → Message limit enforcement per subscription tier
 - `auditLogger` → Records admin actions to audit log
 - `apiErrorTracker` → Tracks error rates for health monitoring
@@ -619,7 +615,8 @@ src/
 | # | Module | Priority | Status |
 |---|--------|----------|--------|
 | — | [CODEBASE_MAP.md](CODEBASE_MAP.md) | 🔴 | ✅ Complete |
-| 1 | [Crosscutting/Infrastructure](Crosscutting/Infrastructure/README.md) | 🔴 | ✅ Complete |
+| — | [Wiring](Wiring/README.md) | 🔴 | ✅ Complete |
+| 1 | [Crosscutting/Infrastructure](Crosscutting/Infrastructure/README.md) | 🔴 | ⚠️ Superseded by Wiring |
 | 2 | [Authentication](Authentication/README.md) | 🔴 | ✅ Complete |
 | 3 | [Users](Users/README.md) | 🔴 | ✅ Complete |
 | 4 | [Roles](Roles/README.md) | 🔴 | ✅ Complete |
@@ -632,7 +629,7 @@ src/
 | 11 | [Accounting](Accounting/README.md) | 🟡 | ✅ Complete |
 | 12 | [FinancialReports](FinancialReports/README.md) | 🟡 | ✅ Complete |
 | 13 | [Packages](Packages/README.md) | 🟡 | ✅ Complete |
-| 14 | [Subscription](Subscription/README.md) | 🟡 | ⚠️ Deprecated (→ Packages) |
+| 14 | ~~[Subscription](Subscription/README.md)~~ | 🟡 | ⚠️ **Legacy** (superseded by Packages + `config/tiers.ts`; Stripe removed, Yoco active) |
 | 15 | [AI Gateway](AIGateway/README.md) | 🟡 | ✅ Complete |
 | 16 | [Assistants](Assistants/README.md) | 🟡 | ✅ Complete |
 | 17 | [Widgets](Widgets/README.md) | 🟡 | ✅ Complete |
@@ -660,8 +657,8 @@ src/
 | — | ~~[Teams](Teams/README.md)~~ | 🟢 | ⚠️ Deprecated (→ Packages) |
 | — | ~~[MCP](MCP/README.md)~~ | 🟢 | ⚠️ Deprecated |
 
-**Documentation Progress:** 37/38 active modules documented (97%)
+**Documentation Progress:** 37/38 active modules documented (97%) + Wiring (core platform infrastructure)
 
 ---
 
-*This is the top-level architectural reference for the SoftAware platform. Each module folder contains its own documentation set (README, and optionally FILES, FIELDS, ROUTES, PATTERNS, CHANGES).*
+*This is the top-level architectural reference for the SoftAware platform. Each module folder contains its own documentation set (README, and optionally FILES, FIELDS, ROUTES, PATTERNS, CHANGES). The Wiring documentation covers the platform's core infrastructure (server bootstrap, middleware chain, DB layer, health monitoring, frontend app shell) and supersedes the earlier Crosscutting/Infrastructure docs.*

@@ -3,6 +3,9 @@ export { AuthModel } from './AuthModel';
 export { ContactModel } from './ContactModel';
 export { QuotationModel } from './QuotationModel';
 export { InvoiceModel } from './InvoiceModel';
+export { CreditNoteModel } from './CreditNoteModel';
+export type { CreditNote, CreditNoteItem } from './CreditNoteModel';
+export { PurchaseOrderModel } from './PurchaseOrderModel';
 export { TransactionModel } from './TransactionModel';
 export { PaymentModel } from './OtherModels';
 export { FinancialReportModel } from './OtherModels';
@@ -11,6 +14,8 @@ export type { Credential, CreateCredentialData, UpdateCredentialData } from './C
 export { default as AppSettingsModel } from './AppSettingsModel';
 export { NotificationModel } from './NotificationModel';
 export type { Notification } from './NotificationModel';
+export { PayrollModel } from './PayrollModel';
+export type { PayrollProfile, PayrollProfileListItem, PayrollLineItem, SalaryConfig, Payslip, BankingRequestStatus } from './PayrollModel';
 
 // System models (separate from app models)
 export { 
@@ -39,19 +44,18 @@ export {
 export {
   AdminClientModel,
   AdminEnterpriseModel,
-  AdminPackagesModel,
   AdminConfigModel,
   AdminAIOverviewModel,
+  AdminClientApiModel,
 } from './AdminAIModels';
+export { AdminPackagesModel } from './AdminPackagesModel';
+export type { AdminPackage, PackageContactAssignment, PackagePayload, EditablePackageLimits } from './AdminPackagesModel';
 export type {
   EnterpriseEndpoint,
   EndpointCreateInput,
   RequestLog,
   ClientOverview,
   SystemStats,
-  PackageDefinition,
-  ContactPackageSubscription,
-  PackageTransaction,
   AIOverviewData,
   PackageCreditSummary,
   SpendingSummary,
@@ -62,6 +66,9 @@ export type {
   OllamaStatus,
   EnterpriseSummary,
   ModelConfig,
+  ClientApiConfig,
+  ClientApiConfigInput,
+  ClientApiLog,
 } from './AdminAIModels';
 
 // Case Management

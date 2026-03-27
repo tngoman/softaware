@@ -25,6 +25,7 @@ const Users: React.FC = () => {
     is_active: true,
     is_admin: false,
     is_staff: false,
+    ai_developer_tools_granted: false,
     role_id: undefined as number | undefined,
     contact_id: undefined as number | undefined,
   });
@@ -84,6 +85,7 @@ const Users: React.FC = () => {
       is_active: true,
       is_admin: false,
       is_staff: false,
+      ai_developer_tools_granted: false,
       role_id: undefined,
       contact_id: undefined,
     });
@@ -106,6 +108,7 @@ const Users: React.FC = () => {
           is_active: formData.is_active,
           is_admin: formData.is_admin,
           is_staff: formData.is_staff,
+          ai_developer_tools_granted: formData.ai_developer_tools_granted,
           contact_id: formData.contact_id || null,
         };
         
@@ -189,6 +192,7 @@ const Users: React.FC = () => {
       is_active: user.is_active,
       is_admin: user.is_admin,
       is_staff: user.is_staff || false,
+      ai_developer_tools_granted: !!user.ai_developer_tools_granted,
       role_id: user.roles?.[0]?.id,
       contact_id: (user as any).contact_id || undefined,
     });
@@ -542,7 +546,7 @@ const Users: React.FC = () => {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">User Type</label>
-                <div className="flex items-center gap-6">
+                <div className="flex items-center gap-6 mb-4">
                   <label className="inline-flex items-center cursor-pointer">
                     <input
                       type="radio"
@@ -574,7 +578,26 @@ const Users: React.FC = () => {
                     <span className="ml-2 text-sm text-gray-700">Administrator</span>
                   </label>
                 </div>
-                <p className="text-xs text-gray-500 mt-1">Admins &amp; Staff see the admin dashboard. Users see the client portal.</p>
+                {/* AI Developer Tools Access */}
+                <div className="mt-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg">
+                  <label className="flex items-start">
+                    <div className="flex items-center h-5">
+                      <input
+                        type="checkbox"
+                        checked={formData.ai_developer_tools_granted}
+                        onChange={(e) => setFormData({ ...formData, ai_developer_tools_granted: e.target.checked })}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                    </div>
+                    <div className="ml-3 text-sm">
+                      <span className="font-medium text-gray-900 block mb-1">Developer Tool Access via AI</span>
+                      <span className="text-gray-500 text-xs mt-1 block">
+                        Allow non-developer staff to use their AI Assistant to fix codebases, modify files, and run terminal commands (e.g. for QA training).
+                      </span>
+                    </div>
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">Admins &amp; Staff see the admin dashboard. Users see the client portal.</p>
               </div>
             </div>
 

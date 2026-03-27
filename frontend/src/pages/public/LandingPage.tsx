@@ -64,204 +64,193 @@ const formatPrice = (cents: number): string => {
   return `R${rands.toLocaleString('en-ZA')}`;
 };
 
-// Consumer PLG pricing plans (fallback if API is unavailable)
-const fallbackConsumerPlans = [
+const formatStorage = (bytes: number): string => {
+  if (bytes >= 1024 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024 / 1024)} GB Storage`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB Storage`;
+  return `${Math.round(bytes / 1024)} KB Storage`;
+};
+
+interface PricingPlan {
+  id: string;
+  name: string;
+  tier: string;
+  priceMonthly: number;
+  priceAnnually: number;
+  trialDays: number;
+  features: { items: string[] };
+  isActive: boolean;
+  description: string;
+  cta: string;
+  popular?: boolean;
+}
+
+
+const pricingPlans: PricingPlan[] = [
   {
     id: 'free',
-    name: 'Free Forever',
-    tier: 'FREE' as const,
+    name: 'Free',
+    tier: 'free',
     priceMonthly: 0,
     priceAnnually: 0,
     trialDays: 0,
     features: {
       items: [
-        'AI chat widget for your website',
-        '50 conversations per month',
-        'Email lead notifications',
-        'Basic customization',
-        'Community support',
+        '1 Site & 1 AI Widget',
+        '5 MB Storage',
+        '500 AI Messages/month',
+        '50 Knowledge Pages',
+        'Single Page Site',
       ],
     },
     isActive: true,
-    description: 'Perfect for getting started. Add an AI assistant to your website in minutes.',
-    cta: 'Start Free Today',
+    description: 'Test the platform — free forever',
+    cta: 'Get Started',
   },
   {
     id: 'starter',
     name: 'Starter',
-    tier: 'STARTER' as const,
-    priceMonthly: 19900,
-    priceAnnually: 199000,
-    trialDays: 14,
+    tier: 'starter',
+    priceMonthly: 34900,
+    priceAnnually: 349000,
     features: {
       items: [
-        'Everything in Free',
-        '500 conversations per month',
-        'Custom AI training on your documents',
-        'Advanced lead capture forms',
-        'Email & chat support',
+        '3 Sites & 3 AI Widgets',
+        '50 MB Storage',
+        '2,000 AI Messages/month',
+        '200 Knowledge Pages',
+        'Classic CMS (Multi-Page)',
+        'Remove Branding',
       ],
     },
     isActive: true,
-    description: 'For growing businesses ready to capture more leads and engage customers.',
-    cta: 'Start Free Trial',
+    description: 'Perfect for freelancers',
+    cta: 'Start 14-Day Free Trial',
+    popular: true,
+    trialDays: 14,
   },
   {
-    id: 'professional',
-    name: 'Professional',
-    tier: 'PROFESSIONAL' as const,
-    priceMonthly: 49900,
-    priceAnnually: 499000,
-    trialDays: 14,
+    id: 'pro',
+    name: 'Pro',
+    tier: 'pro',
+    priceMonthly: 69900,
+    priceAnnually: 699000,
+    trialDays: 0,
     features: {
       items: [
-        'Everything in Starter',
-        'Unlimited conversations',
-        'Multiple websites',
-        'Priority support',
-        'Analytics dashboard',
-        'Custom branding',
-        'API access',
+        '10 Sites & 10 AI Widgets',
+        '200 MB Storage',
+        '5,000 AI Messages/month',
+        '500 Knowledge Pages',
+        'E-commerce Ready',
+        'Custom Knowledge Categories',
       ],
     },
     isActive: true,
-    description: 'For established businesses that want unlimited engagement and insights.',
-    cta: 'Start Free Trial',
+    description: 'For growing agencies',
+    cta: 'Get Started',
   },
-];
-
-// Enterprise technical pricing plans (fallback if API is unavailable)
-const fallbackEnterprisePlans = [
   {
-    id: 'byoe',
-    name: 'Bring Your Own Engine',
-    tier: 'BYOE' as const,
-    priceMonthly: 500000,
-    priceAnnually: 5000000,
-    trialDays: 14,
+    id: 'advanced',
+    name: 'Advanced',
+    tier: 'advanced',
+    priceMonthly: 149900,
+    priceAnnually: 1499000,
+    trialDays: 0,
     features: {
       items: [
-        'Loopback API Bridge & Maintenance',
-        'Standard Knowledge Base (Up to 50,000 indexed pages)',
-        'Connect your own API Keys / LLMs',
-        'Unlimited Workspaces',
-        'Secure Vault Storage',
-        'Standard Routing Pipeline',
-        'Community Support',
+        '25 Sites & 25 AI Widgets',
+        '1 GB Storage',
+        '20,000 AI Messages/month',
+        '2,000 Knowledge Pages',
+        'Full Web App Builder',
+        'API Webhooks',
       ],
     },
     isActive: true,
-    description: 'Perfect for teams who already have Copilot Studio or OpenAI keys. Pay purely for the secure wiring and orchestration layer.',
+    description: 'For established agencies',
+    cta: 'Get Started',
   },
   {
-    id: 'managed',
-    name: 'Fully Managed',
-    tier: 'MANAGED' as const,
-    priceMonthly: 1500000,
-    priceAnnually: 15000000,
-    trialDays: 14,
-    features: {
-      items: [
-        'Loopback API Bridge & Maintenance',
-        'Advanced Knowledge Base (Up to 500,000 indexed pages)',
-        'Automated Document Syncing',
-        'Includes Premium LLM Tokens',
-        'Advanced Vector Pipeline',
-        'Priority Traffic Routing',
-        'Dedicated Success Manager',
-        'SLA Guarantees',
-      ],
-    },
-    isActive: true,
-    description: 'We handle the engines, the tokens, and the scaling. Single predictable subscription fee with zero infrastructure headaches.',
-  },
-  {
-    id: 'custom',
-    name: 'Architecture & Build',
-    tier: 'ENTERPRISE' as const,
+    id: 'enterprise',
+    name: 'Enterprise',
+    tier: 'enterprise',
     priceMonthly: 0,
     priceAnnually: 0,
     trialDays: 0,
     features: {
       items: [
-        'Loopback API Bridge & Maintenance',
-        'Unlimited / Dedicated Vector Infrastructure',
-        'On-Premise Ingestion Pipelines',
-        'On-Premise Deployment Options',
-        'Legacy System Integration',
-        'White-glove Architecture Design',
-        '24/7 Engineering Support',
+        'Unlimited Sites & Widgets',
+        '5 GB+ Storage',
+        'Unlimited AI Messages',
+        'Unlimited Knowledge Pages',
+        'Headless Architecture',
+        'Omnichannel & Custom Middleware',
       ],
     },
     isActive: true,
-    description: 'Need a custom Loopback API to talk to your mainframe? We build the bridge between your legacy data and modern AI.',
+    description: 'Bespoke AI solutions for your organisation',
+    cta: 'Contact Sales',
   },
 ];
 
+function mapPackageToPlan(pkg: any): PricingPlan {
+  const limits = pkg?.limits || {};
+  const featureItems = Array.isArray(pkg?.features) && pkg.features.length > 0
+    ? pkg.features
+    : [
+        `${limits.maxSites ?? 0} Site${(limits.maxSites ?? 0) === 1 ? '' : 's'} & ${limits.maxWidgets ?? 0} AI Widget${(limits.maxWidgets ?? 0) === 1 ? '' : 's'}`,
+        formatStorage(limits.maxStorageBytes ?? 0),
+        `${(limits.maxActionsPerMonth ?? 0).toLocaleString('en-ZA')} AI Actions/month`,
+        `${(limits.maxKnowledgePages ?? 0).toLocaleString('en-ZA')} Knowledge Pages`,
+        String(limits.allowedSiteType || 'single_page').replace(/_/g, ' '),
+      ];
+
+  return {
+    id: String(pkg.id ?? pkg.slug),
+    name: pkg.name,
+    tier: pkg.slug,
+    priceMonthly: pkg.priceMonthly ?? 0,
+    priceAnnually: pkg.priceAnnually ?? 0,
+    trialDays: pkg.slug === 'starter' ? 14 : 0,
+    features: { items: featureItems },
+    isActive: true,
+    description: pkg.description || 'Flexible package',
+    cta: pkg.ctaText || 'Get Started',
+    popular: Boolean(pkg.featured),
+  };
+}
+
 /** Convert API package to the plan shape the LandingPage components expect */
-const apiPackageToPlan = (pkg: any, tierMap: Record<string, string> = {}) => ({
-  id: pkg.slug,
-  name: pkg.name,
-  tier: (tierMap[pkg.slug] || pkg.slug.toUpperCase()) as any,
-  priceMonthly: pkg.price_monthly,
-  priceAnnually: pkg.price_annually || 0,
-  trialDays: 0,
-  features: { items: pkg.features || [] },
-  isActive: true,
-  description: pkg.description || '',
-  cta: pkg.cta_text || 'Get Started',
-});
-
-const consumerTierMap: Record<string, string> = { free: 'FREE', starter: 'STARTER', professional: 'PROFESSIONAL' };
-const enterpriseTierMap: Record<string, string> = { byoe: 'BYOE', managed: 'MANAGED', custom: 'ENTERPRISE' };
-
-const getPlanFeatures = (plan: any): string[] => {
-  if (!plan) return [];
-  if (plan.features?.items && Array.isArray(plan.features.items)) {
-    return plan.features.items;
-  }
-  const features: string[] = [];
-  if (plan.features) {
-    if (plan.features.maxUsers === -1) features.push('Unlimited Users');
-    else features.push(`${plan.features.maxUsers} Users`);
-    if (plan.features.maxAgents === -1) features.push('Unlimited Endpoints');
-    else features.push(`${plan.features.maxAgents} Endpoints`);
-    if (plan.features.cloudSync) features.push('Cloud Vector Sync');
-    if (plan.features.vault) features.push('Secure Vault Storage');
-    if (plan.features.prioritySupport) features.push('Priority Support');
-  }
-  return features;
-};
-
 const LandingPage: React.FC = () => {
   const { isAuthenticated } = useAppStore();
   const { logoUrl, siteName } = useAppSettings();
+  const [dynamicPricingPlans, setDynamicPricingPlans] = useState<PricingPlan[]>([]);
 
   // Dynamic pricing from database — falls back to hardcoded arrays
-  const [consumerPlans, setConsumerPlans] = useState(fallbackConsumerPlans);
-  const [enterprisePlans, setEnterprisePlans] = useState(fallbackEnterprisePlans);
-
   useEffect(() => {
-    const fetchPricing = async () => {
+    let cancelled = false;
+
+    const loadPackages = async () => {
       try {
-        const baseUrl = getApiBaseUrl();
-        const res = await fetch(`${baseUrl}/packages/pricing`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.success) {
-          if (data.consumer?.length) {
-            setConsumerPlans(data.consumer.map((p: any) => apiPackageToPlan(p, consumerTierMap)));
-          }
-          if (data.enterprise?.length) {
-            setEnterprisePlans(data.enterprise.map((p: any) => apiPackageToPlan(p, enterpriseTierMap)));
-          }
+        const response = await fetch(`${getApiBaseUrl()}/public/packages`, { credentials: 'include' });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!cancelled && data?.success && Array.isArray(data.packages) && data.packages.length > 0) {
+          setDynamicPricingPlans(data.packages.map(mapPackageToPlan));
         }
-      } catch {
-        // Fallback to hardcoded plans — already set as default state
+      } catch (error) {
+        console.warn('Failed to load public packages, using fallback pricing.', error);
       }
     };
-    fetchPricing();
+
+    loadPackages();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  const visiblePricingPlans = dynamicPricingPlans.length > 0 ? dynamicPricingPlans : pricingPlans;
+
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -351,23 +340,20 @@ const LandingPage: React.FC = () => {
 
               <div className="flex flex-wrap gap-3 pt-2">
                 <Link
-                  to="/register"
+                  to="/register?trial=true"
                   className="inline-flex items-center gap-2 px-6 py-3 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 transition-colors shadow-md"
                 >
-                  Start Free Today
+                  Start 14-Day Free Trial
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
                   </svg>
                 </Link>
-                <a
-                  href="#how-it-works"
+                <Link
+                  to="/register"
                   className="inline-flex items-center gap-2 px-6 py-3 bg-white text-gray-700 font-semibold rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors shadow-sm"
                 >
-                  <svg className="w-5 h-5 text-picton-blue" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                  See How It Works
-                </a>
+                  Or Start Free Forever
+                </Link>
               </div>
             </div>
 
@@ -515,19 +501,19 @@ const LandingPage: React.FC = () => {
           </div>
 
           {/* Consumer Plans */}
-          <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto mb-20">
-            {consumerPlans.map((plan) => (
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-6xl mx-auto mb-20">
+            {visiblePricingPlans.filter(p => p.tier !== 'enterprise').map((plan) => (
               <div
                 key={plan.id}
                 className={`flex flex-col relative bg-white rounded-xl border p-6 ${
-                  plan.tier === 'STARTER'
+                  plan.tier === 'starter'
                     ? 'border-picton-blue shadow-lg ring-1 ring-picton-blue/20'
                     : 'border-slate-200 shadow-sm'
                 }`}
               >
-                {plan.tier === 'STARTER' && (
+                {plan.tier === 'starter' && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-picton-blue text-white text-xs font-bold rounded-full uppercase tracking-wider">
-                    Most Popular
+                    14-Day Free Trial
                   </div>
                 )}
 
@@ -551,7 +537,7 @@ const LandingPage: React.FC = () => {
 
                 <div className="flex-1 mb-6">
                   <ul className="space-y-3">
-                    {getPlanFeatures(plan).map((feature: string, idx: number) => (
+                    {plan.features.items.map((feature: string, idx: number) => (
                       <li key={idx} className="flex items-start gap-2.5 text-sm text-gray-600">
                         <svg className="w-5 h-5 text-picton-blue mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -563,11 +549,11 @@ const LandingPage: React.FC = () => {
                 </div>
 
                 <Link
-                  to="/register"
+                  to={plan.tier === 'starter' ? '/register?trial=true' : '/register'}
                   className={`w-full py-3 rounded-lg font-semibold text-sm transition-colors mt-auto text-center ${
-                    plan.tier === 'STARTER'
+                    plan.tier === 'starter'
                       ? 'bg-picton-blue hover:bg-picton-blue/90 text-white shadow-md'
-                      : plan.tier === 'PROFESSIONAL'
+                      : plan.tier === 'pro' || plan.tier === 'advanced'
                       ? 'bg-gray-900 hover:bg-gray-800 text-white'
                       : 'bg-slate-100 hover:bg-slate-200 text-gray-700 border border-slate-200'
                   }`}
@@ -589,47 +575,28 @@ const LandingPage: React.FC = () => {
                 <span className="text-picton-blue">Custom Architecture</span>
               </h3>
               <p className="text-gray-500 max-w-2xl mx-auto">
-                For enterprises requiring secure connections to legacy databases and custom AI integration solutions.
+                For organisations requiring headless deployments, omnichannel endpoints, and custom middleware solutions.
               </p>
             </div>
 
-            <div className="grid md:grid-cols-3 gap-6 max-w-6xl mx-auto">
-              {enterprisePlans.map((plan) => (
+            <div className="max-w-lg mx-auto">
+              {visiblePricingPlans.filter((p) => p.tier === 'enterprise').map((plan) => (
                 <div
                   key={plan.id}
-                  className={`flex flex-col relative bg-white rounded-xl border p-6 ${
-                    plan.tier === 'MANAGED'
-                      ? 'border-picton-blue shadow-lg ring-1 ring-picton-blue/20'
-                      : 'border-slate-200 shadow-sm'
-                  }`}
+                  className="flex flex-col relative bg-white rounded-xl border border-slate-200 shadow-sm p-8"
                 >
-                  {plan.tier === 'MANAGED' && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-picton-blue text-white text-xs font-bold rounded-full uppercase tracking-wider">
-                      Most Popular
-                    </div>
-                  )}
-
                   <div className="mb-5">
                     <h4 className="text-xl font-bold text-gray-900 mb-1">{plan.name}</h4>
                     <p className="text-gray-500 text-sm">{plan.description}</p>
                   </div>
 
                   <div className="mb-5">
-                    <div className="flex items-baseline gap-1">
-                      {plan.priceMonthly > 0 ? (
-                        <>
-                          <span className="text-3xl font-bold text-gray-900">{formatPrice(plan.priceMonthly)}</span>
-                          <span className="text-gray-400 text-sm">/mo</span>
-                        </>
-                      ) : (
-                        <span className="text-3xl font-bold text-gray-900">Custom</span>
-                      )}
-                    </div>
+                    <span className="text-3xl font-bold text-gray-900">Custom</span>
                   </div>
 
                   <div className="flex-1 mb-6">
                     <ul className="space-y-3">
-                      {getPlanFeatures(plan).map((feature: string, idx: number) => (
+                      {plan.features.items.map((feature: string, idx: number) => (
                         <li key={idx} className="flex items-start gap-2.5 text-sm text-gray-600">
                           <svg className="w-5 h-5 text-picton-blue mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -638,27 +605,13 @@ const LandingPage: React.FC = () => {
                         </li>
                       ))}
                     </ul>
-
-                    {plan.tier === 'ENTERPRISE' && (
-                      <div className="mt-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
-                        <p className="text-xs text-gray-500">
-                          <span className="text-picton-blue font-bold">*</span> Additional fees apply for custom Loopback API development and on-premise deployment architecture.
-                        </p>
-                      </div>
-                    )}
                   </div>
 
                   <Link
                     to="/register"
-                    className={`w-full py-3 rounded-lg font-semibold text-sm transition-colors mt-auto text-center ${
-                      plan.tier === 'MANAGED'
-                        ? 'bg-picton-blue hover:bg-picton-blue/90 text-white shadow-md'
-                        : plan.tier === 'ENTERPRISE'
-                        ? 'bg-gray-900 hover:bg-gray-800 text-white'
-                        : 'bg-slate-100 hover:bg-slate-200 text-gray-700 border border-slate-200'
-                    }`}
+                    className="w-full py-3 rounded-lg font-semibold text-sm transition-colors mt-auto text-center bg-gray-900 hover:bg-gray-800 text-white"
                   >
-                    {plan.tier === 'ENTERPRISE' ? 'Contact Sales' : 'Get Started'}
+                    Contact Sales
                   </Link>
                 </div>
               ))}

@@ -1,9 +1,13 @@
 import { Router, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest } from '../utils/httpErrors.js';
 
 export const financialReportsRouter = Router();
+
+// All financial report routes require admin
+financialReportsRouter.use(requireAuth, requireAdmin);
 
 // ── Helper functions (mirror PHP logic using tb_transactions / tb_invoices / tb_payments) ──
 
@@ -34,12 +38,29 @@ async function getAccountsReceivable(asOfDate: string): Promise<number> {
   return Math.max(0, Number(result?.total ?? 0));
 }
 
-async function getFixedAssets(_asOfDate: string): Promise<number> {
-  return 5000.00; // Placeholder - matches PHP implementation
+async function getFixedAssets(asOfDate: string): Promise<number> {
+  // Sum ledger entries for non-current (fixed) asset accounts
+  const result = await db.queryOne<any>(`
+    SELECT COALESCE(SUM(l.debit_amount - l.credit_amount), 0) as total
+    FROM ledger l
+    JOIN accounts a ON l.account_id = a.id
+    WHERE a.account_type = 'asset'
+      AND (a.account_category IS NULL OR a.account_category != 'Current Assets')
+      AND l.ledger_date <= ?
+  `, [asOfDate]);
+  return Math.max(0, Number(result?.total ?? 0));
 }
 
-async function getAccountsPayable(_asOfDate: string): Promise<number> {
-  return 0.00; // Placeholder - matches PHP implementation
+async function getAccountsPayable(asOfDate: string): Promise<number> {
+  // Sum ledger entries for accounts payable / liability accounts
+  const result = await db.queryOne<any>(`
+    SELECT COALESCE(SUM(l.credit_amount - l.debit_amount), 0) as total
+    FROM ledger l
+    JOIN accounts a ON l.account_id = a.id
+    WHERE a.account_type = 'liability'
+      AND l.ledger_date <= ?
+  `, [asOfDate]);
+  return Math.max(0, Number(result?.total ?? 0));
 }
 
 async function getSalesTaxLiability(asOfDate: string): Promise<number> {
@@ -53,8 +74,16 @@ async function getSalesTaxLiability(asOfDate: string): Promise<number> {
   return Math.max(0, Number(result?.liability ?? 0));
 }
 
-async function getUnpaidExpenses(_asOfDate: string): Promise<number> {
-  return 0.00; // Placeholder - matches PHP implementation
+async function getUnpaidExpenses(asOfDate: string): Promise<number> {
+  // Sum expense transactions that have no linked payment
+  const result = await db.queryOne<any>(`
+    SELECT COALESCE(SUM(total_amount), 0) as total
+    FROM tb_transactions
+    WHERE transaction_type = 'expense'
+      AND transaction_payment_id IS NULL
+      AND transaction_date <= ?
+  `, [asOfDate]);
+  return Number(result?.total ?? 0);
 }
 
 async function getRetainedEarnings(asOfDate: string): Promise<number> {
@@ -222,7 +251,7 @@ async function getRetainedEarningsFallback(asOfDate: string): Promise<number> {
  * GET /financial-reports/balance-sheet
  * Returns the exact shape the frontend BalanceSheet.tsx expects
  */
-financialReportsRouter.get('/balance-sheet', requireAuth, async (req: AuthRequest, res: Response, next) => {
+financialReportsRouter.get('/balance-sheet', async (req: AuthRequest, res: Response, next) => {
   try {
     const asOfDate = (req.query.as_of_date as string) || new Date().toISOString().split('T')[0];
     const legacy = await checkLegacyTables();
@@ -245,7 +274,7 @@ financialReportsRouter.get('/balance-sheet', requireAuth, async (req: AuthReques
       fixedAssets = await getFixedAssets(asOfDate);
       accountsPayable = await getAccountsPayable(asOfDate);
       salesTax = 0;
-      unpaidExpenses = await getUnpaidExpenses(asOfDate);
+      unpaidExpenses = 0; // No tb_transactions in non-legacy mode; ledger handles accruals
       retainedEarnings = await getRetainedEarningsFallback(asOfDate);
     }
 
@@ -296,7 +325,7 @@ financialReportsRouter.get('/balance-sheet', requireAuth, async (req: AuthReques
  * GET /financial-reports/profit-loss
  * Returns the exact shape the frontend ProfitAndLoss.tsx expects
  */
-financialReportsRouter.get('/profit-loss', requireAuth, async (req: AuthRequest, res: Response, next) => {
+financialReportsRouter.get('/profit-loss', async (req: AuthRequest, res: Response, next) => {
   try {
     const startDate = req.query.start_date as string;
     const endDate = req.query.end_date as string;
@@ -358,7 +387,7 @@ financialReportsRouter.get('/profit-loss', requireAuth, async (req: AuthRequest,
  * GET /financial-reports/transaction-listing
  * Returns the exact shape the frontend TransactionListing.tsx expects
  */
-financialReportsRouter.get('/transaction-listing', requireAuth, async (req: AuthRequest, res: Response, next) => {
+financialReportsRouter.get('/transaction-listing', async (req: AuthRequest, res: Response, next) => {
   try {
     const startDate = req.query.start_date as string;
     const endDate = req.query.end_date as string;

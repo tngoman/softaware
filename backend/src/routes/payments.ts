@@ -1,10 +1,14 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { db } from '../db/mysql.js';
+import { db, toMySQLDate } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 
 export const paymentsRouter = Router();
+
+// All payment routes require admin
+paymentsRouter.use(requireAuth, requireAdmin);
 
 // SQL fragment that aliases payment columns to match the frontend Payment interface
 const PAYMENT_SELECT = `
@@ -15,14 +19,15 @@ const PAYMENT_SELECT = `
   p.payment_method,
   p.reference_number,
   p.remarks       AS payment_notes,
-  0               AS payment_processed,
+  p.processed     AS payment_processed,
+  p.transaction_id,
   UNIX_TIMESTAMP(p.created_at)  AS payment_time,
   UNIX_TIMESTAMP(p.updated_at)  AS payment_updated
 `;
 
 const createPaymentSchema = z.object({
-  payment_invoice: z.number().int().positive(),
-  payment_amount: z.number().positive(),
+  payment_invoice: z.coerce.number().int().positive(),
+  payment_amount: z.coerce.number().positive(),
   payment_date: z.string().optional(),
   process_payment: z.boolean().optional(),
 });
@@ -37,7 +42,7 @@ const updatePaymentSchema = z.object({
 /**
  * GET /payments - List all payments with pagination
  */
-paymentsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.get('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
@@ -88,7 +93,7 @@ paymentsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, nex
 /**
  * GET /payments/unprocessed - Get unprocessed payments
  */
-paymentsRouter.get('/unprocessed', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.get('/unprocessed', async (req: AuthRequest, res: Response, next) => {
   try {
     const limit = parseInt(req.query.limit as string) || 50;
     const invoice_id = req.query.invoice_id ? parseInt(req.query.invoice_id as string) : undefined;
@@ -97,7 +102,7 @@ paymentsRouter.get('/unprocessed', requireAuth, async (req: AuthRequest, res: Re
       SELECT ${PAYMENT_SELECT}, i.invoice_number, i.invoice_amount
       FROM payments p 
       LEFT JOIN invoices i ON p.invoice_id = i.id
-      WHERE 1=1
+      WHERE p.processed = 0
     `;
     const params: any[] = [];
 
@@ -119,7 +124,7 @@ paymentsRouter.get('/unprocessed', requireAuth, async (req: AuthRequest, res: Re
 /**
  * GET /payments/invoice/:invoiceId - Get payments for specific invoice
  */
-paymentsRouter.get('/invoice/:invoiceId', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.get('/invoice/:invoiceId', async (req: AuthRequest, res: Response, next) => {
   try {
     const { invoiceId } = req.params;
     const payments = await db.query<any>(
@@ -135,7 +140,7 @@ paymentsRouter.get('/invoice/:invoiceId', requireAuth, async (req: AuthRequest, 
 /**
  * GET /payments/:id - Get single payment
  */
-paymentsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.get('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const payment = await db.queryOne<any>(`SELECT ${PAYMENT_SELECT} FROM payments p WHERE p.id = ?`, [id]);
@@ -151,7 +156,7 @@ paymentsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, 
 /**
  * POST /payments - Create payment
  */
-paymentsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.post('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const data = createPaymentSchema.parse(req.body);
 
@@ -161,15 +166,25 @@ paymentsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
       throw badRequest('Invoice not found');
     }
 
+    // Guard against duplicate payment (same invoice + amount + date)
+    const paymentDate = data.payment_date || new Date().toISOString().split('T')[0];
+    const duplicate = await db.queryOne<any>(
+      'SELECT id FROM payments WHERE invoice_id = ? AND payment_amount = ? AND payment_date = ?',
+      [data.payment_invoice, data.payment_amount, paymentDate]
+    );
+    if (duplicate) {
+      throw badRequest('A payment with the same amount and date already exists for this invoice');
+    }
+
     const insertId = await db.insertOne('payments', {
       invoice_id: data.payment_invoice,
       payment_amount: data.payment_amount,
-      payment_date: data.payment_date || new Date().toISOString().split('T')[0],
+      payment_date: paymentDate,
       payment_method: null,
       reference_number: null,
       remarks: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: toMySQLDate(new Date()),
+      updated_at: toMySQLDate(new Date()),
     });
 
     // Check if invoice is fully paid
@@ -180,8 +195,8 @@ paymentsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
     const totalPaid = totalPaidResult?.total_paid || 0;
     if (totalPaid >= invoice.invoice_amount) {
       await db.execute(
-        'UPDATE invoices SET paid = 1, updated_at = ? WHERE id = ?',
-        [new Date().toISOString(), data.payment_invoice]
+        'UPDATE invoices SET paid = 2, updated_at = ? WHERE id = ?',
+        [toMySQLDate(new Date()), data.payment_invoice]
       );
     }
 
@@ -195,7 +210,7 @@ paymentsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, ne
 /**
  * PUT /payments/:id - Update payment
  */
-paymentsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.put('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const data = updatePaymentSchema.parse(req.body);
@@ -205,7 +220,7 @@ paymentsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
       throw notFound('Payment not found');
     }
 
-    const updateFields: Record<string, any> = { updated_at: new Date().toISOString() };
+    const updateFields: Record<string, any> = { updated_at: toMySQLDate(new Date()) };
     if (data.payment_invoice !== undefined) updateFields.invoice_id = data.payment_invoice;
     if (data.payment_amount !== undefined) updateFields.payment_amount = data.payment_amount;
     if (data.payment_date !== undefined) updateFields.payment_date = data.payment_date;
@@ -225,14 +240,33 @@ paymentsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, 
 /**
  * DELETE /payments/:id - Delete payment
  */
-paymentsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.delete('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
-    const existing = await db.queryOne('SELECT id FROM payments WHERE id = ?', [id]);
+    const existing = await db.queryOne<any>('SELECT id, invoice_id FROM payments WHERE id = ?', [id]);
     if (!existing) {
       throw notFound('Payment not found');
     }
+
     await db.execute('DELETE FROM payments WHERE id = ?', [id]);
+
+    // Recalculate invoice paid status after removing the payment
+    if (existing.invoice_id) {
+      const invoice = await db.queryOne<any>('SELECT id, invoice_amount FROM invoices WHERE id = ?', [existing.invoice_id]);
+      if (invoice) {
+        const totalPaidResult = await db.queryOne<any>(
+          'SELECT COALESCE(SUM(payment_amount), 0) as total_paid FROM payments WHERE invoice_id = ?',
+          [existing.invoice_id]
+        );
+        const totalPaid = Number(totalPaidResult?.total_paid || 0);
+        const newStatus = totalPaid >= Number(invoice.invoice_amount) ? 2 : 0;
+        await db.execute(
+          'UPDATE invoices SET paid = ?, updated_at = ? WHERE id = ?',
+          [newStatus, toMySQLDate(new Date()), existing.invoice_id]
+        );
+      }
+    }
+
     res.json({ success: true, message: 'Payment deleted' });
   } catch (err) {
     next(err);
@@ -242,7 +276,7 @@ paymentsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Respons
 /**
  * POST /payments/process - Process payments (create corresponding transactions)
  */
-paymentsRouter.post('/process', requireAuth, async (req: AuthRequest, res: Response, next) => {
+paymentsRouter.post('/process', async (req: AuthRequest, res: Response, next) => {
   try {
     const { payment_ids, invoice_id } = req.body;
 
@@ -251,12 +285,12 @@ paymentsRouter.post('/process', requireAuth, async (req: AuthRequest, res: Respo
     if (payment_ids && Array.isArray(payment_ids) && payment_ids.length > 0) {
       const placeholders = payment_ids.map(() => '?').join(',');
       paymentsToProcess = await db.query<any>(
-        `SELECT * FROM payments WHERE id IN (${placeholders})`,
+        `SELECT * FROM payments WHERE id IN (${placeholders}) AND processed = 0`,
         payment_ids
       );
     } else if (invoice_id) {
       paymentsToProcess = await db.query<any>(
-        'SELECT * FROM payments WHERE invoice_id = ?',
+        'SELECT * FROM payments WHERE invoice_id = ? AND processed = 0',
         [invoice_id]
       );
     } else {
@@ -268,17 +302,53 @@ paymentsRouter.post('/process', requireAuth, async (req: AuthRequest, res: Respo
 
     for (const payment of paymentsToProcess) {
       try {
-        // Create a transaction for this payment
-        const transactionId = await db.insertOne('transactions', {
+        // Look up invoice and contact details for the transaction
+        const invoice = await db.queryOne<any>(
+          `SELECT i.id, i.invoice_number, i.invoice_amount,
+                  c.company_name, c.vat_number
+           FROM invoices i
+           LEFT JOIN contacts c ON c.id = i.contact_id
+           WHERE i.id = ?`,
+          [payment.invoice_id]
+        );
+
+        // Check if any line items on this invoice are VAT-inclusive
+        const vatInfo = await db.queryOne<any>(
+          `SELECT SUM(CASE WHEN item_vat = 1 THEN line_total * 15 / 115 ELSE 0 END) as vat_amount
+           FROM invoice_items WHERE invoice_id = ?`,
+          [payment.invoice_id]
+        );
+
+        const totalAmount = Number(payment.payment_amount);
+        const invoiceVat = Number(vatInfo?.vat_amount || 0);
+        // Proportional VAT for partial payments
+        const invoiceTotal = Number(invoice?.invoice_amount || totalAmount);
+        const paymentRatio = invoiceTotal > 0 ? totalAmount / invoiceTotal : 1;
+        const vatAmount = Math.round(invoiceVat * paymentRatio * 100) / 100;
+        const exclusiveAmount = Math.round((totalAmount - vatAmount) * 100) / 100;
+
+        // Create a transaction in transactions_vat (the active transactions table)
+        const transactionId = await db.insertOne('transactions_vat', {
           transaction_date: payment.payment_date,
-          account_id: 1, // Default income account - should be configurable
-          debit_amount: 0,
-          credit_amount: payment.payment_amount,
-          description: `Payment for invoice #${payment.invoice_id}`,
-          reference_number: payment.reference_number || `PAY-${payment.id}`,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          transaction_type: 'income',
+          party_name: invoice?.company_name || 'Unknown',
+          party_vat_number: invoice?.vat_number || null,
+          invoice_number: invoice?.invoice_number || `INV-${payment.invoice_id}`,
+          total_amount: totalAmount,
+          vat_type: vatAmount > 0 ? 'standard' : 'non-vat',
+          vat_amount: vatAmount,
+          exclusive_amount: exclusiveAmount,
+          transaction_payment_id: payment.id,
+          transaction_invoice_id: payment.invoice_id,
+          created_at: toMySQLDate(new Date()),
+          updated_at: toMySQLDate(new Date()),
         });
+
+        // Mark payment as processed
+        await db.execute(
+          'UPDATE payments SET processed = 1, transaction_id = ?, updated_at = ? WHERE id = ?',
+          [parseInt(transactionId), toMySQLDate(new Date()), payment.id]
+        );
 
         processed.push({ payment_id: payment.id, transaction_id: parseInt(transactionId) });
       } catch (err: any) {

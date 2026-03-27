@@ -67,82 +67,19 @@ adminAIOverviewRouter.get('/', async (req: AuthRequest, res: Response, next) => 
     //  2. CREDIT SYSTEM — PACKAGES (contact/package-scoped)
     // ══════════════════════════════════════════════════════════
 
-    const packageCredits = await db.queryOne<any>(`
-      SELECT
-        COALESCE(SUM(CASE WHEN type = 'USAGE' THEN ABS(amount) ELSE 0 END), 0)              AS totalUsed,
-        COALESCE(SUM(CASE WHEN type = 'PURCHASE' THEN amount ELSE 0 END), 0)                 AS totalPurchased,
-        COALESCE(SUM(CASE WHEN type = 'MONTHLY_ALLOCATION' THEN amount ELSE 0 END), 0)      AS totalAllocated,
-        COALESCE(SUM(CASE WHEN type = 'BONUS' THEN amount ELSE 0 END), 0)                    AS totalBonus,
-        COALESCE(SUM(CASE WHEN type = 'ADJUSTMENT' THEN amount ELSE 0 END), 0)               AS totalAdjusted,
-        COALESCE(SUM(CASE WHEN type = 'REFUND' THEN amount ELSE 0 END), 0)                   AS totalRefunded,
-        COUNT(CASE WHEN type = 'USAGE' THEN 1 END)                                            AS usageTransactions,
-        COUNT(*)                                                                               AS totalTransactions
-      FROM package_transactions
-    `);
+    const packageCredits: any = { totalUsed: 0, totalPurchased: 0, totalAllocated: 0, totalBonus: 0, totalAdjusted: 0, totalRefunded: 0, usageTransactions: 0, totalTransactions: 0 };
 
-    const packageBalances = await db.queryOne<any>(`
-      SELECT
-        COALESCE(SUM(credits_balance), 0) AS totalBalance,
-        COALESCE(SUM(credits_used), 0)    AS totalUsed,
-        COUNT(*)                           AS subscriptionCount
-      FROM contact_packages
-      WHERE status IN ('ACTIVE', 'TRIAL')
-    `);
+    const packageBalances: any = { totalBalance: 0, totalUsed: 0, subscriptionCount: 0 };
 
-    // Usage by request type (packages)
-    const packageUsageByType = await db.query<any>(`
-      SELECT request_type, COUNT(*) AS cnt, COALESCE(SUM(ABS(amount)), 0) AS totalCredits
-      FROM package_transactions
-      WHERE type = 'USAGE' AND request_type IS NOT NULL
-      GROUP BY request_type
-      ORDER BY totalCredits DESC
-    `);
+    const packageUsageByType: any[] = [];
 
-    // Daily usage last 30 days (packages)
-    const packageDailyUsage = await db.query<any>(`
-      SELECT
-        DATE(created_at) AS day,
-        COUNT(CASE WHEN type = 'USAGE' THEN 1 END) AS requests,
-        COALESCE(SUM(CASE WHEN type = 'USAGE' THEN ABS(amount) ELSE 0 END), 0) AS creditsUsed
-      FROM package_transactions
-      WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-      GROUP BY DATE(created_at)
-      ORDER BY day ASC
-    `);
+    const packageDailyUsage: any[] = [];
 
-    // Subscription status breakdown
-    const subscriptionBreakdown = await db.query<any>(`
-      SELECT status, COUNT(*) AS cnt
-      FROM contact_packages
-      GROUP BY status
-    `);
+    const subscriptionBreakdown: any[] = [];
 
-    // Package popularity
-    const packagePopularity = await db.query<any>(`
-      SELECT p.name, p.slug, COUNT(cp.id) AS subscribers,
-             COALESCE(SUM(cp.credits_used), 0) AS totalCreditsUsed
-      FROM packages p
-      LEFT JOIN contact_packages cp ON cp.package_id = p.id
-      WHERE p.is_active = 1
-      GROUP BY p.id, p.name, p.slug
-      ORDER BY subscribers DESC
-    `);
+    const packagePopularity: any[] = [];
 
-    // Top consumers (by credit usage)
-    const topConsumers = await db.query<any>(`
-      SELECT
-        cp.contact_id,
-        COALESCE(c.company_name, c.contact_person, CONCAT('Contact #', cp.contact_id)) AS name,
-        p.name AS package_name,
-        cp.credits_used,
-        cp.credits_balance,
-        cp.status
-      FROM contact_packages cp
-      LEFT JOIN contacts c ON c.id = cp.contact_id
-      LEFT JOIN packages p ON p.id = cp.package_id
-      ORDER BY cp.credits_used DESC
-      LIMIT 10
-    `);
+    const topConsumers: any[] = [];
 
     // ══════════════════════════════════════════════════════════
     //  4. TELEMETRY — SQLite analytics logs
@@ -401,6 +338,59 @@ adminAIOverviewRouter.get('/', async (req: AuthRequest, res: Response, next) => 
     }
 
     // ══════════════════════════════════════════════════════════
+    //  6b. CLIENT API GATEWAY CONFIGS
+    // ══════════════════════════════════════════════════════════
+
+    let clientApiGatewayStats: any = { total: 0, active: 0, paused: 0, disabled: 0, totalRequests: 0, configs: [] };
+    if (fs.existsSync(ENTERPRISE_DB)) {
+      let gwDb: Database.Database | null = null;
+      try {
+        gwDb = new Database(ENTERPRISE_DB, { readonly: true });
+        gwDb.pragma('busy_timeout = 3000');
+
+        // Check if table exists first
+        const tableExists = gwDb.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='client_api_configs'"
+        ).get();
+
+        if (tableExists) {
+          const gwStats = gwDb.prepare(`
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused,
+              SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END) AS disabled,
+              COALESCE(SUM(total_requests), 0) AS totalRequests
+            FROM client_api_configs
+          `).get() as any;
+
+          if (gwStats) {
+            clientApiGatewayStats = {
+              total: gwStats.total || 0,
+              active: gwStats.active || 0,
+              paused: gwStats.paused || 0,
+              disabled: gwStats.disabled || 0,
+              totalRequests: gwStats.totalRequests || 0,
+            };
+          }
+
+          // Top configs by request count
+          clientApiGatewayStats.configs = gwDb.prepare(`
+            SELECT id, client_id, client_name, status, auth_type, target_base_url,
+                   total_requests, last_request_at, created_at
+            FROM client_api_configs
+            ORDER BY total_requests DESC
+            LIMIT 10
+          `).all();
+        }
+
+        gwDb.close();
+      } catch (err) {
+        if (gwDb) try { gwDb.close(); } catch {}
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════
     //  7. MODEL CONFIGURATION (env-based routing)
     // ══════════════════════════════════════════════════════════
 
@@ -441,6 +431,45 @@ adminAIOverviewRouter.get('/', async (req: AuthRequest, res: Response, next) => 
       ? Number(openRouterStatus.creditsUsed)
       : null;
 
+    // OpenAI — try billing API for current-month spend
+    let openAISpendUSD: number | null = null;
+    if (oaiKey) {
+      try {
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startTs = Math.floor(startOfMonth.getTime() / 1000);
+        const endTs = Math.floor(now.getTime() / 1000);
+        const costRes = await fetch(
+          `https://api.openai.com/v1/organization/costs?start_time=${startTs}&end_time=${endTs}`,
+          { headers: { 'Authorization': `Bearer ${oaiKey}` }, signal: AbortSignal.timeout(5000) },
+        );
+        if (costRes.ok) {
+          const costData = await costRes.json() as any;
+          // Each bucket in data.results[] has amount.value in cents
+          openAISpendUSD = ((costData.data || []) as any[]).reduce((sum: number, bucket: any) => {
+            return sum + ((bucket.results || []) as any[]).reduce(
+              (s: number, r: any) => s + (r.amount?.value || 0), 0,
+            );
+          }, 0) / 100; // cents → dollars
+        }
+      } catch { /* billing endpoint may not be available with this key */ }
+    }
+
+    // Telemetry-based provider request counts
+    const openAITel = (telemetry.byProvider as any[]).find(
+      (p: any) => p.provider?.toLowerCase() === 'openai',
+    );
+    const ollamaTel = (telemetry.byProvider as any[]).find(
+      (p: any) => p.provider?.toLowerCase() === 'ollama',
+    );
+    const glmTel = (telemetry.byProvider as any[]).find(
+      (p: any) => p.provider?.toLowerCase() === 'glm',
+    );
+
+    // Ollama aggregate model size (bytes)
+    const ollamaTotalSize = (ollamaStatus?.installedModels || [])
+      .reduce((sum: number, m: any) => sum + (m.size || 0), 0);
+
     const spending = {
       totalCreditsUsed: totalCreditsUsedPackages,
       totalCreditsUsedRands: totalRevenueRands,
@@ -452,6 +481,19 @@ adminAIOverviewRouter.get('/', async (req: AuthRequest, res: Response, next) => 
       openRouterLimitUSD: openRouterStatus?.credits ?? null,
       openRouterRemainingUSD: openRouterStatus?.creditsRemaining ?? null,
       profitMarginRands: totalRevenueRands - (openRouterSpend ? openRouterSpend * 18.5 : 0), // rough USD→ZAR
+      // OpenAI
+      openAISpendUSD,
+      openAIRequests: openAITel?.cnt || 0,
+      openAIAvgMs: openAITel?.avgMs || 0,
+      // GLM (free cloud)
+      glmRequests: glmTel?.cnt || 0,
+      glmAvgMs: glmTel?.avgMs || 0,
+      // Ollama (local)
+      ollamaRequests: ollamaTel?.cnt || 0,
+      ollamaAvgMs: ollamaTel?.avgMs || 0,
+      ollamaLoadedModels: ollamaStatus?.loadedModels || 0,
+      ollamaInstalledModels: ollamaStatus?.totalModels || 0,
+      ollamaTotalSize,
     };
 
     // ══════════════════════════════════════════════════════════
@@ -554,6 +596,9 @@ adminAIOverviewRouter.get('/', async (req: AuthRequest, res: Response, next) => 
 
         // Enterprise
         enterprise: enterpriseStats,
+
+        // Client API Gateway
+        clientApiGateway: clientApiGatewayStats,
 
         // Model configuration
         modelConfig,

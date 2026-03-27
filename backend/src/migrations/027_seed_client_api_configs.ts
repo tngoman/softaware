@@ -30,6 +30,7 @@ function migrate() {
       id                TEXT PRIMARY KEY,
       client_id         TEXT NOT NULL UNIQUE,
       client_name       TEXT NOT NULL,
+      contact_id        INTEGER,
       endpoint_id       TEXT,
       status            TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'disabled')),
       target_base_url   TEXT NOT NULL,
@@ -87,15 +88,16 @@ function migrate() {
 
     db.prepare(`
       INSERT INTO client_api_configs (
-        id, client_id, client_name, endpoint_id, status,
+        id, client_id, client_name, contact_id, endpoint_id, status,
         target_base_url, auth_type, auth_secret, auth_header,
         allowed_actions, rate_limit_rpm, timeout_ms,
         created_at, updated_at, total_requests
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       configId,
       'silulumanzi',
       'Silulumanzi Water Services',
+      68,  // contact_id — SA Water Works Utilities (Pty) Ltd
       'ep_silulumanzi_91374147',
       'active',
       'https://portal.silulumanzi.com/api/ai',  // The REAL target — no more PHP proxy

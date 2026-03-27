@@ -139,11 +139,35 @@ ORDER BY i.date DESC
 
 ---
 
+### 8. GET `/v1/contacts/:id/expenses`
+**Purpose**: List expense transactions linked to a supplier contact via `party_name` match  
+**Auth**: JWT required  
+**Params**: `id` (route param — contact ID)
+
+**Flow**:
+1. Fetch contact by ID from `contacts` table. If not found → `404`
+2. Look up `company_name` from the raw `contacts` row
+3. If no `company_name` → return empty `{ data: [], summary: { total_expenses: 0, total_vat: 0, total_exclusive: 0, count: 0 } }`
+4. Query `transactions_vat` joined with `tb_expense_categories`:
+```sql
+SELECT tv.*, tec.category_name
+FROM transactions_vat tv
+LEFT JOIN tb_expense_categories tec ON tec.category_id = tv.expense_category_id
+WHERE tv.party_name = ? AND tv.transaction_type = 'expense'
+ORDER BY tv.transaction_date DESC
+```
+5. Calculate summary: iterate expenses, sum `total_amount`, `vat_amount`, `exclusive_amount`
+6. Return `{ success: true, data: expenses, summary: { total_expenses, total_vat, total_exclusive, count } }`
+
+**Note**: Uses `tb_expense_categories` (legacy table with `category_id` PK), **not** `expense_categories` (new schema with `id` PK). The FK `transactions_vat.expense_category_id` references `tb_expense_categories.category_id`.
+
+---
+
 ## Admin Routes (adminClientManager.ts)
 
 All routes require `requireAuth` + `requireAdmin`.
 
-### 8. GET `/admin/clients/overview`
+### 9. GET `/admin/clients/overview`
 **Purpose**: Aggregated stats + full entity lists for the 5-tab Contacts hub  
 **Auth**: JWT + admin role required
 
@@ -162,7 +186,7 @@ All routes require `requireAuth` + `requireAdmin`.
 
 ---
 
-### 9. GET `/admin/clients/:userId`
+### 10. GET `/admin/clients/:userId`
 **Purpose**: Single client detail with enriched assistant and landing page data — used by ContactDetails.tsx  
 **Auth**: JWT + admin role required
 
@@ -186,20 +210,20 @@ All routes require `requireAuth` + `requireAdmin`.
 
 ---
 
-### 10. PATCH `/admin/clients/:userId/status`
+### 11. PATCH `/admin/clients/:userId/status`
 **Purpose**: Master kill switch — update user account status  
 **Auth**: JWT + admin role required  
 **Body**: `{ status: 'active' | 'suspended' | 'demo_expired' }`
 
 ---
 
-### 11. PATCH `/admin/clients/assistants/:assistantId/status`
+### 12. PATCH `/admin/clients/assistants/:assistantId/status`
 **Purpose**: Update individual assistant status  
 **Auth**: JWT + admin role required
 
 ---
 
-### 12. PATCH `/admin/clients/widgets/:widgetId/status`
+### 13. PATCH `/admin/clients/widgets/:widgetId/status`
 **Purpose**: Update individual widget status  
 **Auth**: JWT + admin role required
 
@@ -219,7 +243,7 @@ All routes require `requireAuth` + `requireAdmin`.
 
 ## Site Preview Route (siteBuilder.ts)
 
-### 13. GET `/v1/sites/:siteId/preview`
+### 14. GET `/v1/sites/:siteId/preview`
 **Purpose**: Serve generated HTML for landing page preview  
 **Auth**: JWT required (via header OR `?token=` query param)
 
@@ -239,7 +263,7 @@ All routes require `requireAuth` + `requireAdmin`.
 
 ## Public Routes (contactFormRouter.ts)
 
-### 14. POST `/v1/leads/submit`
+### 15. POST `/v1/leads/submit`
 **Purpose**: Public contact form submission  
 **Auth**: NONE  
 **Rate limit**: 5 requests/minute per IP (in-memory Map)
@@ -267,7 +291,7 @@ All routes require `requireAuth` + `requireAdmin`.
 
 ---
 
-### 15. GET `/v1/leads/test`
+### 16. GET `/v1/leads/test`
 **Purpose**: Health check endpoint  
 **Auth**: NONE  
 **Response**: `200 { success: true, message: 'Contact form router is working' }`
@@ -302,6 +326,7 @@ All routes require `requireAuth` + `requireAdmin`.
 | Preview landing page (ContactDetails) | Direct `window.open()` | `GET /v1/sites/:siteId/preview?token=JWT` | `siteBuilder.ts` GET `/:siteId/preview` |
 | Load statement data | `ContactModel.getStatementData(id)` | `GET /v1/contacts/:id/statement-data` | *(separate route)* |
 | Download statement PDF | `ContactModel.downloadStatement(id, params)` | `GET /v1/contacts/:id/statement/download` | *(separate route)* |
+| Load supplier expenses | `ContactModel.getExpenses(id)` | `GET /v1/contacts/:id/expenses` | `contacts.ts` GET `/:id/expenses` |
 
 ---
 

@@ -1,7 +1,11 @@
 export { default as PortalDashboard } from './Dashboard';
 export { default as AssistantsPage } from './AssistantsPage';
 export { default as CreateAssistant } from './CreateAssistant';
-export { default as ChatInterface } from './ChatInterface';
 export { default as SitesPage } from './SitesPage';
 export { default as SiteBuilderEditor } from './SiteBuilderEditor';
+export { default as WebsiteManager } from './WebsiteManager';
+export { default as PageEditor } from './PageEditor';
+export { default as FormSubmissions } from './FormSubmissions';
 export { default as PortalSettings } from './Settings';
+export { default as KnowledgeBase } from './KnowledgeBase';
+export { default as GatewaysPage } from './Gateways';

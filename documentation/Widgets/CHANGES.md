@@ -9,11 +9,50 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-14 | 1.1.0 | Replaced iframe-based assistant embed widget with inline chat UI + SSE streaming — fixes "refused to connect" error caused by X-Frame-Options blocking |
 | 2026-03-10 | 1.0.0 | Initial documentation — embeddable widget, RAG chat, tier-based routing, lead capture, usage tracking, knowledge ingestion |
 
 ---
 
-## 2. v1.0.0 — Initial Documentation
+## 2. v1.1.0 — Inline Chat Replaces iframe Embed
+
+**Date:** 2026-03-14  
+**Scope:** Replaced the iframe-based assistant embed widget (`/api/assistants/widget.js`) with a fully inline chat UI that communicates directly with the chat API via SSE streaming.
+
+### Problem
+
+The assistant embed widget used an `<iframe>` pointing to `https://softaware.net.za/chat/{assistantId}`. The site's `X-Frame-Options` / CSP headers blocked framing, causing a "refused to connect" error when the widget was opened on third-party websites.
+
+### Solution
+
+Replaced the iframe with an inline chat UI built entirely via DOM manipulation within the embed script. The widget now:
+- Renders a messages area, input field, and send button directly in the chat container
+- Sends messages via `POST /api/assistants/chat` (SSE streaming)
+- Streams tokens in real-time using `ReadableStream` reader
+- Maintains conversation history client-side (last 10 messages)
+- Shows typing indicator (animated bouncing dots)
+- Displays assistant responses with word-by-word streaming
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/routes/assistants.ts` | Rewrote widget.js script: removed iframe + chatUrl, added inline messages area, input, send button, SSE streaming reader, typing indicator, conversation state |
+| `src/routes/assistants.js` | Same changes (compiled JS) |
+
+### Key Implementation Details
+
+- **No iframe** — all DOM elements created inline (messages area, input, send button)
+- **SSE streaming** — uses `fetch()` with `response.body.getReader()` to stream tokens
+- **Token-by-token rendering** — assistant bubble updates with each `{token}` SSE event
+- **Conversation history** — maintained in-memory array, last 10 messages sent with each request
+- **Typing indicator** — 3 animated dots with CSS `@keyframes` injected into document head
+- **Error handling** — graceful fallback messages for network errors and non-OK responses
+- **Responsive** — `max-height: calc(100vh - 120px)` prevents overflow on small screens
+
+---
+
+## 3. v1.0.0 — Initial Documentation
 
 **Date:** 2026-03-10  
 **Scope:** Complete documentation of the existing Widgets module covering all backend services, API routes, database schema, client-side widget, and architecture patterns.

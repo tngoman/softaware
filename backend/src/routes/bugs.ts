@@ -28,6 +28,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.js';
+import { requireAuth as strictAuth } from '../middleware/auth.js';
 import { db, generateId } from '../db/mysql.js';
 import path from 'path';
 import fs from 'fs';
@@ -38,10 +39,79 @@ import { env } from '../config/env.js';
 import { createNotification } from '../services/notificationService.js';
 import { sendEmail } from '../services/emailService.js';
 
+// ─── TYPE DEFINITIONS ───────────────────────────────────────────
+
+interface BugRow {
+  id: number;
+  title: string;
+  description: string | null;
+  current_behaviour: string | null;
+  expected_behaviour: string | null;
+  reporter_name: string;
+  software_id: number | null;
+  software_name: string | null;
+  status: string;
+  severity: string;
+  workflow_phase: string;
+  assigned_to: number | null;
+  assigned_to_name: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  linked_task_id: number | null;
+  converted_from_task: boolean;
+  converted_to_task: number | null;
+  resolution_notes: string | null;
+  resolved_at: Date | null;
+  resolved_by: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface BugComment {
+  id: number;
+  bug_id: number;
+  author_name: string;
+  author_id: string | null;
+  content: string;
+  is_internal: boolean;
+  comment_type: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface BugAttachment {
+  id: number;
+  bug_id: number;
+  filename: string;
+  original_name: string;
+  mime_type: string | null;
+  file_size: number | null;
+  file_path: string;
+  uploaded_by: string | null;
+  uploaded_by_id: string | null;
+  created_at: Date;
+}
+
+interface CountRow {
+  total: number;
+}
+
+interface GroupCountRow {
+  [key: string]: string | number;
+  count: number;
+}
+
+interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+}
+
 export const bugsRouter = Router();
 
 // Optional auth — decodes JWT if present (doesn't block unauthenticated requests)
 // Allows external bug reporters while still capturing userId for authenticated staff
+// NOTE: Destructive operations (DELETE, download) use strictAuth (imported from middleware/auth.js)
 const requireAuth = (req: Request, _res: Response, next: NextFunction) => {
   try {
     const auth = req.header('authorization');
@@ -87,13 +157,17 @@ const VALID_SEVERITIES = ['critical', 'high', 'medium', 'low'] as const;
 
 // ─── NOTIFICATION HELPERS ────────────────────────────────────────
 
-/** Fetch all admin users */
-async function getAdminUsers(): Promise<Array<{ id: string; email: string; name: string }>> {
+/** Fetch admin users with the developer role */
+async function getAdminUsers(): Promise<AdminUser[]> {
   try {
-    const rows = await db.query<any>(
-      `SELECT id, email, COALESCE(name, email) AS name FROM users WHERE is_admin = 1`
+    const rows = await db.query<AdminUser>(
+      `SELECT DISTINCT u.id, u.email, COALESCE(u.name, u.email) AS name
+       FROM users u
+       INNER JOIN user_roles ur ON ur.user_id = u.id
+       INNER JOIN roles r ON r.id = ur.role_id
+       WHERE u.is_admin = 1 AND r.slug = 'developer' AND u.isActive = 1`
     );
-    return rows.map((r: any) => ({ id: String(r.id), email: r.email || '', name: r.name || '' }));
+    return rows;
   } catch { return []; }
 }
 
@@ -227,27 +301,27 @@ bugsRouter.get('/', requireAuth, async (req: Request, res: Response) => {
 
     // Build WHERE clause
     const conditions: string[] = [];
-    const params: any[] = [];
+    const params: (string | number)[] = [];
 
     if (req.query.status) {
       conditions.push('b.status = ?');
-      params.push(req.query.status);
+      params.push(req.query.status as string);
     }
     if (req.query.severity) {
       conditions.push('b.severity = ?');
-      params.push(req.query.severity);
+      params.push(req.query.severity as string);
     }
     if (req.query.workflow_phase) {
       conditions.push('b.workflow_phase = ?');
-      params.push(req.query.workflow_phase);
+      params.push(req.query.workflow_phase as string);
     }
     if (req.query.software_id) {
       conditions.push('b.software_id = ?');
-      params.push(req.query.software_id);
+      params.push(req.query.software_id as string);
     }
     if (req.query.assigned_to) {
       conditions.push('b.assigned_to = ?');
-      params.push(req.query.assigned_to);
+      params.push(req.query.assigned_to as string);
     }
     if (req.query.search) {
       conditions.push('(b.title LIKE ? OR b.description LIKE ? OR b.reporter_name LIKE ?)');
@@ -258,11 +332,11 @@ bugsRouter.get('/', requireAuth, async (req: Request, res: Response) => {
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Count total
-    const [countRow] = await db.query<any>(`SELECT COUNT(*) as total FROM bugs b ${where}`, params);
+    const [countRow] = await db.query<CountRow>(`SELECT COUNT(*) as total FROM bugs b ${where}`, params);
     const total = countRow?.total || 0;
 
     // Fetch bugs with comment/attachment counts
-    const bugs = await db.query<any>(`
+    const bugs = await db.query<BugRow & { comment_count: number; attachment_count: number; last_comment: string | null }>(`
       SELECT b.*,
              (SELECT COUNT(*) FROM bug_comments WHERE bug_id = b.id) as comment_count,
              (SELECT COUNT(*) FROM bug_attachments WHERE bug_id = b.id) as attachment_count,
@@ -289,8 +363,8 @@ bugsRouter.get('/', requireAuth, async (req: Request, res: Response) => {
         },
       },
     });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -300,33 +374,33 @@ bugsRouter.get('/', requireAuth, async (req: Request, res: Response) => {
 
 bugsRouter.get('/stats', requireAuth, async (_req: Request, res: Response) => {
   try {
-    const statusCounts = await db.query<any>(`
+    const statusCounts = await db.query<GroupCountRow>(`
       SELECT status, COUNT(*) as count FROM bugs GROUP BY status
     `);
-    const severityCounts = await db.query<any>(`
+    const severityCounts = await db.query<GroupCountRow>(`
       SELECT severity, COUNT(*) as count FROM bugs GROUP BY severity
     `);
-    const phaseCounts = await db.query<any>(`
+    const phaseCounts = await db.query<GroupCountRow>(`
       SELECT workflow_phase, COUNT(*) as count FROM bugs GROUP BY workflow_phase
     `);
-    const softwareCounts = await db.query<any>(`
+    const softwareCounts = await db.query<GroupCountRow>(`
       SELECT software_name, COUNT(*) as count FROM bugs
       WHERE software_id IS NOT NULL GROUP BY software_name
     `);
-    const [totalRow] = await db.query<any>('SELECT COUNT(*) as total FROM bugs');
+    const [totalRow] = await db.query<CountRow>('SELECT COUNT(*) as total FROM bugs');
 
     res.json({
       status: 1,
       data: {
         total: totalRow?.total || 0,
-        by_status: Object.fromEntries(statusCounts.map((r: any) => [r.status, r.count])),
-        by_severity: Object.fromEntries(severityCounts.map((r: any) => [r.severity, r.count])),
-        by_phase: Object.fromEntries(phaseCounts.map((r: any) => [r.workflow_phase, r.count])),
-        by_software: Object.fromEntries(softwareCounts.map((r: any) => [r.software_name, r.count])),
+        by_status: Object.fromEntries(statusCounts.map(r => [r.status, r.count])),
+        by_severity: Object.fromEntries(severityCounts.map(r => [r.severity, r.count])),
+        by_phase: Object.fromEntries(phaseCounts.map(r => [r.workflow_phase, r.count])),
+        by_software: Object.fromEntries(softwareCounts.map(r => [r.software_name, r.count])),
       },
     });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -337,14 +411,14 @@ bugsRouter.get('/stats', requireAuth, async (_req: Request, res: Response) => {
 bugsRouter.get('/:id', requireAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
-    const comments = await db.query<any>(
+    const comments = await db.query<BugComment>(
       'SELECT * FROM bug_comments WHERE bug_id = ? ORDER BY created_at ASC',
       [id]
     );
-    const attachments = await db.query<any>(
+    const attachments = await db.query<BugAttachment>(
       'SELECT * FROM bug_attachments WHERE bug_id = ? ORDER BY created_at ASC',
       [id]
     );
@@ -352,7 +426,7 @@ bugsRouter.get('/:id', requireAuth, async (req: Request, res: Response) => {
     // If there's a linked task, fetch basic info
     let linked_task = null;
     if (bug.linked_task_id) {
-      linked_task = await db.queryOne<any>(
+      linked_task = await db.queryOne<{ id: number; title: string; status: string; workflow_phase: string; external_id: string | null }>(
         'SELECT id, title, status, workflow_phase, external_id FROM local_tasks WHERE id = ?',
         [bug.linked_task_id]
       );
@@ -364,8 +438,8 @@ bugsRouter.get('/:id', requireAuth, async (req: Request, res: Response) => {
         bug: { ...bug, comments, attachments, linked_task },
       },
     });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -463,10 +537,10 @@ bugsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [bugId]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [bugId]);
     res.status(201).json({ status: 1, message: 'Bug created', data: { bug } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -477,7 +551,7 @@ bugsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
 bugsRouter.put('/:id', requireAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const existing = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const existing = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!existing) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     const allowed = [
@@ -488,7 +562,7 @@ bugsRouter.put('/:id', requireAuth, async (req: Request, res: Response) => {
     ];
 
     const fields: string[] = [];
-    const values: any[] = [];
+    const values: (string | number | null | Date)[] = [];
 
     for (const key of allowed) {
       if (req.body[key] !== undefined) {
@@ -522,7 +596,7 @@ bugsRouter.put('/:id', requireAuth, async (req: Request, res: Response) => {
         });
       }
       // Notify assignee (if different from creator)
-      if (existing.assigned_to && existing.assigned_to !== existing.created_by) {
+      if (existing.assigned_to && Number(existing.assigned_to) !== Number(existing.created_by)) {
         bugNotify({
           userId: existing.assigned_to,
           type: 'bug_updated',
@@ -562,10 +636,10 @@ bugsRouter.put('/:id', requireAuth, async (req: Request, res: Response) => {
       });
     }
 
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     res.json({ status: 1, message: 'Bug updated', data: { bug } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -573,14 +647,14 @@ bugsRouter.put('/:id', requireAuth, async (req: Request, res: Response) => {
 //  DELETE BUG
 // ═══════════════════════════════════════════════════════════════
 
-bugsRouter.delete('/:id', requireAuth, async (req: Request, res: Response) => {
+bugsRouter.delete('/:id', strictAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const bug = await db.queryOne<any>('SELECT id, title FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<Pick<BugRow, 'id' | 'title'>>('SELECT id, title FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     // Delete attachment files from disk
-    const attachments = await db.query<any>(
+    const attachments = await db.query<BugAttachment>(
       'SELECT file_path FROM bug_attachments WHERE bug_id = ?', [id]
     );
     for (const att of attachments) {
@@ -592,8 +666,8 @@ bugsRouter.delete('/:id', requireAuth, async (req: Request, res: Response) => {
     await db.execute('DELETE FROM bugs WHERE id = ?', [id]);
 
     res.json({ status: 1, message: `Bug "${bug.title}" deleted` });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -604,7 +678,7 @@ bugsRouter.delete('/:id', requireAuth, async (req: Request, res: Response) => {
 bugsRouter.post('/:id/comments', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     const { content, author_name, is_internal, comment_type } = req.body;
@@ -632,7 +706,7 @@ bugsRouter.post('/:id/comments', requireAuth, async (req: AuthRequest, res: Resp
         });
       }
       // Notify assignee (if different from creator)
-      if (bug.assigned_to && bug.assigned_to !== bug.created_by && bug.assigned_to !== (req as AuthRequest).userId) {
+      if (bug.assigned_to && Number(bug.assigned_to) !== Number(bug.created_by) && Number(bug.assigned_to) !== Number((req as AuthRequest).userId)) {
         bugNotify({
           userId: bug.assigned_to,
           type: 'bug_comment',
@@ -664,25 +738,25 @@ bugsRouter.post('/:id/comments', requireAuth, async (req: AuthRequest, res: Resp
       }
     }
 
-    const comment = await db.queryOne<any>('SELECT * FROM bug_comments WHERE id = ?', [commentId]);
+    const comment = await db.queryOne<BugComment>('SELECT * FROM bug_comments WHERE id = ?', [commentId]);
     res.status(201).json({ status: 1, message: 'Comment added', data: { comment } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
-bugsRouter.delete('/:id/comments/:commentId', requireAuth, async (req: Request, res: Response) => {
+bugsRouter.delete('/:id/comments/:commentId', strictAuth, async (req: Request, res: Response) => {
   try {
     const { id, commentId } = req.params;
-    const comment = await db.queryOne<any>(
+    const comment = await db.queryOne<Pick<BugComment, 'id'>>(
       'SELECT id FROM bug_comments WHERE id = ? AND bug_id = ?', [commentId, id]
     );
     if (!comment) return res.status(404).json({ status: 0, message: 'Comment not found' });
 
     await db.execute('DELETE FROM bug_comments WHERE id = ?', [commentId]);
     res.json({ status: 1, message: 'Comment deleted' });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -693,7 +767,7 @@ bugsRouter.delete('/:id/comments/:commentId', requireAuth, async (req: Request, 
 bugsRouter.post('/:id/attachments', requireAuth, upload.array('files', 10), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const bug = await db.queryOne<any>('SELECT id FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<Pick<BugRow, 'id'>>('SELECT id FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     const files = req.files as Express.Multer.File[];
@@ -701,7 +775,7 @@ bugsRouter.post('/:id/attachments', requireAuth, upload.array('files', 10), asyn
       return res.status(400).json({ status: 0, message: 'No files provided' });
     }
 
-    const inserted: any[] = [];
+    const inserted: BugAttachment[] = [];
     for (const file of files) {
       const relPath = `uploads/bugs/${file.filename}`;
       const attId = await db.insert(`
@@ -709,20 +783,20 @@ bugsRouter.post('/:id/attachments', requireAuth, upload.array('files', 10), asyn
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [id, file.filename, file.originalname, file.mimetype, file.size, relPath, req.body.uploaded_by || null, req.userId || null]);
 
-      const att = await db.queryOne<any>('SELECT * FROM bug_attachments WHERE id = ?', [attId]);
+      const att = await db.queryOne<BugAttachment>('SELECT * FROM bug_attachments WHERE id = ?', [attId]);
       inserted.push(att);
     }
 
     res.status(201).json({ status: 1, message: `${inserted.length} attachment(s) uploaded`, data: { attachments: inserted } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
-bugsRouter.delete('/:id/attachments/:attId', requireAuth, async (req: Request, res: Response) => {
+bugsRouter.delete('/:id/attachments/:attId', strictAuth, async (req: Request, res: Response) => {
   try {
     const { id, attId } = req.params;
-    const att = await db.queryOne<any>(
+    const att = await db.queryOne<BugAttachment>(
       'SELECT * FROM bug_attachments WHERE id = ? AND bug_id = ?', [attId, id]
     );
     if (!att) return res.status(404).json({ status: 0, message: 'Attachment not found' });
@@ -733,15 +807,15 @@ bugsRouter.delete('/:id/attachments/:attId', requireAuth, async (req: Request, r
 
     await db.execute('DELETE FROM bug_attachments WHERE id = ?', [attId]);
     res.json({ status: 1, message: 'Attachment deleted' });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
-bugsRouter.get('/:id/attachments/:attId/download', async (req: Request, res: Response) => {
+bugsRouter.get('/:id/attachments/:attId/download', strictAuth, async (req: Request, res: Response) => {
   try {
     const { id, attId } = req.params;
-    const att = await db.queryOne<any>(
+    const att = await db.queryOne<BugAttachment>(
       'SELECT * FROM bug_attachments WHERE id = ? AND bug_id = ?', [attId, id]
     );
     if (!att) return res.status(404).json({ status: 0, message: 'Attachment not found' });
@@ -752,8 +826,8 @@ bugsRouter.get('/:id/attachments/:attId/download', async (req: Request, res: Res
     }
 
     res.download(fullPath, att.original_name);
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -773,7 +847,7 @@ bugsRouter.put('/:id/workflow', requireAuth, async (req: AuthRequest, res: Respo
       });
     }
 
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     const oldPhase = bug.workflow_phase;
@@ -807,7 +881,7 @@ bugsRouter.put('/:id/workflow', requireAuth, async (req: AuthRequest, res: Respo
         data: { bugId: String(id), phase: workflow_phase, action_url: '/bugs', link: '/bugs' },
       });
     }
-    if (bug.assigned_to && bug.assigned_to !== bug.created_by) {
+    if (bug.assigned_to && Number(bug.assigned_to) !== Number(bug.created_by)) {
       bugNotify({
         userId: bug.assigned_to,
         type: 'bug_workflow',
@@ -837,10 +911,10 @@ bugsRouter.put('/:id/workflow', requireAuth, async (req: AuthRequest, res: Respo
       });
     }
 
-    const updated = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const updated = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     res.json({ status: 1, message: 'Workflow updated', data: { bug: updated } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -853,7 +927,7 @@ bugsRouter.put('/:id/assign', requireAuth, async (req: AuthRequest, res: Respons
     const { id } = req.params;
     const { assigned_to, assigned_to_name } = req.body;
 
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     await db.execute(
@@ -881,10 +955,10 @@ bugsRouter.put('/:id/assign', requireAuth, async (req: AuthRequest, res: Respons
       });
     }
 
-    const updated = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const updated = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     res.json({ status: 1, message: 'Assignment updated', data: { bug: updated } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -897,21 +971,21 @@ bugsRouter.put('/:id/link-task', requireAuth, async (req: Request, res: Response
     const { id } = req.params;
     const { linked_task_id } = req.body;
 
-    const bug = await db.queryOne<any>('SELECT id FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<Pick<BugRow, 'id'>>('SELECT id FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     // Validate task exists if linking
     if (linked_task_id) {
-      const task = await db.queryOne<any>('SELECT id FROM local_tasks WHERE id = ?', [linked_task_id]);
+      const task = await db.queryOne<{ id: number }>('SELECT id FROM local_tasks WHERE id = ?', [linked_task_id]);
       if (!task) return res.status(404).json({ status: 0, message: 'Task not found' });
     }
 
     await db.execute('UPDATE bugs SET linked_task_id = ? WHERE id = ?', [linked_task_id || null, id]);
 
-    const updated = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const updated = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     res.json({ status: 1, message: linked_task_id ? 'Task linked' : 'Task unlinked', data: { bug: updated } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -922,7 +996,7 @@ bugsRouter.put('/:id/link-task', requireAuth, async (req: Request, res: Response
 bugsRouter.post('/:id/convert-to-task', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [id]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [id]);
     if (!bug) return res.status(404).json({ status: 0, message: 'Bug not found' });
 
     if (bug.converted_to_task) {
@@ -931,14 +1005,14 @@ bugsRouter.post('/:id/convert-to-task', requireAuth, async (req: AuthRequest, re
 
     // We need a source to create a local task — use the first available source for the software,
     // or fall back to any source
-    let source: any = null;
+    let source: { id: number } | null = null;
     if (bug.software_id) {
-      source = await db.queryOne<any>(
+      source = await db.queryOne<{ id: number }>(
         'SELECT id FROM task_sources WHERE software_id = ? LIMIT 1', [bug.software_id]
       );
     }
     if (!source) {
-      source = await db.queryOne<any>('SELECT id FROM task_sources ORDER BY id LIMIT 1');
+      source = await db.queryOne<{ id: number }>('SELECT id FROM task_sources ORDER BY id LIMIT 1');
     }
 
     if (!source) {
@@ -983,10 +1057,10 @@ bugsRouter.post('/:id/convert-to-task', requireAuth, async (req: AuthRequest, re
       VALUES (?, ?, ?, ?, 'status_change')
     `, [id, req.body.user_name || 'System', req.userId || null, `Bug converted to Task #${taskId}`]);
 
-    const task = await db.queryOne<any>('SELECT * FROM local_tasks WHERE id = ?', [taskId]);
+    const task = await db.queryOne<Record<string, unknown>>('SELECT * FROM local_tasks WHERE id = ?', [taskId]);
     res.status(201).json({ status: 1, message: 'Bug converted to task', data: { task, bug_id: id } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 
@@ -997,7 +1071,7 @@ bugsRouter.post('/:id/convert-to-task', requireAuth, async (req: AuthRequest, re
 bugsRouter.post('/from-task/:taskId', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { taskId } = req.params;
-    const task = await db.queryOne<any>('SELECT * FROM local_tasks WHERE id = ?', [taskId]);
+    const task = await db.queryOne<Record<string, unknown>>('SELECT * FROM local_tasks WHERE id = ?', [taskId]);
     if (!task) return res.status(404).json({ status: 0, message: 'Task not found' });
 
     const {
@@ -1015,7 +1089,7 @@ bugsRouter.post('/from-task/:taskId', requireAuth, async (req: AuthRequest, res:
          status, workflow_phase)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'open', 'intake')
     `, [
-      task.title.replace(/^\[Bug #\d+\]\s*/, ''),  // Strip any existing bug prefix
+      String(task.title).replace(/^\[Bug #\d+\]\s*/, ''),  // Strip any existing bug prefix
       task.description || null,
       current_behaviour || null,
       expected_behaviour || null,
@@ -1036,10 +1110,10 @@ bugsRouter.post('/from-task/:taskId', requireAuth, async (req: AuthRequest, res:
       VALUES (?, ?, ?, ?, 'status_change')
     `, [bugId, reporter_name || 'System', req.userId || null, `Bug created from Task #${taskId}`]);
 
-    const bug = await db.queryOne<any>('SELECT * FROM bugs WHERE id = ?', [bugId]);
+    const bug = await db.queryOne<BugRow>('SELECT * FROM bugs WHERE id = ?', [bugId]);
     res.status(201).json({ status: 1, message: 'Task converted to bug', data: { bug, task_id: taskId } });
-  } catch (err: any) {
-    res.status(500).json({ status: 0, message: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ status: 0, message: err instanceof Error ? err.message : 'Unknown error' });
   }
 });
 

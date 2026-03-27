@@ -12,10 +12,16 @@ import {
   EyeIcon,
   ArrowUturnLeftIcon,
   ArrowPathIcon,
+  PlusIcon,
+  ServerStackIcon,
+  RocketLaunchIcon,
+  ArrowsRightLeftIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { AuthModel } from '../../models';
 import { useAppSettings } from '../../hooks/useAppSettings';
+import { useTierLimits } from '../../hooks/useTierLimits';
+import { useProducts } from '../../hooks/useProducts';
 import NotificationDropdown from '../Notifications/NotificationDropdown';
 import UserAccountMenu from '../User/UserAccountMenu';
 import GlobalCallProvider from '../CallProvider/GlobalCallProvider';
@@ -37,38 +43,59 @@ interface NavSection {
   defaultOpen?: boolean;
 }
 
-const navSections: NavSection[] = [
-  {
-    label: 'Overview',
-    defaultOpen: true,
-    items: [
-      { name: 'Dashboard', href: '/portal', icon: HomeIcon },
-    ],
-  },
-  {
-    label: 'AI & Automation',
-    defaultOpen: true,
-    items: [
-      { name: 'My Assistants', href: '/portal/assistants', icon: SparklesIcon },
-    ],
-  },
-  {
-    label: 'Web Presence',
-    defaultOpen: true,
-    items: [
-      { name: 'Landing Pages', href: '/portal/sites', icon: GlobeAltIcon },
-    ],
-  },
-  {
+function buildNavSections(products: { ai_assistant: boolean; api_gateway: boolean }): NavSection[] {
+  const sections: NavSection[] = [
+    {
+      label: 'Overview',
+      defaultOpen: true,
+      items: [
+        { name: 'Dashboard', href: '/portal', icon: HomeIcon },
+      ],
+    },
+  ];
+
+  if (products.ai_assistant) {
+    sections.push(
+      {
+        label: 'AI & Automation',
+        defaultOpen: true,
+        items: [
+          { name: 'My Assistants', href: '/portal/assistants', icon: SparklesIcon },
+          { name: 'Knowledge Base', href: '/portal/knowledge', icon: ServerStackIcon },
+        ],
+      },
+      {
+        label: 'Web Presence',
+        defaultOpen: true,
+        items: [
+          { name: 'Websites', href: '/portal/sites', icon: GlobeAltIcon },
+        ],
+      },
+    );
+  }
+
+  if (products.api_gateway) {
+    sections.push({
+      label: 'API Gateway',
+      defaultOpen: true,
+      items: [
+        { name: 'My Gateways', href: '/portal/gateways', icon: ArrowsRightLeftIcon },
+        // Gateway-only users get assistants here instead of under AI & Automation
+        ...(!products.ai_assistant ? [{ name: 'My Assistants', href: '/portal/assistants', icon: SparklesIcon }] : []),
+      ],
+    });
+  }
+
+  sections.push({
     label: 'Account',
     defaultOpen: false,
     items: [
       { name: 'Settings', href: '/portal/settings', icon: CogIcon },
     ],
-  },
-];
+  });
 
-const allNavItems = navSections.flatMap((s) => s.items);
+  return sections;
+}
 
 const SidebarSection: React.FC<{ section: NavSection; pathname: string }> = ({
   section,
@@ -133,6 +160,10 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
   const navigate = useNavigate();
   const { user, logout, setUser, setIsAuthenticated } = useAppStore();
   const { logoUrl, siteName } = useAppSettings();
+  const { canCreate, limits, loading: limitsLoading } = useTierLimits();
+  const { products } = useProducts();
+  const navSections = buildNavSections(products);
+  const allNavItems = navSections.flatMap((s) => s.items);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMasquerading, setIsMasquerading] = useState(false);
   const [exitingMasquerade, setExitingMasquerade] = useState(false);
@@ -216,8 +247,62 @@ const PortalLayout: React.FC<PortalLayoutProps> = ({ children }) => {
         </Link>
       </div>
 
+      {/* Quick Actions */}
+      <div className="px-3 mt-4 space-y-2">
+        {limitsLoading ? (
+          <div className="space-y-2">
+            <div className="h-10 rounded-lg bg-gray-100 dark:bg-dark-700 animate-pulse" />
+            <div className="h-10 rounded-lg bg-gray-100 dark:bg-dark-700 animate-pulse" />
+          </div>
+        ) : (
+          <>
+            {products.ai_assistant && (
+              canCreate('assistants') ? (
+                <Link
+                  to="/portal/assistants/new"
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+                >
+                  <PlusIcon className="h-4 w-4" />
+                  New Assistant
+                </Link>
+              ) : (
+                <span
+                  title={`${limits.tier} plan limit reached (${limits.assistants.used}/${limits.assistants.limit})`}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 bg-gray-300 dark:bg-dark-700 text-gray-500 dark:text-gray-400 text-sm font-semibold rounded-lg cursor-not-allowed"
+                >
+                  <PlusIcon className="h-4 w-4" />
+                  Assistant Limit Reached
+                </span>
+              )
+            )}
+
+            {products.ai_assistant && (
+              canCreate('sites') ? (
+                <Link
+                  to="/portal/sites/new"
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 bg-white dark:bg-dark-700 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg border border-gray-200 dark:border-dark-600 hover:bg-gray-50 dark:hover:bg-dark-600 hover:border-picton-blue/30 transition-all"
+                >
+                  <RocketLaunchIcon className="h-4 w-4 text-emerald-500" />
+                  Create Website
+                </Link>
+              ) : (
+                <span
+                  title={`${limits.tier} plan limit reached (${limits.sites.used}/${limits.sites.limit})`}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 bg-gray-200 dark:bg-dark-700 text-gray-500 dark:text-gray-400 text-sm font-medium rounded-lg border border-gray-200 dark:border-dark-600 cursor-not-allowed"
+                >
+                  <RocketLaunchIcon className="h-4 w-4 text-gray-400 dark:text-gray-500" />
+                  Site Limit Reached
+                </span>
+              )
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="mx-3 my-3 border-t border-gray-200 dark:border-dark-700" />
+
       {/* Navigation */}
-      <nav className="mt-4 flex-1 space-y-1 px-3">
+      <nav className="flex-1 space-y-1 px-3">
         {navSections.map((section) => (
           <SidebarSection
             key={section.label}

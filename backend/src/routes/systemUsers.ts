@@ -6,6 +6,7 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest, getAuth } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 
 export const systemUsersRouter = Router();
@@ -26,6 +27,7 @@ function mapUser(u: any, roles?: any[]): any {
     is_admin: !!u.is_admin,
     is_staff: !!u.is_staff,
     is_active: !!u.isActive,
+    ai_developer_tools_granted: !!u.ai_developer_tools_granted,
     roles: roles || [],
     created_at: u.createdAt,
     updated_at: u.updatedAt,
@@ -33,24 +35,28 @@ function mapUser(u: any, roles?: any[]): any {
 }
 
 /**
- * GET /users — List all users
+ * GET /users — List all users (any authenticated user — needed for task assignment etc.)
  */
 systemUsersRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const users = await db.query<any>(
-      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, ai_developer_tools_granted, isActive, createdAt, updatedAt FROM users ORDER BY createdAt DESC'
     );
 
-    const result = [];
-    for (const u of users) {
-      const roles = await db.query<any>(
-        `SELECT r.id, r.name, r.slug FROM roles r
-         JOIN user_roles ur ON ur.role_id = r.id
-         WHERE ur.user_id COLLATE utf8mb4_unicode_ci = ? COLLATE utf8mb4_unicode_ci`,
-        [u.id]
-      );
-      result.push(mapUser(u, roles));
+    // Fetch all user-role mappings in a single query (eliminates N+1)
+    const allRoles = await db.query<any>(
+      `SELECT ur.user_id, r.id, r.name, r.slug
+       FROM user_roles ur
+       JOIN roles r ON r.id = ur.role_id`
+    );
+    const rolesByUser = new Map<string, any[]>();
+    for (const r of allRoles) {
+      const key = r.user_id;
+      if (!rolesByUser.has(key)) rolesByUser.set(key, []);
+      rolesByUser.get(key)!.push({ id: r.id, name: r.name, slug: r.slug });
     }
+
+    const result = users.map((u: any) => mapUser(u, rolesByUser.get(u.id) || []));
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -59,13 +65,13 @@ systemUsersRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, 
 });
 
 /**
- * GET /users/:id — Get single user
+ * GET /users/:id — Get single user (admin only)
  */
-systemUsersRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+systemUsersRouter.get('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, ai_developer_tools_granted, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
     if (!u) throw notFound('User not found');
@@ -84,9 +90,9 @@ systemUsersRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
 });
 
 /**
- * POST /users — Create a new user
+ * POST /users — Create a new user (admin only)
  */
-systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+systemUsersRouter.post('/', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { email, password, name, phone, is_admin, is_staff, contact_id } = req.body;
     if (!email || !password) throw badRequest('email and password are required');
@@ -120,7 +126,7 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
     }
 
     const u = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, ai_developer_tools_granted, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [userId]
     );
 
@@ -137,12 +143,12 @@ systemUsersRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
 });
 
 /**
- * PUT /users/:id — Update user
+ * PUT /users/:id — Update user (admin only)
  */
-systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+systemUsersRouter.put('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
-    const { email, password, name, phone, is_admin, is_staff, is_active, contact_id } = req.body;
+    const { email, password, name, phone, is_admin, is_staff, is_active, contact_id, ai_developer_tools_granted } = req.body;
 
     const u = await db.queryOne<any>('SELECT id FROM users WHERE id = ?', [id]);
     if (!u) throw notFound('User not found');
@@ -160,6 +166,7 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
     if (contact_id !== undefined) { updates.push('contact_id = ?'); params.push(contact_id || null); }
     if (is_admin !== undefined) { updates.push('is_admin = ?'); params.push(is_admin ? 1 : 0); }
     if (is_staff !== undefined) { updates.push('is_staff = ?'); params.push(is_staff ? 1 : 0); }
+    if (ai_developer_tools_granted !== undefined) { updates.push('ai_developer_tools_granted = ?'); params.push(ai_developer_tools_granted ? 1 : 0); }
     if (password) {
       const hash = await bcrypt.hash(password, 12);
       updates.push('passwordHash = ?'); params.push(hash);
@@ -182,7 +189,7 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
     }
 
     const updated = await db.queryOne<any>(
-      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, isActive, createdAt, updatedAt FROM users WHERE id = ?',
+      'SELECT id, email, name, phone, avatarUrl, contact_id, is_admin, is_staff, ai_developer_tools_granted, isActive, createdAt, updatedAt FROM users WHERE id = ?',
       [id]
     );
     const roles = await db.query<any>(
@@ -199,9 +206,9 @@ systemUsersRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
 });
 
 /**
- * DELETE /users/:id — Delete user
+ * DELETE /users/:id — Delete user (admin only)
  */
-systemUsersRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+systemUsersRouter.delete('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { userId } = getAuth(req);

@@ -2998,6 +2998,19 @@ async function pushToOfflineMembers(
     try {
       if (memberId === senderId) continue; // don't push to sender
 
+      // ── Check user-level notification preferences ──────
+      const userPrefs = await db.queryOne<{
+        notifications_enabled: number | boolean;
+        push_notifications_enabled: number | boolean;
+      }>(
+        `SELECT notifications_enabled, push_notifications_enabled FROM users WHERE id = ?`,
+        [memberId],
+      );
+      // Master toggle off → skip entirely
+      if (userPrefs && userPrefs.notifications_enabled === false || userPrefs?.notifications_enabled === 0) continue;
+      // Push toggle off → skip push (user may still get in-app via socket)
+      if (userPrefs && userPrefs.push_notifications_enabled === false || userPrefs?.push_notifications_enabled === 0) continue;
+
       const isMentioned = mentionedUserIds.has(memberId);
 
       // Check if muted (but skip mute check if @mentioned)

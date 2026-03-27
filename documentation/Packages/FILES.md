@@ -70,7 +70,7 @@
 
 | Section | Lines | Description |
 |---------|-------|-------------|
-| `up()` function | 22–395 | Creates 4 tables, ensures Soft Aware at ID 1, seeds 7 packages, assigns Staff package |
+| `up()` function | 22–395 | Creates 4 tables, ensures Soft Aware at ID 1, seeds 5 canonical packages (per `config/tiers.ts`), assigns Staff package |
 | Table 1: `packages` | 28–55 | Package definitions with type, pricing, limits, features JSON, display flags |
 | Table 2: `contact_packages` | 57–85 | Subscriptions with integrated credit balance, UNIQUE(contact_id, package_id) |
 | Table 3: `package_transactions` | 87–108 | Credit movement log with type enum, metadata JSON |

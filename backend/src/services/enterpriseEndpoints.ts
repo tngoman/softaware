@@ -96,6 +96,7 @@ function getDb(): Database.Database {
       id                      TEXT PRIMARY KEY,
       client_id               TEXT NOT NULL,
       client_name             TEXT NOT NULL,
+      contact_id              INTEGER,
       status                  TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'disabled')),
       
       inbound_provider        TEXT NOT NULL,
@@ -339,6 +340,66 @@ export function getRequestLogs(
     ORDER BY timestamp DESC
     LIMIT ? OFFSET ?
   `).all(endpointId, limit, offset);
+}
+
+/**
+ * Get analytics / aggregate stats for an endpoint
+ */
+export function getEndpointStats(
+  endpointId: string,
+  days: number = 30
+): {
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  avg_duration_ms: number;
+  p95_duration_ms: number;
+  requests_per_day: Array<{ day: string; count: number; errors: number }>;
+} {
+  const db = getDb();
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+      COALESCE(AVG(duration_ms), 0) as avg_duration_ms
+    FROM endpoint_requests
+    WHERE endpoint_id = ? AND timestamp >= ?
+  `).get(endpointId, since) as any;
+
+  // Approximate P95 using ORDER BY + LIMIT
+  const p95Row = db.prepare(`
+    SELECT duration_ms FROM endpoint_requests
+    WHERE endpoint_id = ? AND timestamp >= ?
+    ORDER BY duration_ms DESC
+    LIMIT 1 OFFSET (
+      SELECT MAX(0, CAST(COUNT(*) * 0.05 AS INTEGER))
+      FROM endpoint_requests
+      WHERE endpoint_id = ? AND timestamp >= ?
+    )
+  `).get(endpointId, since, endpointId, since) as any;
+
+  const perDay = db.prepare(`
+    SELECT
+      DATE(timestamp) as day,
+      COUNT(*) as count,
+      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors
+    FROM endpoint_requests
+    WHERE endpoint_id = ? AND timestamp >= ?
+    GROUP BY DATE(timestamp)
+    ORDER BY day ASC
+  `).all(endpointId, since) as any[];
+
+  return {
+    total_requests: totals?.total || 0,
+    success_count: totals?.success_count || 0,
+    error_count: totals?.error_count || 0,
+    avg_duration_ms: Math.round(totals?.avg_duration_ms || 0),
+    p95_duration_ms: p95Row?.duration_ms || 0,
+    requests_per_day: perDay || [],
+  };
 }
 
 /**

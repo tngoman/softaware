@@ -6,6 +6,7 @@
  */
 
 import { Ollama } from 'ollama';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 
 const ollama = new Ollama({ host: process.env.OLLAMA_HOST || 'http://localhost:11434' });
 
@@ -97,6 +98,10 @@ Respond ONLY with valid JSON, no markdown formatting.`;
     });
     
     const content = response.message.content.trim();
+
+    logAnonymizedChat('case-analyzer', prompt.slice(0, 200), content.slice(0, 200), {
+      source: 'case-analyzer', model: 'gemma2', provider: 'ollama',
+    });
     
     // Try to extract JSON from response
     let jsonStr = content;
@@ -173,6 +178,10 @@ Respond with ONLY valid JSON.`;
       messages: [{ role: 'user', content: prompt }],
       stream: false,
       options: { temperature: 0.2 },
+    });
+
+    logAnonymizedChat('case-analyzer', prompt.slice(0, 200), response.message.content.slice(0, 200), {
+      source: 'case-analyzer', model: 'gemma2', provider: 'ollama',
     });
     
     let jsonStr = response.message.content.trim();

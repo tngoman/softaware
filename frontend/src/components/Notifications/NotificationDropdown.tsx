@@ -190,10 +190,11 @@ const NotificationDropdown: React.FC<NotificationDropdownProps> = ({ onUnreadCou
                         <p className="text-sm font-medium text-gray-900 dark:text-white">
                           {notification.title}
                         </p>
-                        <div 
+                        <p 
                           className="text-sm text-gray-600 dark:text-gray-400 mt-1"
-                          dangerouslySetInnerHTML={{ __html: notification.message }}
-                        />
+                        >
+                          {notification.message}
+                        </p>
                         <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
                           {formatDistanceToNow(new Date(notification.created_at), { addSuffix: true })}
                         </p>

@@ -177,6 +177,10 @@ function deriveResourceType(resourcePath: string): string {
     [/^activation-keys/, 'activation-keys'],
     [/^teams/, 'teams'],
     [/^leads/, 'leads'],
+    [/^payroll/, 'payroll'],
+    [/^ai-overview/, 'ai-overview'],
+    [/^client-api-configs/, 'client-api-configs'],
+    [/^sites/, 'sites'],
   ];
 
   // Non /admin/* routes that are admin-protected
@@ -188,6 +192,7 @@ function deriveResourceType(resourcePath: string): string {
     [/^credentials/, 'credentials'],
     [/^email/, 'email'],
     [/^sms/, 'sms'],
+    [/^database/, 'database'],
   ];
 
   for (const [pattern, type] of mappings) {

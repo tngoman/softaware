@@ -240,7 +240,7 @@ const CaseDetail: React.FC = () => {
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-gray-900">{c.user_name || 'User'}</span>
                             <span className="text-xs text-gray-400">{timeAgo(c.created_at)}</span>
-                            {c.is_internal && (
+                            {!!c.is_internal && (
                               <span className="text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">Internal</span>
                             )}
                           </div>

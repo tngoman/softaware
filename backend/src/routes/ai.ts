@@ -7,6 +7,7 @@ import { db, type team_members, type ai_model_config } from '../db/mysql.js';
 import { env } from '../config/env.js';
 import type { AIMessage } from '../services/ai/AIProvider.js';
 import { analyzeWithOpenRouter } from '../services/openRouterVision.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 import dns from 'node:dns';
 
 // Force IPv4 resolution
@@ -696,6 +697,7 @@ aiRouter.post('/api/chat', requireApiKey, async (req: Request, res: Response, ne
     
     console.log('[/api/chat] Calling runChat with', messages.length, 'messages, has files:', messages[0]?.files?.length > 0);
     
+    const startMs = Date.now();
     const result = await runChat({
       provider,
       providerConfig: body.providerConfig,
@@ -707,6 +709,11 @@ aiRouter.post('/api/chat', requireApiKey, async (req: Request, res: Response, ne
     });
 
     console.log('[/api/chat] Success, model:', result.model);
+
+    logAnonymizedChat('desktop', messages[messages.length - 1]?.content?.slice(0, 200) || '', result.content?.slice(0, 200) || '', {
+      source: 'desktop', model: result.model, provider: provider || 'softaware',
+      durationMs: Date.now() - startMs,
+    });
 
     res.json(
       toOpenAIChatCompletion({
@@ -740,6 +747,7 @@ aiRouter.post('/api/simple', requireApiKey, async (req: Request, res: Response, 
     }
     messages.push({ role: 'user', content: prompt, files: files as any, images: images as any });
 
+    const startMs = Date.now();
     const result = await runChat({
       provider,
       providerConfig,
@@ -748,6 +756,11 @@ aiRouter.post('/api/simple', requireApiKey, async (req: Request, res: Response, 
       temperature: temperature ?? 0.7,
       maxTokens: max_tokens,
       teamId,
+    });
+
+    logAnonymizedChat('desktop', prompt.slice(0, 200), result.content?.slice(0, 200) || '', {
+      source: 'desktop', model: result.model, provider: provider || 'softaware',
+      durationMs: Date.now() - startMs,
     });
 
     res.json({
@@ -772,6 +785,7 @@ aiRouter.post('/chat', async (req: Request, res: Response, next: NextFunction) =
     const provider = normalizeProvider(body.provider as DesktopAIProvider | undefined);
     const messages = body.messages as Array<{ role: AIMessage['role']; content: string; images?: Array<{ mimeType: string; dataBase64: string }> }>;
     
+    const startMs = Date.now();
     const result = await runChat({
       provider,
       providerConfig: body.providerConfig,
@@ -780,6 +794,11 @@ aiRouter.post('/chat', async (req: Request, res: Response, next: NextFunction) =
       temperature: body.temperature,
       maxTokens: body.max_tokens,
       teamId: undefined, // JWT auth doesn't provide teamId
+    });
+
+    logAnonymizedChat('desktop', messages[messages.length - 1]?.content?.slice(0, 200) || '', result.content?.slice(0, 200) || '', {
+      source: 'desktop', model: result.model, provider: provider || 'softaware',
+      durationMs: Date.now() - startMs,
     });
 
     res.json(

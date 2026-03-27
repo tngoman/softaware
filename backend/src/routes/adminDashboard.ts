@@ -1,15 +1,19 @@
 import { Router, Response } from 'express';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { db } from '../db/mysql.js';
 
 export const adminDashboardRouter = Router();
+
+// Admin dashboard requires admin access
+adminDashboardRouter.use(requireAuth, requireAdmin);
 
 /* ─────────────────────────────────────────────────────────────
  *  GET /admin/dashboard
  *  Main Soft Aware admin dashboard — real stats from every
  *  key table in the system. No mock data.
  * ───────────────────────────────────────────────────────────── */
-adminDashboardRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+adminDashboardRouter.get('/', async (req: AuthRequest, res: Response, next) => {
   try {
     // ── Workspaces (teams) ──────────────────────────────────
     const wsTotal = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM teams');
@@ -53,27 +57,6 @@ adminDashboardRouter.get('/', requireAuth, async (req: AuthRequest, res: Respons
     const assistantTotal = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM assistants');
     const aiConfigRow = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM ai_model_config');
     const apiKeyTotal = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM api_keys');
-
-    // Credit usage (AI consumption — from package system)
-    const creditStats = await db.queryOne<any>(`
-      SELECT
-        COALESCE(SUM(CASE WHEN type = 'USAGE' THEN ABS(amount) ELSE 0 END), 0) AS totalUsed,
-        COALESCE(SUM(CASE WHEN type = 'PURCHASE' OR type = 'BONUS' OR type = 'MONTHLY_ALLOCATION' THEN amount ELSE 0 END), 0) AS totalPurchased,
-        COUNT(CASE WHEN type = 'USAGE' THEN 1 END) AS usageCount
-      FROM package_transactions
-    `);
-    const creditBalanceRow = await db.queryOne<any>(
-      'SELECT COALESCE(SUM(credits_balance), 0) AS totalBalance FROM contact_packages WHERE status IN (\'ACTIVE\', \'TRIAL\')'
-    );
-
-    // AI usage by request type (from package system)
-    const aiUsageByType = await db.query<any>(`
-      SELECT request_type AS requestType, COUNT(*) AS cnt, COALESCE(SUM(ABS(amount)), 0) AS totalCredits
-      FROM package_transactions
-      WHERE type = 'USAGE' AND request_type IS NOT NULL
-      GROUP BY request_type
-      ORDER BY cnt DESC
-    `);
 
     // ── Websites / Site Builder ─────────────────────────────
     const siteTotal = await db.queryOne<any>('SELECT COUNT(*) AS cnt FROM generated_sites');
@@ -233,14 +216,10 @@ adminDashboardRouter.get('/', requireAuth, async (req: AuthRequest, res: Respons
           assistants: Number(assistantTotal?.cnt || 0),
           apiKeys: Number(apiKeyTotal?.cnt || 0),
           configurations: Number(aiConfigRow?.cnt || 0),
-          creditsUsed: Number(creditStats?.totalUsed || 0),
-          creditsBalance: Number(creditBalanceRow?.totalBalance || 0),
-          totalRequests: Number(creditStats?.usageCount || 0),
-          usageByType: aiUsageByType.map((r: any) => ({
-            type: r.requestType,
-            count: Number(r.cnt),
-            credits: Number(r.totalCredits),
-          })),
+          creditsUsed: 0,
+          creditsBalance: 0,
+          totalRequests: 0,
+          usageByType: [],
         },
         websites: {
           total: Number(siteTotal?.cnt || 0),

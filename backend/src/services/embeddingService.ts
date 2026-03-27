@@ -102,7 +102,7 @@ export const embeddingService = {
 
   /**
    * Search for similar documents using vector similarity
-   * Note: This is a naive implementation. For production, consider using a dedicated vector DB
+   * Uses batched fetching to avoid loading all embeddings into memory at once.
    */
   async searchSimilar(clientId: string, queryEmbedding: number[], limit: number = 5): Promise<Array<{
     documentId: string;
@@ -111,42 +111,56 @@ export const embeddingService = {
     sourceType: string;
     similarity: number;
   }>> {
-    // Get all documents and their embeddings for this client
-    const results = await db.query<any>(
-      `SELECT 
-        dm.id as documentId,
-        dm.content,
-        dm.source_url as sourceUrl,
-        dm.source_type as sourceType,
-        de.embedding
+    const BATCH_SIZE = 500;
+    let offset = 0;
+
+    // Min-heap to track top-N results without holding all scored rows in memory
+    const topN: Array<{ documentId: string; content: string; sourceUrl: string | null; sourceType: string; similarity: number }> = [];
+
+    // Get total count first
+    const countResult = await db.queryOne<any>(
+      `SELECT COUNT(*) as cnt
        FROM document_metadata dm
        INNER JOIN document_embeddings de ON dm.id = de.document_id
        WHERE dm.client_id = ?`,
       [clientId]
     );
+    const totalRows = Number(countResult?.cnt || 0);
+    if (totalRows === 0) return [];
 
-    if (results.length === 0) {
-      return [];
+    while (offset < totalRows) {
+      const batch = await db.query<any>(
+        `SELECT 
+          dm.id as documentId,
+          dm.content,
+          dm.source_url as sourceUrl,
+          dm.source_type as sourceType,
+          de.embedding
+         FROM document_metadata dm
+         INNER JOIN document_embeddings de ON dm.id = de.document_id
+         WHERE dm.client_id = ?
+         LIMIT ? OFFSET ?`,
+        [clientId, BATCH_SIZE, offset]
+      );
+
+      for (const row of batch) {
+        const embedding = JSON.parse(row.embedding);
+        const similarity = cosineSimilarity(queryEmbedding, embedding);
+
+        if (topN.length < limit) {
+          topN.push({ documentId: row.documentId, content: row.content, sourceUrl: row.sourceUrl, sourceType: row.sourceType, similarity });
+          topN.sort((a, b) => a.similarity - b.similarity); // keep sorted ascending so [0] is the lowest
+        } else if (similarity > topN[0].similarity) {
+          topN[0] = { documentId: row.documentId, content: row.content, sourceUrl: row.sourceUrl, sourceType: row.sourceType, similarity };
+          topN.sort((a, b) => a.similarity - b.similarity);
+        }
+      }
+
+      offset += BATCH_SIZE;
     }
 
-    // Calculate similarity scores
-    const scored = results.map(row => {
-      const embedding = JSON.parse(row.embedding);
-      const similarity = cosineSimilarity(queryEmbedding, embedding);
-      
-      return {
-        documentId: row.documentId,
-        content: row.content,
-        sourceUrl: row.sourceUrl,
-        sourceType: row.sourceType,
-        similarity
-      };
-    });
-
-    // Sort by similarity (highest first) and return top N
-    return scored
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, limit);
+    // Return sorted descending (highest similarity first)
+    return topN.sort((a, b) => b.similarity - a.similarity);
   },
 
   /**

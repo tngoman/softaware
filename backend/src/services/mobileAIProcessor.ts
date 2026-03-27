@@ -13,11 +13,15 @@
 
 import { env } from '../config/env.js';
 import { db, toMySQLDate } from '../db/mysql.js';
-import { parseToolCall, type ToolCall, type ToolResult, type ToolDefinition } from './actionRouter.js';
+import { parseToolCall, stripToolCallJson, type ToolCall, type ToolResult, type ToolDefinition } from './actionRouter.js';
 import { chatCompletion, chatCompletionWithVision, type VisionChatMessage } from './assistantAIRouter.js';
+import { resolveModelTier } from './packageResolver.js';
 import { getToolsForRole, getMobileToolsSystemPrompt, type MobileRole } from './mobileTools.js';
 import { executeMobileAction, type MobileExecutionContext } from './mobileActionExecutor.js';
+import { getConfigsByContactId } from './clientApiGateway.js';
+import { getEndpoint } from './enterpriseEndpoints.js';
 import { logAnonymizedChat } from '../utils/analyticsLogger.js';
+import { checkVisionAccess } from '../middleware/packageEnforcement.js';
 import { randomUUID } from 'crypto';
 import type { AIMessage } from './ai/AIProvider.js';
 
@@ -115,13 +119,14 @@ async function loadHistory(conversationId: string): Promise<AIMessage[]> {
 async function saveMessage(
   conversationId: string,
   role: 'user' | 'assistant' | 'system' | 'tool',
-  content: string,
+  content: string | null | undefined,
   toolName?: string,
 ): Promise<void> {
+  const safeContent = content || (toolName ? `[${toolName} returned no output]` : '[empty]');
   await db.execute(
     `INSERT INTO mobile_messages (id, conversation_id, role, content, tool_name, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [randomUUID(), conversationId, role, content, toolName || null, toMySQLDate(new Date())],
+    [randomUUID(), conversationId, role, safeContent, toolName || null, toMySQLDate(new Date())],
   );
 
   // Touch conversation updated_at
@@ -153,7 +158,12 @@ export async function processMobileIntent(
   userRole: MobileRole,
 ): Promise<MobileIntentResponse> {
   const ctx: MobileExecutionContext = { userId, role: userRole };
-  const tools: ToolDefinition[] = getToolsForRole(userRole);
+  
+  // Check developer tools config
+  const userObj = await db.queryOne<{ai_developer_tools_granted: number}>('SELECT ai_developer_tools_granted FROM users WHERE id = ?', [userId]);
+  const isDev = !!userObj?.ai_developer_tools_granted;
+  
+  const tools: ToolDefinition[] = getToolsForRole(userRole, isDev);
   const toolsPrompt = getMobileToolsSystemPrompt(tools);
 
   // --- Load assistant if selected (prompt stitching) ---
@@ -167,10 +177,98 @@ export async function processMobileIntent(
   }
 
   // --- THE PROMPT STITCHING (The Guardrail) ---
-  const systemPrompt = buildStitchedPrompt(assistantRow, toolsPrompt, userRole);
-  // Only use preferred_model override for Ollama (free tier).
-  // For paid tier (OpenRouter), use the configured OPENROUTER_MODEL.
-  const assistantTier = assistantRow?.tier || 'free';
+  let systemPrompt = buildStitchedPrompt(assistantRow, toolsPrompt, userRole, isDev);
+
+  // --- GATEWAY CONTEXT INJECTION ---
+  // If this client user has gateway configs (client_api_configs rows for their contact_id),
+  // they are a gateway client (e.g. Braai Online). Override the prompt so the AI acts as
+  // their business assistant, not a generic Soft Aware website assistant.
+  if (userRole === 'client') {
+    try {
+      const userRow = await db.queryOne<{ contact_id: number | null }>(
+        'SELECT contact_id FROM users WHERE id = ?',
+        [userId],
+      );
+      if (userRow?.contact_id) {
+        const gwConfigs = getConfigsByContactId(userRow.contact_id);
+        if (gwConfigs.length > 0) {
+          // Collect all allowed gateway tools across all configs
+          const allTools: string[] = [];
+          let clientId = '';
+          let clientName = '';
+          let richSchemas: any[] | null = null;
+          for (const gc of gwConfigs) {
+            if (!clientId) clientId = gc.client_id;
+            if (!clientName) clientName = gc.client_name;
+            try { allTools.push(...JSON.parse(gc.allowed_actions || '[]')); } catch {}
+            // Load rich tool schemas from linked enterprise endpoint
+            if (!richSchemas && gc.endpoint_id) {
+              try {
+                const ep = getEndpoint(gc.endpoint_id);
+                if (ep?.llm_tools_config) richSchemas = JSON.parse(ep.llm_tools_config);
+              } catch {}
+            }
+          }
+
+          if (allTools.length > 0) {
+            ctx.gatewayTools = allTools;
+            ctx.gatewayClientId = clientId;
+
+            // Build detailed tool signatures from rich schemas, or fall back to names
+            const gatewayToolsBlock = richSchemas
+              ? buildMobileGatewayToolsPrompt(richSchemas)
+              : `GATEWAY TOOLS: ${allTools.join(', ')}`;
+
+            // Build a gateway-aware assistant name, preserving assistant identity
+            const assistantName = assistantRow?.name || clientName || 'Business Assistant';
+            const personalityLine = assistantRow?.personality_flare
+              || (assistantRow?.personality ? `Be ${assistantRow.personality}.` : 'Be helpful, professional, and to the point.');
+            const goalLine = assistantRow?.primary_goal ? `Your primary goal: ${assistantRow.primary_goal}` : '';
+
+            // Preserve the assistant's identity while adding gateway capabilities
+            systemPrompt = `You are ${assistantName}, a business assistant for ${clientName}.
+${goalLine}
+
+${personalityLine}
+
+${gatewayToolsBlock}
+
+To call an action, respond with ONLY this JSON, nothing else before or after:
+{"tool_call": {"name": "ACTION_NAME", "arguments": {…}}}
+
+CRITICAL RULES:
+- Output ONLY the JSON object when calling a tool. No text before it. No text after it.
+- Use EXACTLY the parameter names listed above. Do not invent alternatives.
+- The system executes the action and feeds you the result automatically.
+- NEVER write "[Executed ...]" text. Only the system executes actions.
+- Keep replies short and direct. 1-2 sentences for greetings and simple questions.
+- Only list capabilities when the user explicitly asks what you can do.
+- Resolve branch names to branch_id via listBranches before using branch_id in other calls.
+- Resolve product names to product_id and price via searchProducts before calling createOrder.
+- Do NOT guess or fabricate IDs. Always look them up first.
+- For walk-in or anonymous customers, omit user_id, user_phone, user_email from createOrder.
+
+VOICE INTERACTION:
+- Users interact via voice (speech-to-text). Your replies are read aloud via text-to-speech.
+- If someone tests their mic, respond warmly. You CAN receive their voice input.
+- Do NOT say you are text-only or cannot hear.
+- Do NOT use markdown formatting. Write in plain natural sentences.
+- Use commas and periods for pauses instead of bullet points or numbered lists.
+
+${toolsPrompt}`.trim();
+
+            console.log(`[MobileAI] Gateway detected: ${clientId} (${clientName}) — ${allTools.length} tools, schemas: ${richSchemas ? 'rich' : 'names-only'}`);
+          }
+        }
+      }
+    } catch (gwErr) {
+      console.warn(`[MobileAI] Gateway context lookup failed:`, (gwErr as Error).message);
+    }
+  }
+
+  // Resolve model tier from the user's package (pro/advanced/enterprise → 'paid').
+  // Trial users get the paid model chain but their usage limits stay at free tier.
+  const assistantTier = await resolveModelTier(userId);
   const modelOverride = assistantTier === 'paid' ? undefined : (assistantRow?.preferred_model || undefined);
 
   // --- Conversation setup ---
@@ -198,6 +296,23 @@ export async function processMobileIntent(
   const hasImage = !!req.image;
   if (hasImage) {
     console.log(`[MobileAI] Image attached (${Math.round(req.image!.length / 1024)}KB base64), routing to vision model`);
+
+    // ── Vision hard gate: only Advanced+ packages can process files ──
+    const userRow = await db.queryOne<{ contact_id: number | null }>(
+      'SELECT contact_id FROM users WHERE id = ?',
+      [userId],
+    );
+    if (userRow?.contact_id) {
+      const visionCheck = await checkVisionAccess(userRow.contact_id);
+      if (!visionCheck.allowed) {
+        console.log(`[MobileAI] Vision blocked for user ${userId}: ${visionCheck.reason}`);
+        return {
+          reply: 'Image analysis requires an Advanced or Enterprise package. Please upgrade to unlock vision capabilities.',
+          conversationId,
+          toolsUsed: [],
+        };
+      }
+    }
   }
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -242,18 +357,30 @@ export async function processMobileIntent(
 
     if (result.data) lastToolData = result.data;
 
+    // Ensure we always have a string for the tool result
+    const toolResultMsg = result.message || (result as any).error || `[${toolCall.name} completed with no output]`;
+
+    // Strip tool call JSON from the reply so conversation history is clean
+    const cleanedAssistantMsg = stripToolCallJson(llmReply);
+
     // Feed the tool call + result back into the conversation
-    messages.push({ role: 'assistant', content: llmReply });
+    if (cleanedAssistantMsg) {
+      messages.push({ role: 'assistant', content: cleanedAssistantMsg });
+    }
     messages.push({
       role: 'user',
-      content: `[Tool Result for ${toolCall.name}]: ${result.message}`,
+      content: `[Tool Result for ${toolCall.name}]: ${toolResultMsg}`,
     });
 
     // Save tool interaction in history
-    await saveMessage(conversationId, 'tool', result.message, toolCall.name);
+    if (cleanedAssistantMsg) {
+      await saveMessage(conversationId, 'assistant', cleanedAssistantMsg);
+    }
+    await saveMessage(conversationId, 'tool', toolResultMsg, toolCall.name);
   }
 
-  // --- Save final reply ---
+  // --- Clean and save final reply ---
+  llmReply = stripToolCallJson(llmReply);
   await saveMessage(conversationId, 'assistant', llmReply);
 
   // --- Anonymized telemetry (fire-and-forget) ---
@@ -347,6 +474,7 @@ function buildStitchedPrompt(
   assistant: AssistantPromptRow | null,
   toolsPrompt: string,
   role: MobileRole,
+  isDev: boolean = false,
 ): string {
   // Determine the core instructions
   let adminCore: string;
@@ -378,13 +506,42 @@ function buildStitchedPrompt(
     ? `Your name is "${assistant.name}".${assistant.primary_goal ? ` Your primary goal: ${assistant.primary_goal}` : ''}`
     : '';
 
+  // Developer workflow instructions — injected when user has AI dev tools granted
+  const devInstructions = isDev ? `
+
+DEVELOPER WORKFLOW — CRITICAL RULES:
+You have access to developer tools for reading and modifying codebases. This is a TEXT-BASED chat interface (not voice). You MUST use markdown formatting, code blocks, and structured text in your responses.
+
+FORMATTING RULES:
+- ALWAYS wrap code in fenced code blocks with the language identifier, e.g. \`\`\`php, \`\`\`javascript, \`\`\`python, \`\`\`diff
+- When showing file contents, ALWAYS include the filename as a bold heading above the code block
+- When showing changes, ALWAYS present a clear BEFORE and AFTER comparison:
+  1. Show "**Before** (filename)" followed by the original code in a fenced code block
+  2. Show "**After** (filename)" followed by the modified code in a fenced code block  
+  3. Explain what changed and why between them
+- For diffs, use \`\`\`diff blocks where + lines are additions and - lines are removals
+- Use headings (##, ###) to organize your analysis
+- Use bullet points for lists of findings
+- Use **bold** for emphasis on important terms
+- Use \`inline code\` for function names, variable names, file paths
+
+When helping with bug fixes, you MUST follow this workflow:
+1. EXPLORE FIRST: Use list_codebase_files to understand the project structure.
+2. SEARCH: Use search_codebase to find relevant code (controllers, routes, models, views) related to the bug.
+3. READ: Use read_codebase_file to read the ACTUAL source code of the files involved. NEVER guess or fabricate file contents.
+4. ANALYSE: Explain to the user what you found, what the root cause is, and what your proposed fix is. Wait for the user to agree before modifying.
+5. MODIFY: Only after reading the actual code and getting user approval, use modify_codebase to apply the fix. The content MUST be based on the real file content with only the necessary changes.
+6. VERIFY: Ask the user to test the fix. Only commit after confirmation.
+
+NEVER skip steps 1-3. NEVER fabricate code you haven't read. NEVER rewrite entire files from scratch — make targeted, minimal changes to fix the specific bug.` : '';
+
   // The concatenation
   return `${adminCore}
 
 ${identity}
 
 CRITICAL INSTRUCTION FOR TONE AND PERSONALITY:
-${personalityFlare}
+${personalityFlare}${devInstructions}
 
 ${toolsPrompt}`.trim();
 }
@@ -414,4 +571,28 @@ export async function resolveUserRole(userId: string): Promise<MobileRole> {
     if (STAFF_SLUGS.has(row.slug)) return 'staff';
   }
   return 'client';
+}
+
+/**
+ * Build a detailed tool-calling prompt from rich OpenAI-format schemas.
+ * Same format as the widget path's buildGatewayToolsPromptFromSchemas.
+ */
+function buildMobileGatewayToolsPrompt(schemas: any[]): string {
+  const toolLines = schemas.map(schema => {
+    const fn = schema.function || schema;
+    const name = fn.name || 'unknown';
+    const desc = fn.description || '';
+    const params = fn.parameters?.properties || {};
+    const required: string[] = fn.parameters?.required || [];
+
+    const paramParts = Object.entries(params).map(([pname, pdef]: [string, any]) => {
+      const req = required.includes(pname) ? ' *required*' : '';
+      return `    ${pname} (${pdef.type || 'string'}${req}): ${pdef.description || ''}`;
+    });
+
+    if (paramParts.length === 0) return `- ${name}: ${desc} (no arguments)`;
+    return `- ${name}: ${desc}\n${paramParts.join('\n')}`;
+  }).join('\n');
+
+  return `AVAILABLE ACTIONS:\n${toolLines}`;
 }

@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { env } from '../config/env.js';
+import { db } from '../db/mysql.js';
+import { getCredential, getYocoActiveConfig, invalidateCache } from '../services/credentialVault.js';
 
 export const adminConfigRouter = Router();
 
@@ -32,18 +34,26 @@ adminConfigRouter.get('/payment-gateways', async (req, res, next) => {
           testMode: process.env.PAYFAST_TEST_MODE === 'true',
         },
       },
-      {
-        provider: 'YOCO',
-        name: 'Yoco',
-        enabled: !!process.env.YOCO_SECRET_KEY,
-        configured: !!process.env.YOCO_SECRET_KEY,
-        settings: {
-          hasSecretKey: !!process.env.YOCO_SECRET_KEY,
-          hasPublicKey: !!process.env.YOCO_PUBLIC_KEY,
-          hasWebhookSecret: !!process.env.YOCO_WEBHOOK_SECRET,
-          testMode: process.env.YOCO_TEST_MODE === 'true',
-        },
-      },
+      await (async () => {
+        const yocoCfg = await getYocoActiveConfig();
+        const hasLive = !!(await getCredential('Yoco Live'))?.value;
+        const hasTest = !!(await getCredential('Yoco Test'))?.value;
+        return {
+          provider: 'YOCO',
+          name: 'Yoco',
+          mode: yocoCfg?.mode || 'test',
+          enabled: !!yocoCfg,
+          configured: !!yocoCfg,
+          settings: {
+            mode: yocoCfg?.mode || 'test',
+            hasLiveSecretKey: hasLive,
+            hasTestSecretKey: hasTest,
+            hasLiveWebhookSecret: hasLive,
+            hasTestWebhookSecret: hasTest,
+            webhookUrl: env.YOCO_WEBHOOK_ENDPOINT_URL || 'https://api.softaware.net.za/v1/webhooks/yoco',
+          },
+        };
+      })(),
       {
         provider: 'MANUAL',
         name: 'Manual Payment',
@@ -133,6 +143,31 @@ adminConfigRouter.post('/payment-gateways/test', async (req, res, next) => {
       message: testResult.message,
       error: testResult.error,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /admin/config/payment-gateways/yoco/mode
+ * Toggle Yoco live/test mode
+ */
+adminConfigRouter.post('/payment-gateways/yoco/mode', async (req: AuthRequest, res, next) => {
+  try {
+    const { mode } = req.body;
+    if (mode !== 'live' && mode !== 'test') {
+      return res.status(400).json({ success: false, error: 'mode must be "live" or "test"' });
+    }
+
+    await db.execute(
+      "UPDATE sys_settings SET `value` = ? WHERE `key` = 'yoco_mode'",
+      [mode],
+    );
+
+    // Invalidate credential vault cache so the new mode takes effect immediately
+    invalidateCache();
+
+    res.json({ success: true, mode, message: `Yoco mode switched to ${mode}` });
   } catch (error) {
     next(error);
   }

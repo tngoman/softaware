@@ -189,8 +189,17 @@ const SoftwareDialog: React.FC<{
     has_external_integration: false,
     external_username: '', external_password: '',
     external_live_url: '', external_test_url: '',
-    external_mode: 'live', order_number: '',
+    external_mode: 'live', order_number: '', linked_codebase: '',
   });
+
+  const [codebases, setCodebases] = useState<string[]>([]);
+  useEffect(() => {
+    if (open) {
+      api.get('/updates/software/codebases')
+        .then(res => setCodebases(res.data.codebases || []))
+        .catch(err => console.error("Codebases fetch failed:", err));
+    }
+  }, [open]);
 
   useEffect(() => {
     if (open) {
@@ -208,6 +217,7 @@ const SoftwareDialog: React.FC<{
           external_test_url: software.external_test_url || '',
           external_mode: software.external_mode || 'live',
           order_number: String(software.order_number || ''),
+          linked_codebase: software.linked_codebase || '',
         });
       } else {
         setForm({
@@ -215,7 +225,7 @@ const SoftwareDialog: React.FC<{
           has_external_integration: false,
           external_username: '', external_password: '',
           external_live_url: '', external_test_url: '',
-          external_mode: 'live', order_number: '',
+          external_mode: 'live', order_number: '', linked_codebase: '',
         });
       }
     }
@@ -360,6 +370,19 @@ const SoftwareDialog: React.FC<{
                     </Field>
                   </>
                 )}
+
+                <h3 className="text-sm font-semibold text-gray-900 mt-6 pt-4 border-t">AI Debugging & Operations</h3>
+                <Field label="Linked Codebase" id="linked_codebase">
+                  <select id="linked_codebase" value={form.linked_codebase}
+                    onChange={e => setForm({ ...form, linked_codebase: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg text-sm bg-white">
+                    <option value="">-- No Linked Codebase --</option>
+                    {codebases.map(cb => (
+                      <option key={cb} value={cb}>{cb}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-400 mt-1">Select a local directory to enable AI bug fixing and Git operations.</p>
+                </Field>
               </>
             )}
           </div>

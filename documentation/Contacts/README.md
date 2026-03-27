@@ -12,22 +12,24 @@ Central admin hub for managing the entire client ecosystem — customers, suppli
   - **Assistants** — Rich card grid with personality, primary goal, business type, Knowledge Health Score (progress bar + category checklist), Knowledge Base stats, streaming chat modal, embed modal, and copy-link
   - **Landing Pages** — Rich card grid with hero image thumbnails, HTML size/services/deployment stats, preview button (with JWT auth), live site link
   - **Enterprise Endpoints** — Rich card grid with LLM config, request stats, webhook URL, expandable system prompt, logs modal with payload viewer, status toggle (pause/activate)
-- **Contact Details**: Rich detail view with 6-tab interface — overview (financial summary), invoices, quotations, statement (aging + PDF), assistants (rich cards with Knowledge Health Score, streaming chat, embed modal), and landing pages (rich cards with hero image, preview, live site). Same rich card pattern as the admin hub, filtered by the individual contact's linked user.
+- **Contact Details**: Rich detail view with type-aware tab interfaces:
+  - **Customers** (6 tabs): Overview (financial summary), Invoices, Quotations, Statement (aging + PDF), Assistants (rich cards with Knowledge Health Score, streaming chat, embed modal), Landing Pages (rich cards with hero image, preview, live site). Same rich card pattern as the admin hub, filtered by the individual contact's linked user.
+  - **Suppliers** (3 tabs): Overview (expense summary cards + recent expenses list), Expenses (DataTable with category, VAT type badges), Documentation (markdown renderer). Expenses data sourced from `transactions_vat` table matched by `party_name` → `company_name`.
 - **Contact Form / Leads**: Public endpoint for website contact form submissions — validates, rate-limits, looks up site owner, and emails the submission via SMTP.
 
 ## Key Files (summary)
 
 | Layer | File | LOC | Role |
 |-------|------|-----|------|
-| Backend Route | `src/routes/contacts.ts` | 240 | Contact CRUD + per-contact invoices/quotations |
+| Backend Route | `src/routes/contacts.ts` | 464 | Contact CRUD + per-contact invoices/quotations/expenses |
 | Backend Route | `src/routes/contactFormRouter.ts` | 215 | Public contact form submission + email |
 | Backend Route | `src/routes/adminClientManager.ts` | 451 | Admin overview API + per-client detail: users, assistants (with knowledge stats), landing pages, enterprise endpoints |
 | Backend Route | `src/routes/siteBuilder.ts` | 1341 | Site CRUD, preview (admin bypass), generation, deployment |
 | Backend Service | `src/services/enterpriseEndpoints.ts` | — | SQLite-based enterprise endpoint storage |
 | Frontend Page | `pages/contacts/Contacts.tsx` | 1431 | 5-tab admin hub: Clients, Suppliers, Assistants, Landing Pages, Enterprise Endpoints |
-| Frontend Page | `pages/contacts/ContactDetails.tsx` | 1322 | Contact detail with 6 tabs: overview, invoices, quotations, statement, assistants (rich cards + chat/embed), landing pages (rich cards + preview) |
+| Frontend Page | `pages/contacts/ContactDetails.tsx` | 1956 | Contact detail: customers get 6 tabs (overview, invoices, quotations, statement, assistants, landing pages); suppliers get 3 tabs (overview, expenses, documentation) |
 | Frontend Page | `pages/admin/EnterpriseEndpoints.tsx` | 642 | Original standalone enterprise endpoints page (still exists, functionality now embedded in Contacts tab) |
-| Frontend Model | `models/ContactModel.ts` | 79 | API wrapper for contact endpoints |
+| Frontend Model | `models/ContactModel.ts` | 98 | API wrapper for contact endpoints (including supplier expenses) |
 | Frontend Model | `models/AdminClientModel.ts` | — | API wrapper for admin overview endpoint |
 | Frontend Model | `models/AdminEnterpriseModel.ts` | — | API wrapper for enterprise endpoint CRUD, status, and logs |
 
@@ -56,6 +58,8 @@ Central admin hub for managing the entire client ecosystem — customers, suppli
 | `invoices` | Related invoices (via `contact_id`) | Read for contact detail + statement |
 | `quotations` | Related quotations (via `contact_id`) | Read for contact detail |
 | `payments` | Related payments (via invoice) | Read for statement data |
+| `transactions_vat` | VAT-compliant expense/income transactions | Matched by `party_name` → `contacts.company_name` for supplier expenses. Key columns: `transaction_date`, `invoice_number`, `party_name`, `exclusive_amount`, `vat_amount`, `total_amount`, `transaction_type`, `vat_type`, `expense_category_id` |
+| `tb_expense_categories` | Legacy expense category lookup (uses `tb_` prefix) | FK target for `transactions_vat.expense_category_id` via `category_id` column. Key columns: `category_id`, `category_name` |
 
 ## Architecture Notes
 1. **5-tab admin hub**: Contacts.tsx serves as the central management interface. Clients/Suppliers tabs use server-side pagination via the contacts API. Assistants/Landing Pages/Enterprise Endpoints tabs load data from the admin overview API.
@@ -73,3 +77,5 @@ Central admin hub for managing the entire client ecosystem — customers, suppli
 13. **Enterprise endpoints in SQLite**: Unlike other entities stored in MySQL, enterprise endpoints use a separate SQLite database at `/var/opt/backend/data/enterprise_endpoints.db`, accessed via `getAllEndpoints()`.
 14. **Contact→User linkage**: ContactDetails.tsx resolves the contact's linked user via `users.contact_id`. If a linked user is found, `AdminClientModel.getClient(userId)` fetches enriched assistant and landing page data for the Assistants and Landing Pages tabs.
 15. **Package billing is contact-scoped**: The new Packages system (see [Packages module](../Packages/README.md)) bills per-contact, not per-user or per-team. The `user_contact_link` table maps multiple users to one contact, and `contact_packages` holds the subscription + credit balance. All AI credit deductions flow through `contact_packages`.
+16. **Supplier expense linkage**: Supplier contacts display expense data from `transactions_vat` by matching `party_name` to the contact's `company_name`. The endpoint joins with `tb_expense_categories` (legacy table with `category_id` PK — **not** the newer `expense_categories` table which uses `id`). Returns individual expenses + aggregated summary (total, VAT, exclusive, count).
+17. **Type-aware contact detail tabs**: ContactDetails.tsx renders different tab sets based on `contact_type`. Customers (`contact_type !== 2`) get the full 6-tab interface (Overview, Invoices, Quotations, Statement, Assistants, Landing Pages). Suppliers (`contact_type === 2`) get a 3-tab interface (Overview, Expenses, Documentation) with expense summary cards and DataTable.

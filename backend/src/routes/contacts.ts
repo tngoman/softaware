@@ -4,6 +4,10 @@ import { db, toMySQLDate } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 import type { Contact } from '../db/businessTypes.js';
+import { loadCompanySettings, logoToBase64 } from '../utils/pdfGenerator.js';
+import puppeteer from 'puppeteer';
+import path from 'path';
+import fs from 'fs/promises';
 
 export const contactsRouter = Router();
 
@@ -335,15 +339,24 @@ contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, 
       const paid = Number(inv.total_paid) || 0;
       const balance = amount - paid;
 
+      // Calculate days overdue for this invoice
+      const dueDate = new Date(inv.due_date || inv.invoice_date);
+      const daysOverdue = Math.max(0, Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
+
       // Add invoice as a transaction
       transactions.push({
         date: inv.invoice_date,
-        type: 'invoice',
+        type: 'invoice' as const,
         reference: inv.invoice_number,
         description: `Invoice ${inv.invoice_number}`,
+        invoice_id: inv.id,
+        amount: amount,
         debit: amount,
         credit: 0,
-        balance: 0, // Will be running balance
+        balance: 0,
+        payment_status: Number(inv.paid) || 0,
+        days_overdue: balance > 0 ? daysOverdue : 0,
+        due_date: inv.due_date,
       });
 
       // Add payments for this invoice
@@ -354,9 +367,11 @@ contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, 
       for (const pmt of payments) {
         transactions.push({
           date: pmt.payment_date,
-          type: 'payment',
+          type: 'payment' as const,
           reference: pmt.reference_number || `PMT-${pmt.id}`,
-          description: `Payment for ${inv.invoice_number}`,
+          description: `Payment — ${inv.invoice_number}${pmt.payment_method ? ' (' + pmt.payment_method + ')' : ''}`,
+          invoice_id: inv.id,
+          amount: -Number(pmt.payment_amount),
           debit: 0,
           credit: Number(pmt.payment_amount),
           balance: 0,
@@ -365,9 +380,6 @@ contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, 
 
       // Aging calculation based on outstanding balance
       if (balance > 0) {
-        const dueDate = new Date(inv.due_date || inv.invoice_date);
-        const daysOverdue = Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
-
         if (daysOverdue <= 0) {
           aging.current += balance;
         } else if (daysOverdue <= 30) {
@@ -398,6 +410,246 @@ contactsRouter.get('/:id/statement-data', requireAuth, async (req: AuthRequest, 
         transactions,
         closing_balance: closingBalance,
         aging,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /contacts/:id/statement - Generate statement PDF for download
+ */
+contactsRouter.get('/:id/statement', requireAuth, async (req: AuthRequest, res: Response, next) => {
+  try {
+    const { id } = req.params;
+
+    const contact = await db.queryOne<any>(
+      `SELECT ${CONTACT_SELECT} FROM contacts c WHERE c.id = ?`,
+      [id]
+    );
+    if (!contact) throw notFound('Contact not found');
+
+    // Fetch same data as statement-data
+    const invoices = await db.query<any>(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.due_date,
+              i.invoice_amount, i.paid,
+              COALESCE(
+                (SELECT SUM(p.payment_amount) FROM payments p WHERE p.invoice_id = i.id), 0
+              ) as total_paid
+       FROM invoices i
+       WHERE i.contact_id = ? AND i.active = 1
+       ORDER BY i.invoice_date ASC`,
+      [id]
+    );
+
+    const now = new Date();
+    let closingBalance = 0;
+    const aging = { current: 0, '30_days': 0, '60_days': 0, '90_days': 0, total: 0 };
+    const transactions: any[] = [];
+
+    for (const inv of invoices) {
+      const amount = Number(inv.invoice_amount) || 0;
+      const paid = Number(inv.total_paid) || 0;
+      const balance = amount - paid;
+      const dueDate = new Date(inv.due_date || inv.invoice_date);
+      const daysOverdue = Math.max(0, Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
+
+      transactions.push({ date: inv.invoice_date, type: 'invoice', description: `Invoice ${inv.invoice_number}`, debit: amount, credit: 0, balance: 0 });
+
+      const payments = await db.query<any>('SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date ASC', [inv.id]);
+      for (const pmt of payments) {
+        transactions.push({ date: pmt.payment_date, type: 'payment', description: `Payment — ${inv.invoice_number}${pmt.payment_method ? ' (' + pmt.payment_method + ')' : ''}`, debit: 0, credit: Number(pmt.payment_amount), balance: 0 });
+      }
+
+      if (balance > 0) {
+        if (daysOverdue <= 0) aging.current += balance;
+        else if (daysOverdue <= 30) aging['30_days'] += balance;
+        else if (daysOverdue <= 60) aging['60_days'] += balance;
+        else aging['90_days'] += balance;
+        aging.total += balance;
+      }
+      closingBalance += balance;
+    }
+
+    transactions.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    let runBal = 0;
+    for (const t of transactions) { runBal += t.debit - t.credit; t.balance = runBal; }
+
+    // Build HTML for statement PDF
+    const co = await loadCompanySettings();
+    const logoDataUri = await logoToBase64(co.site_logo);
+    const R = (v: number) => new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' }).format(v);
+    const fmtDate = (d: string | Date) => {
+      try {
+        const date = typeof d === 'string' ? new Date(d) : d;
+        if (isNaN(date.getTime())) return String(d);
+        return date.toLocaleDateString('en-ZA', { year: 'numeric', month: 'short', day: 'numeric' });
+      } catch { return String(d); }
+    };
+    const contactName = contact.contact_company || contact.contact_person || '';
+    const stmtDate = fmtDate(now.toISOString());
+
+    const transRows = transactions.map(t => `
+      <tr style="${t.type === 'payment' ? 'background:#F0FDF4;' : ''}">
+        <td style="padding:8px 12px;border-bottom:1px solid #E5E7EB;font-size:11px">${fmtDate(t.date)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #E5E7EB;font-size:11px">${t.description}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #E5E7EB;font-size:11px;text-align:right">${t.debit > 0 ? R(t.debit) : ''}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #E5E7EB;font-size:11px;text-align:right;color:#16A34A">${t.credit > 0 ? R(t.credit) : ''}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #E5E7EB;font-size:11px;text-align:right;font-weight:600">${R(t.balance)}</td>
+      </tr>`).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:20px;color:#1F2937}
+      .header{background:linear-gradient(135deg,#00A4EE,#0066CC);color:#fff;padding:24px 30px;border-radius:8px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}
+      .section{background:#fff;border:1px solid #E5E7EB;border-radius:8px;margin-bottom:16px;overflow:hidden}
+      .section-title{background:#F9FAFB;padding:12px 16px;font-weight:700;font-size:13px;border-bottom:1px solid #E5E7EB;color:#374151}
+      table{width:100%;border-collapse:collapse}
+    </style></head><body>
+      <div class="header">
+        <div>
+          ${logoDataUri
+            ? `<div style="background:#fff;border-radius:8px;padding:8px;display:inline-block"><img src="${logoDataUri}" style="max-height:60px;max-width:180px" /></div>`
+            : `<div style="font-size:22px;font-weight:700">${co.site_name || 'Statement'}</div>`
+          }
+          <div style="font-size:12px;opacity:0.9">${co.site_email || ''}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:700">STATEMENT</div>
+          <div style="font-size:11px;opacity:0.9">Date: ${stmtDate}</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Account Details</div>
+        <div style="padding:14px 16px;display:flex;gap:40px;font-size:12px">
+          <div><div style="color:#6B7280;margin-bottom:2px">Customer</div><div style="font-weight:600">${contactName}</div></div>
+          <div><div style="color:#6B7280;margin-bottom:2px">Email</div><div>${contact.contact_email || '-'}</div></div>
+          <div><div style="color:#6B7280;margin-bottom:2px">Phone</div><div>${contact.contact_phone || '-'}</div></div>
+          <div><div style="color:#6B7280;margin-bottom:2px">VAT No.</div><div>${contact.contact_vat_number || '-'}</div></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title" style="background:#FEF2F2;color:#991B1B">Aging Summary</div>
+        <div style="padding:14px 16px;display:flex;gap:12px">
+          <div style="flex:1;text-align:center;background:#F0FDF4;border:2px solid #22C55E;border-radius:8px;padding:10px">
+            <div style="font-size:10px;color:#6B7280">CURRENT</div><div style="font-size:16px;font-weight:700">${R(aging.current)}</div>
+          </div>
+          <div style="flex:1;text-align:center;background:#FEFCE8;border:2px solid #EAB308;border-radius:8px;padding:10px">
+            <div style="font-size:10px;color:#6B7280">31-60 DAYS</div><div style="font-size:16px;font-weight:700">${R(aging['30_days'])}</div>
+          </div>
+          <div style="flex:1;text-align:center;background:#FFF7ED;border:2px solid #F97316;border-radius:8px;padding:10px">
+            <div style="font-size:10px;color:#6B7280">61-90 DAYS</div><div style="font-size:16px;font-weight:700">${R(aging['60_days'])}</div>
+          </div>
+          <div style="flex:1;text-align:center;background:#FEF2F2;border:2px solid #EF4444;border-radius:8px;padding:10px">
+            <div style="font-size:10px;color:#6B7280">90+ DAYS</div><div style="font-size:16px;font-weight:700">${R(aging['90_days'])}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Transaction History</div>
+        <table>
+          <thead><tr style="background:#00A4EE;color:#fff">
+            <th style="padding:8px 12px;text-align:left;font-size:11px">DATE</th>
+            <th style="padding:8px 12px;text-align:left;font-size:11px">DESCRIPTION</th>
+            <th style="padding:8px 12px;text-align:right;font-size:11px">DEBIT</th>
+            <th style="padding:8px 12px;text-align:right;font-size:11px">CREDIT</th>
+            <th style="padding:8px 12px;text-align:right;font-size:11px">BALANCE</th>
+          </tr></thead>
+          <tbody>
+            ${transRows}
+            <tr style="background:#00A4EE;color:#fff">
+              <td colspan="3"></td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:12px">CLOSING BALANCE:</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:14px">${R(closingBalance)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="text-align:center;padding:16px;font-size:11px;color:#9CA3AF">
+        This is a computer-generated statement and does not require a signature.
+      </div>
+    </body></html>`;
+
+    // Render to PDF
+    const PUBLIC_DIR = path.join(import.meta.dirname || __dirname, '..', '..', 'public');
+    const outDir = path.join(PUBLIC_DIR, 'pdfs');
+    await fs.mkdir(outDir, { recursive: true });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const safeContact = contactName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30);
+    const filename = `statement_${safeContact}_${timestamp}.pdf`;
+    const filepath = path.join(outDir, filename);
+    const webPath = `public/pdfs/${filename}`;
+
+    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: 'networkidle0' });
+      await page.pdf({ path: filepath, format: 'A4', printBackground: true, margin: { top: '16px', bottom: '16px', left: '15px', right: '15px' } });
+    } finally {
+      await browser.close();
+    }
+
+    res.json({ success: true, filename, path: webPath });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /contacts/:id/expenses - Get all expense transactions for a supplier contact
+ * Matches transactions_vat.party_name against contacts.company_name
+ */
+contactsRouter.get('/:id/expenses', requireAuth, async (req: AuthRequest, res: Response, next) => {
+  try {
+    const { id } = req.params;
+
+    const contact = await db.queryOne<any>(
+      `SELECT ${CONTACT_SELECT} FROM contacts c WHERE c.id = ?`,
+      [id]
+    );
+    if (!contact) {
+      throw notFound('Contact not found');
+    }
+
+    // Get the supplier's company_name from the contacts table
+    const contactRaw = await db.queryOne<any>('SELECT company_name FROM contacts WHERE id = ?', [id]);
+    const supplierName = contactRaw?.company_name;
+    if (!supplierName) {
+      return res.json({ success: true, data: [], summary: { total_expenses: 0, total_vat: 0, total_exclusive: 0, count: 0 } });
+    }
+
+    // Get all expense transactions matching this supplier
+    const expenses = await db.query<any>(
+      `SELECT tv.*, tec.category_name
+       FROM transactions_vat tv
+       LEFT JOIN tb_expense_categories tec ON tec.category_id = tv.expense_category_id
+       WHERE tv.party_name = ? AND tv.transaction_type = 'expense'
+       ORDER BY tv.transaction_date DESC`,
+      [supplierName]
+    );
+
+    // Calculate summary stats
+    let totalExpenses = 0;
+    let totalVat = 0;
+    let totalExclusive = 0;
+    for (const exp of expenses) {
+      totalExpenses += Number(exp.total_amount) || 0;
+      totalVat += Number(exp.vat_amount) || 0;
+      totalExclusive += Number(exp.exclusive_amount) || 0;
+    }
+
+    res.json({
+      success: true,
+      data: expenses,
+      summary: {
+        total_expenses: totalExpenses,
+        total_vat: totalVat,
+        total_exclusive: totalExclusive,
+        count: expenses.length,
       },
     });
   } catch (err) {

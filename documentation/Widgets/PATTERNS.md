@@ -53,7 +53,67 @@ const input = shadowRoot.getElementById('widget-input');
 
 ---
 
-### 2.2 MySQL-Based Vector Search Pattern
+### 2.2 Inline SSE Chat Pattern (Assistant Embed Widget)
+
+**Context:** The assistant embed widget (`/api/assistants/widget.js`) needs to render a fully functional chat UI on any third-party website. Previously used an iframe pointing to `softaware.net.za/chat/{id}`, but `X-Frame-Options` headers blocked framing, causing a "refused to connect" error.
+
+**Implementation:**
+
+```javascript
+// assistants.ts — widget.js served from /api/assistants/widget.js
+
+// Build inline chat UI (no iframe)
+var messagesArea = document.createElement('div');
+messagesArea.style.cssText = 'flex:1; overflow-y:auto; padding:16px; background:#f5f5f5; display:flex; flex-direction:column; gap:12px;';
+chatContainer.appendChild(messagesArea);
+
+// Input area with text input + send button
+var chatInput = document.createElement('input');
+var sendBtn = document.createElement('button');
+// ... input area appended to chatContainer
+
+// SSE streaming via fetch + ReadableStream
+fetch(chatApiUrl, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ assistantId, message, conversationHistory })
+}).then(function(response) {
+  var reader = response.body.getReader();
+  var decoder = new TextDecoder();
+  var assistantBubble = null;
+  var fullText = '';
+
+  function readChunk() {
+    reader.read().then(function(result) {
+      if (result.done) return;
+      // Parse SSE lines: data: {"token":"..."} or data: {"done":true}
+      // Update assistantBubble.textContent with accumulated tokens
+      readChunk();
+    });
+  }
+  readChunk();
+});
+```
+
+**Benefits:**
+- ✅ No iframe — eliminates X-Frame-Options / CSP blocking entirely
+- ✅ Real-time streaming — tokens appear word-by-word as the AI generates them
+- ✅ Works on any domain — no cross-origin framing issues
+- ✅ Consistent design — same branded header, footer, and chat bubble styles
+- ✅ Conversation history maintained client-side (last 10 messages)
+- ✅ Typing indicator with animated dots while waiting for first token
+
+**Drawbacks:**
+- ❌ Larger script payload (~300 LOC of DOM creation vs single iframe tag)
+- ❌ No CSS isolation (unlike Shadow DOM widget.js) — styles injected via inline `style.cssText`
+- ❌ ReadableStream API requires modern browsers (IE11 not supported)
+
+**Contrast with widget.js (Shadow DOM):**
+The standalone `widget.js` at `/var/www/code/widget.js` uses Shadow DOM for CSS isolation and `fetch()` with JSON responses (non-streaming). The assistant embed widget uses inline DOM + SSE streaming for real-time token display. Both render chat UIs directly without iframes.
+
+---
+
+### 2.3 MySQL-Based Vector Search Pattern
 
 **Context:** The Widgets module stores embeddings as JSON arrays in MySQL and performs cosine similarity in application code, rather than using a dedicated vector database.
 
@@ -100,7 +160,7 @@ The Assistants module uses sqlite-vec with a `vec0` virtual table for true KNN i
 
 ---
 
-### 2.3 Tier-Based AI Routing Pattern
+### 2.4 Tier-Based AI Routing Pattern
 
 **Context:** Different subscription tiers get different AI model quality. The routing cascades through providers, falling back to cheaper options if premium providers fail.
 
@@ -148,7 +208,7 @@ Ollama (qwen2.5:1.5b-instruct) ← last resort / free tier fallback
 
 ---
 
-### 2.4 Middleware Pipeline Pattern
+### 2.5 Middleware Pipeline Pattern
 
 **Context:** Widget requests must pass through status checks and usage enforcement before reaching route handlers. The pipeline is composable and fail-open.
 
@@ -193,7 +253,7 @@ Request
 
 ---
 
-### 2.5 Lead Capture via AI Prompt Engineering Pattern
+### 2.6 Lead Capture via AI Prompt Engineering Pattern
 
 **Context:** The AI assistant detects buying intent and captures visitor contact info without a separate form. The mechanism relies on prompt engineering + regex-based response parsing.
 
@@ -229,7 +289,7 @@ if (jsonMatch) {
 
 ---
 
-### 2.6 Synchronous Crawl Pattern
+### 2.7 Synchronous Crawl Pattern
 
 **Context:** URL ingestion currently processes crawl jobs inline (synchronously) during the POST request, rather than using a background worker.
 
@@ -269,7 +329,7 @@ The Assistants module uses a background polling worker (`ingestionWorker.ts`, 6s
 
 ---
 
-### 2.7 Billing Cycle Auto-Reset Pattern
+### 2.8 Billing Cycle Auto-Reset Pattern
 
 **Context:** Message limits reset monthly. Instead of a dedicated cron job, billing cycles are lazily checked on every request and reset if expired.
 

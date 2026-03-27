@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { requireApiKey } from '../middleware/apiKey.js';
+import { requireAuth } from '../middleware/auth.js';
+import { requireDeveloper } from '../middleware/requireDeveloper.js';
+import { getGitHubToken } from '../services/credentialVault.js';
 
 const router = Router();
 const execAsync = promisify(exec);
@@ -9,20 +11,24 @@ const execAsync = promisify(exec);
 // Git repository location
 const GIT_DIR = '/var/www/code/silulumanzi';
 
-// Execute timeout (10 seconds)
-const EXEC_TIMEOUT = 10000;
+// The ONLY branch that write operations are allowed on
+const ALLOWED_BRANCH = 'Bugfix';
 
-// API key middleware
-router.use(requireApiKey);
+// Execute timeout (10 seconds for reads, 30s for network ops)
+const EXEC_TIMEOUT = 10000;
+const NETWORK_TIMEOUT = 30000;
+
+// Authentication + developer role middleware
+router.use(requireAuth, requireDeveloper);
 
 /**
- * Execute git command safely
+ * Execute git command safely (local operations only — no network)
  */
-async function execGit(command: string): Promise<string> {
+async function execGit(command: string, timeout = EXEC_TIMEOUT): Promise<string> {
   try {
     const { stdout } = await execAsync(command, {
       cwd: GIT_DIR,
-      timeout: EXEC_TIMEOUT,
+      timeout,
       maxBuffer: 1024 * 1024 * 10 // 10MB
     });
     return stdout.trim();
@@ -32,6 +38,65 @@ async function execGit(command: string): Promise<string> {
     }
     throw error;
   }
+}
+
+/**
+ * Execute a git command that requires network access (fetch / pull / push).
+ *
+ * Injects the GitHub PAT from the credential vault as a one-shot
+ * credential helper so the token is never persisted in git config.
+ * The token itself travels through the `__GIT_CRED_TOKEN` env var
+ * so it does not appear in the process command line.
+ */
+async function execGitNetwork(command: string): Promise<{ stdout: string; stderr: string }> {
+  const token = await getGitHubToken();
+
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    GIT_TERMINAL_PROMPT: '0',   // never hang waiting for user input
+  };
+
+  let cmd = command;
+  if (token) {
+    env.__GIT_CRED_TOKEN = token;
+    // One-shot credential helper: reads the token from the inherited env
+    const helper =
+      "credential.helper=!f(){ echo username=x-access-token; echo password=$__GIT_CRED_TOKEN; };f";
+    cmd = command.replace(/^git /, `git -c '${helper}' `);
+  }
+
+  return execAsync(cmd, {
+    cwd: GIT_DIR,
+    timeout: NETWORK_TIMEOUT,
+    maxBuffer: 1024 * 1024 * 10,
+    env,
+  });
+}
+
+/**
+ * Get current branch name
+ */
+async function getCurrentBranch(): Promise<string> {
+  return execGit('git rev-parse --abbrev-ref HEAD');
+}
+
+/**
+ * Enforce that write operations only run on the allowed branch.
+ * Returns an error response object if blocked, or null if OK.
+ */
+async function enforceBranch(res: Response): Promise<boolean> {
+  const current = await getCurrentBranch();
+  if (current !== ALLOWED_BRANCH) {
+    res.status(403).json({
+      success: false,
+      error: 'BRANCH_RESTRICTED',
+      message: `Write operations are only allowed on the "${ALLOWED_BRANCH}" branch. You are currently on "${current}". Please switch to "${ALLOWED_BRANCH}" first.`,
+      currentBranch: current,
+      allowedBranch: ALLOWED_BRANCH,
+    });
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -190,8 +255,10 @@ router.get('/status', async (req: Request, res: Response) => {
 
 /**
  * POST /api/code/git/checkout
- * Switch to a different branch
- * Body: { branch: string, create?: boolean }
+ * Switch to any local branch.
+ * Write operations (commit, push, pull, etc.) are still restricted to the
+ * ALLOWED_BRANCH via enforceBranch — but browsing any branch is allowed.
+ * Body: { branch: string }
  */
 router.post('/checkout', async (req: Request, res: Response) => {
   try {
@@ -214,6 +281,17 @@ router.post('/checkout', async (req: Request, res: Response) => {
       });
     }
 
+    // Verify the branch actually exists locally
+    const localBranches = await execGit('git branch --format="%(refname:short)"');
+    const branchList = localBranches.split('\n').filter(Boolean);
+    if (!branchList.includes(branch)) {
+      return res.status(404).json({
+        success: false,
+        error: 'BRANCH_NOT_FOUND',
+        message: `Branch "${branch}" does not exist locally. Available: ${branchList.join(', ')}`,
+      });
+    }
+
     // Check for uncommitted changes
     const statusOutput = await execGit('git status --porcelain');
     if (statusOutput) {
@@ -224,18 +302,14 @@ router.post('/checkout', async (req: Request, res: Response) => {
       });
     }
 
-    const create = req.body?.create === true;
-    const command = create ? `git checkout -b ${branch}` : `git checkout ${branch}`;
-
-    await execGit(command);
+    await execGit(`git checkout ${branch}`);
 
     const newBranch = await execGit('git rev-parse --abbrev-ref HEAD');
 
     res.json({
       success: true,
       branch: newBranch,
-      created: create,
-      message: create ? `Created and switched to branch '${branch}'` : `Switched to branch '${branch}'`
+      message: `Switched to branch '${branch}'`
     });
   } catch (error: any) {
     console.error('[Git API] Error checking out branch:', error);
@@ -538,10 +612,6 @@ router.get('/history', async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/code/git/pull
- * Pull latest changes from remote repository
- */
-/**
  * GET /api/code/git/diff
  * Get diff for unstaged or staged changes
  * Query params: staged (boolean), file (string, optional)
@@ -614,8 +684,15 @@ router.get('/tags', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/code/git/pull
+ * Pull latest changes from remote repository
+ */
 router.post('/pull', async (req: Request, res: Response) => {
   try {
+    // Enforce Bugfix branch
+    if (!(await enforceBranch(res))) return;
+
     // Check for uncommitted changes first
     const statusOutput = await execGit('git status --porcelain');
     if (statusOutput) {
@@ -626,16 +703,26 @@ router.post('/pull', async (req: Request, res: Response) => {
       });
     }
 
-    // Get remote and branch (default to origin/main)
-    const remote = req.body?.remote || 'origin';
-    const branch = req.body?.branch || 'main';
+    // Always pull from origin/Bugfix
+    const remote = 'origin';
+    const branch = ALLOWED_BRANCH;
 
-    // Execute git pull with 30s timeout
-    const { stdout } = await execAsync(`git pull ${remote} ${branch}`, {
-      cwd: GIT_DIR,
-      timeout: 30000,
-      maxBuffer: 1024 * 1024 * 10
-    });
+    // Execute git pull with GitHub PAT from credential vault
+    const { stdout, stderr } = await execGitNetwork(`git pull ${remote} ${branch}`);
+
+    // Check for merge conflicts
+    const hasConflicts = stderr?.includes('CONFLICT') || stdout?.includes('CONFLICT');
+    if (hasConflicts) {
+      // Get list of conflicted files
+      const conflictFiles = await execGit('git diff --name-only --diff-filter=U').catch(() => '');
+      return res.json({
+        success: false,
+        error: 'MERGE_CONFLICT',
+        message: 'Pull resulted in merge conflicts that need to be resolved.',
+        conflictFiles: conflictFiles ? conflictFiles.split('\n').filter(Boolean) : [],
+        output: (stdout + '\n' + (stderr || '')).trim()
+      });
+    }
 
     // Parse git pull output for stats
     const statsMatch = stdout.match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
@@ -660,12 +747,448 @@ router.post('/pull', async (req: Request, res: Response) => {
       });
     }
 
+    // Check if error output indicates merge conflict
+    if (error.stderr?.includes('CONFLICT') || error.stdout?.includes('CONFLICT')) {
+      const conflictFiles = await execGit('git diff --name-only --diff-filter=U').catch(() => '');
+      return res.status(409).json({
+        success: false,
+        error: 'MERGE_CONFLICT',
+        message: 'Pull resulted in merge conflicts.',
+        conflictFiles: conflictFiles ? conflictFiles.split('\n').filter(Boolean) : [],
+        output: ((error.stdout || '') + '\n' + (error.stderr || '')).trim()
+      });
+    }
+
     res.status(500).json({
       success: false,
       error: 'PULL_FAILED',
       message: error.message,
       stderr: error.stderr || ''
     });
+  }
+});
+
+/**
+ * POST /api/code/git/fetch
+ * Fetch latest refs from remote (no merge)
+ */
+router.post('/fetch', async (req: Request, res: Response) => {
+  try {
+    // Fetch with GitHub PAT from credential vault
+    const { stdout } = await execGitNetwork('git fetch origin --prune');
+
+    res.json({
+      success: true,
+      message: 'Fetch complete',
+      output: stdout.trim()
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error fetching:', error);
+    res.status(500).json({
+      success: false,
+      error: 'FETCH_FAILED',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/code/git/stage
+ * Stage files for commit
+ * Body: { files?: string[] }  — if omitted, stages everything (git add -A)
+ */
+router.post('/stage', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const files: string[] | undefined = req.body?.files;
+
+    if (files && Array.isArray(files) && files.length > 0) {
+      // Validate each path
+      for (const f of files) {
+        sanitizePath(f);
+      }
+      const quoted = files.map(f => `"${f}"`).join(' ');
+      await execGit(`git add ${quoted}`);
+    } else {
+      await execGit('git add -A');
+    }
+
+    // Return updated status
+    const statusOutput = await execGit('git status --porcelain');
+    const staged = statusOutput.split('\n').filter(Boolean).filter(l => l[0] !== ' ' && l[0] !== '?');
+
+    res.json({
+      success: true,
+      message: `Staged ${staged.length} file(s)`,
+      stagedCount: staged.length,
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error staging:', error);
+    res.status(500).json({ success: false, error: 'STAGE_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/unstage
+ * Unstage files (git reset HEAD)
+ * Body: { files?: string[] }
+ */
+router.post('/unstage', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const files: string[] | undefined = req.body?.files;
+
+    if (files && Array.isArray(files) && files.length > 0) {
+      for (const f of files) sanitizePath(f);
+      const quoted = files.map(f => `"${f}"`).join(' ');
+      await execGit(`git reset HEAD ${quoted}`);
+    } else {
+      await execGit('git reset HEAD');
+    }
+
+    res.json({ success: true, message: 'Files unstaged' });
+  } catch (error: any) {
+    console.error('[Git API] Error unstaging:', error);
+    res.status(500).json({ success: false, error: 'UNSTAGE_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/commit
+ * Commit staged changes
+ * Body: { message: string }
+ */
+router.post('/commit', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const message = req.body?.message;
+    if (!message || typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'MESSAGE_REQUIRED',
+        message: 'A commit message is required'
+      });
+    }
+
+    // Check that there are staged changes
+    const staged = await execGit('git diff --cached --name-only');
+    if (!staged) {
+      return res.status(400).json({
+        success: false,
+        error: 'NOTHING_STAGED',
+        message: 'No changes are staged for commit. Stage some files first.'
+      });
+    }
+
+    // Sanitize commit message (escape double quotes)
+    const sanitized = message.trim().replace(/"/g, '\\"');
+    const { stdout } = await execAsync(`git commit -m "${sanitized}"`, {
+      cwd: GIT_DIR,
+      timeout: EXEC_TIMEOUT,
+      maxBuffer: 1024 * 1024 * 10
+    });
+
+    // Get the new commit hash
+    const hash = await execGit('git rev-parse --short HEAD');
+
+    res.json({
+      success: true,
+      hash,
+      message: `Committed: ${message.trim()}`,
+      output: stdout.trim()
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error committing:', error);
+    res.status(500).json({
+      success: false,
+      error: 'COMMIT_FAILED',
+      message: error.message,
+      stderr: error.stderr || ''
+    });
+  }
+});
+
+/**
+ * POST /api/code/git/push
+ * Push commits to remote (only Bugfix branch)
+ */
+router.post('/push', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    // Push with GitHub PAT from credential vault
+    const { stdout, stderr } = await execGitNetwork(`git push origin ${ALLOWED_BRANCH}`);
+
+    const combined = (stdout + '\n' + (stderr || '')).trim();
+    const isUpToDate = combined.includes('Everything up-to-date');
+
+    res.json({
+      success: true,
+      message: isUpToDate ? 'Everything up-to-date' : 'Push successful',
+      output: combined
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error pushing:', error);
+    res.status(500).json({
+      success: false,
+      error: 'PUSH_FAILED',
+      message: error.message,
+      stderr: error.stderr || ''
+    });
+  }
+});
+
+/**
+ * POST /api/code/git/stash
+ * Stash uncommitted changes
+ * Body: { message?: string }
+ */
+router.post('/stash', async (req: Request, res: Response) => {
+  try {
+    const message = req.body?.message || '';
+    const cmd = message
+      ? `git stash push -m "${message.replace(/"/g, '\\"')}"`
+      : 'git stash push';
+
+    const output = await execGit(cmd);
+    const noChanges = output.includes('No local changes to save');
+
+    res.json({
+      success: true,
+      message: noChanges ? 'No changes to stash' : 'Changes stashed',
+      output
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error stashing:', error);
+    res.status(500).json({ success: false, error: 'STASH_FAILED', message: error.message });
+  }
+});
+
+/**
+ * GET /api/code/git/stash/list
+ * List all stash entries
+ */
+router.get('/stash/list', async (req: Request, res: Response) => {
+  try {
+    const output = await execGit('git stash list --format="%gd|%s|%ai"').catch(() => '');
+    const entries = output ? output.split('\n').filter(Boolean).map(line => {
+      const [ref, message, date] = line.split('|');
+      return { ref, message, date };
+    }) : [];
+
+    res.json({ entries, total: entries.length });
+  } catch (error: any) {
+    res.status(500).json({ error: 'STASH_LIST_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/stash/pop
+ * Pop the most recent stash
+ */
+router.post('/stash/pop', async (req: Request, res: Response) => {
+  try {
+    const output = await execGit('git stash pop');
+    res.json({ success: true, message: 'Stash applied and removed', output });
+  } catch (error: any) {
+    console.error('[Git API] Error popping stash:', error);
+    // Check for conflicts
+    if (error.stderr?.includes('CONFLICT') || error.stdout?.includes('CONFLICT')) {
+      return res.status(409).json({
+        success: false,
+        error: 'MERGE_CONFLICT',
+        message: 'Stash pop resulted in conflicts',
+        output: ((error.stdout || '') + '\n' + (error.stderr || '')).trim()
+      });
+    }
+    res.status(500).json({ success: false, error: 'STASH_POP_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/discard
+ * Discard uncommitted changes to specific files or all
+ * Body: { files?: string[] }
+ */
+router.post('/discard', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const files: string[] | undefined = req.body?.files;
+
+    if (files && Array.isArray(files) && files.length > 0) {
+      for (const f of files) sanitizePath(f);
+      const quoted = files.map(f => `"${f}"`).join(' ');
+      await execGit(`git checkout -- ${quoted}`);
+      // Also clean untracked
+      await execGit(`git clean -fd ${quoted}`).catch(() => {});
+    } else {
+      await execGit('git checkout -- .');
+      await execGit('git clean -fd');
+    }
+
+    res.json({ success: true, message: 'Changes discarded' });
+  } catch (error: any) {
+    console.error('[Git API] Error discarding:', error);
+    res.status(500).json({ success: false, error: 'DISCARD_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/reset
+ * Reset to a specific commit (soft, mixed, or hard)
+ * Body: { target?: string, mode?: 'soft' | 'mixed' | 'hard' }
+ */
+router.post('/reset', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const target = req.body?.target || 'HEAD';
+    const mode = req.body?.mode || 'mixed';
+
+    if (!['soft', 'mixed', 'hard'].includes(mode)) {
+      return res.status(400).json({ success: false, error: 'INVALID_MODE', message: 'Mode must be soft, mixed, or hard' });
+    }
+
+    if (target !== 'HEAD') sanitizeHash(target);
+
+    await execGit(`git reset --${mode} ${target}`);
+
+    res.json({
+      success: true,
+      message: `Reset (${mode}) to ${target}`,
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error resetting:', error);
+    res.status(500).json({ success: false, error: 'RESET_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/resolve-conflicts
+ * Accept ours or theirs for conflicted files, or mark as resolved
+ * Body: { strategy: 'ours' | 'theirs', files?: string[] }
+ */
+router.post('/resolve-conflicts', async (req: Request, res: Response) => {
+  try {
+    if (!(await enforceBranch(res))) return;
+
+    const strategy = req.body?.strategy;
+    const files: string[] | undefined = req.body?.files;
+
+    if (!strategy || !['ours', 'theirs'].includes(strategy)) {
+      return res.status(400).json({
+        success: false,
+        error: 'INVALID_STRATEGY',
+        message: 'Strategy must be "ours" or "theirs"'
+      });
+    }
+
+    // Get conflicted files
+    const conflictOutput = await execGit('git diff --name-only --diff-filter=U');
+    const conflictFiles = conflictOutput ? conflictOutput.split('\n').filter(Boolean) : [];
+
+    if (conflictFiles.length === 0) {
+      return res.json({ success: true, message: 'No conflicts to resolve' });
+    }
+
+    const targets = files && files.length > 0
+      ? files.filter(f => conflictFiles.includes(f))
+      : conflictFiles;
+
+    for (const file of targets) {
+      sanitizePath(file);
+      await execGit(`git checkout --${strategy} "${file}"`);
+      await execGit(`git add "${file}"`);
+    }
+
+    // Check if any conflicts remain
+    const remaining = await execGit('git diff --name-only --diff-filter=U').catch(() => '');
+    const remainingFiles = remaining ? remaining.split('\n').filter(Boolean) : [];
+
+    res.json({
+      success: true,
+      message: `Resolved ${targets.length} file(s) using "${strategy}" strategy`,
+      resolved: targets,
+      remainingConflicts: remainingFiles,
+    });
+  } catch (error: any) {
+    console.error('[Git API] Error resolving conflicts:', error);
+    res.status(500).json({ success: false, error: 'RESOLVE_FAILED', message: error.message });
+  }
+});
+
+/**
+ * POST /api/code/git/abort-merge
+ * Abort an in-progress merge
+ */
+router.post('/abort-merge', async (req: Request, res: Response) => {
+  try {
+    await execGit('git merge --abort');
+    res.json({ success: true, message: 'Merge aborted' });
+  } catch (error: any) {
+    console.error('[Git API] Error aborting merge:', error);
+    res.status(500).json({ success: false, error: 'ABORT_FAILED', message: error.message });
+  }
+});
+
+/**
+ * GET /api/code/git/file-content
+ * Read a file's content at HEAD or a specific commit
+ * Query: path (required), ref (optional, defaults to HEAD)
+ */
+router.get('/file-content', async (req: Request, res: Response) => {
+  try {
+    const filePath = sanitizePath(req.query.path as string);
+    if (!filePath) {
+      return res.status(400).json({ error: 'PATH_REQUIRED', message: 'path query parameter is required' });
+    }
+    const ref = req.query.ref as string || 'HEAD';
+    if (ref !== 'HEAD') sanitizeHash(ref);
+
+    const content = await execGit(`git show ${ref}:"${filePath}"`);
+    res.json({ path: filePath, ref, content });
+  } catch (error: any) {
+    if (error.message === 'INVALID_PATH') {
+      return res.status(400).json({ error: 'INVALID_PATH', message: 'Invalid file path' });
+    }
+    res.status(500).json({ error: 'FILE_CONTENT_FAILED', message: error.message });
+  }
+});
+
+/**
+ * GET /api/code/git/config
+ * Get branch restriction configuration
+ */
+router.get('/config', async (_req: Request, res: Response) => {
+  try {
+    const current = await getCurrentBranch();
+    const ahead = await execGit('git rev-list --count @{upstream}..HEAD').catch(() => '0');
+    const behind = await execGit('git rev-list --count HEAD..@{upstream}').catch(() => '0');
+    const remote = await execGit('git config --get remote.origin.url').catch(() => '');
+    const lastFetchFile = `${GIT_DIR}/.git/FETCH_HEAD`;
+    let lastFetch: string | null = null;
+    try {
+      const { stdout } = await execAsync(`stat -c %Y "${lastFetchFile}"`, { cwd: GIT_DIR, timeout: EXEC_TIMEOUT });
+      lastFetch = new Date(parseInt(stdout.trim()) * 1000).toISOString();
+    } catch { /* no fetch head yet */ }
+
+    res.json({
+      success: true,
+      allowedBranch: ALLOWED_BRANCH,
+      currentBranch: current,
+      isOnAllowedBranch: current === ALLOWED_BRANCH,
+      ahead: parseInt(ahead),
+      behind: parseInt(behind),
+      remote: remote || null,
+      lastFetch,
+      repositoryPath: GIT_DIR,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'CONFIG_FAILED', message: error.message });
   }
 });
 

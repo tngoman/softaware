@@ -9,6 +9,8 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-27 | 1.5.0 | Bug notifications now only sent to admins with the developer role (not all admins) |
+| 2026-03-15 | 1.4.0 | Added AI-Assisted Bug Resolution via staff Personal Assistant |
 | 2026-03-11 | 1.3.0 | Branded email templates, bug loading indicator, workflow phase no longer resets status |
 | 2026-03-11 | 1.2.0 | Role-based default phase filter, `getBaseUrl()` regex fix, bug→task sync protection |
 | 2026-03-11 | 1.1.0 | Added `pending-qa` status, full notification wiring (in-app + push + email), optional JWT auth, documentation |

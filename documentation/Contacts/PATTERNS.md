@@ -265,7 +265,7 @@ Contact (id) → users (WHERE contact_id = id) → linkedUserId
 - Embed modal: Script snippet + direct chat URL
 - `parseKnowledgeCategories()`, `formatSize()` helper functions
 
-**Tabs** (6 total, was 7 before widgets removal):
+**Tabs — Customer contacts** (6 total, was 7 before widgets removal):
 1. Overview — financial summary
 2. Invoices — DataTable
 3. Quotations — DataTable
@@ -273,9 +273,38 @@ Contact (id) → users (WHERE contact_id = id) → linkedUserId
 5. Assistants — rich card grid (filtered by contact's linked user)
 6. Landing Pages — rich card grid (filtered by contact's linked user)
 
+**Tabs — Supplier contacts** (3 total, new):
+1. Overview — expense summary cards (Total Expenses, Excl. Amount, VAT, Count) + recent expenses list
+2. Expenses — DataTable with 7 columns (Date, Invoice #, Category, Excl. Amount, VAT, Total, VAT Type with color badges)
+3. Documentation — markdown renderer
+
 **Widgets tab removed**: Previously existed with website URL, tier, message counts, page ingestion cards. Removed entirely — no nav button, no content, no handler function.
 
 **Benefit**: Consistent admin experience — same rich card UX whether browsing all clients in the hub or drilling into a specific contact.
+
+---
+
+### 17. Supplier Expense Linkage via party_name
+**Pattern**: Supplier expenses are linked by matching `transactions_vat.party_name` against `contacts.company_name` rather than a direct foreign key.
+
+```typescript
+// Backend: contacts.ts GET /:id/expenses
+const contactRaw = await db.queryOne('SELECT company_name FROM contacts WHERE id = ?', [id]);
+const expenses = await db.query(
+  `SELECT tv.*, tec.category_name
+   FROM transactions_vat tv
+   LEFT JOIN tb_expense_categories tec ON tec.category_id = tv.expense_category_id
+   WHERE tv.party_name = ? AND tv.transaction_type = 'expense'
+   ORDER BY tv.transaction_date DESC`,
+  [contactRaw.company_name]
+);
+```
+
+**Key detail**: Uses `tb_expense_categories` (legacy table, PK = `category_id`), **not** `expense_categories` (new schema, PK = `id`). The `transactions_vat.expense_category_id` FK references the legacy table.
+
+**Frontend**: `ContactModel.getExpenses(id)` → sets `supplierExpenses` + `supplierExpenseSummary` state → renders in 3-tab supplier interface.
+
+**Limitation**: Name-based matching is fragile — if `company_name` changes, historical expenses won't link. A direct FK would be more robust.
 
 ---
 
@@ -351,6 +380,8 @@ Contact (id) → users (WHERE contact_id = id) → linkedUserId
 | Inline status toggle | `Contacts.tsx` | ✅ Good |
 | Contact detail rich cards (pattern reuse) | `ContactDetails.tsx` | ✅ Good |
 | Contact→User linkage for AI tabs | `ContactDetails.tsx` | ✅ Good |
+| Supplier expense linkage (party_name match) | `contacts.ts`, `ContactDetails.tsx` | ⚠️ Adequate (name-based, not FK) |
+| Type-aware detail tabs (customer vs supplier) | `ContactDetails.tsx` | ✅ Good |
 | In-memory rate limiting | `contactFormRouter.ts` | ⚠️ Adequate |
 | Honeypot anti-spam | `contactFormRouter.ts` | ✅ Good |
 | Email cascade lookup | `contactFormRouter.ts` | ✅ Good |

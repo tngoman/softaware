@@ -20,6 +20,7 @@ export interface UpdSoftware {
   external_test_url?: string;
   external_mode?: string;
   external_integration_notes?: string;
+  linked_codebase?: string;
 }
 
 // ─── update_releases ───────────────────────────────────────────────────
@@ -58,14 +59,17 @@ export interface UpdClient {
   is_blocked: number;
   blocked_at?: Date;
   blocked_reason?: string;
-  user_name?: string;
-  user_id?: number;
-  active_page?: string;
+  // v4: user_name, user_id, active_page REMOVED — replaced by anonymous metadata.usage
   ai_sessions_active: number;
   ai_model?: string;
   force_logout: number;
   server_message?: string;
   server_message_id?: string;
+  // v4 telemetry & privacy fields
+  retention_hint?: string;       // '24h' | '7d' | '30d' | '90d'
+  ip_masked?: number;            // 0 or 1
+  masked_ip?: string;            // masked IP when ip_masked = 1
+  expires_at?: Date;             // computed from retention_hint
 }
 
 // ─── update_modules ───────────────────────────────────────────────────

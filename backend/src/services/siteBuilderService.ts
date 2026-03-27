@@ -25,9 +25,26 @@ export interface GeneratedSite {
   generated_html: string | null;
   status: 'draft' | 'generating' | 'generated' | 'deployed' | 'failed';
   generation_error: string | null;
+  form_config: string | null;
+  include_form: number;
+  include_assistant: number;
   last_deployed_at: string | null;
   deployment_error: string | null;
   theme_color: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SitePage {
+  id: string;
+  site_id: string;
+  page_type: 'home' | 'about' | 'services' | 'contact' | 'gallery' | 'faq' | 'pricing' | 'custom';
+  page_slug: string;
+  page_title: string;
+  content_data: string;  // JSON string in DB
+  generated_html: string | null;
+  sort_order: number;
+  is_published: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -50,6 +67,9 @@ export interface SiteData {
   ftpProtocol?: 'ftp' | 'sftp';
   ftpDirectory?: string;
   themeColor?: string;
+  includeForm?: number;
+  includeAssistant?: number;
+  formConfig?: string; // JSON string
 }
 
 export const siteBuilderService = {
@@ -239,6 +259,20 @@ export const siteBuilderService = {
       }
     }
 
+    // Form/assistant options
+    if (data.includeForm !== undefined) {
+      updates.push('include_form = ?');
+      values.push(data.includeForm);
+    }
+    if (data.includeAssistant !== undefined) {
+      updates.push('include_assistant = ?');
+      values.push(data.includeAssistant);
+    }
+    if (data.formConfig !== undefined) {
+      updates.push('form_config = ?');
+      values.push(data.formConfig);
+    }
+
     if (updates.length === 0) return;
 
     updates.push('updated_at = ?');
@@ -282,7 +316,26 @@ export const siteBuilderService = {
   },
 
   /**
-   * Generate static HTML files for a site
+   * Recover sites stuck in 'generating' status (e.g. from a server restart).
+   * Resets them to 'draft' with an error message so the user can retry.
+   * Called once at startup.
+   */
+  async recoverStuckGenerations(): Promise<number> {
+    const now = toMySQLDate(new Date());
+    const result = await db.execute(
+      `UPDATE generated_sites
+         SET status = 'draft',
+             generation_error = 'Generation was interrupted by a server restart. Please try again.',
+             updated_at = ?
+       WHERE status = 'generating'`,
+      [now]
+    );
+    const affected = (result as any)?.affectedRows ?? (result as any)?.changedRows ?? 0;
+    return affected;
+  },
+
+  /**
+   * Generate static HTML files for a site (supports multi-page)
    */
   async generateStaticFiles(siteId: string): Promise<string> {
     const site = await this.getSiteById(siteId);
@@ -291,8 +344,36 @@ export const siteBuilderService = {
     const outputDir = `/var/tmp/generated_sites/${siteId}`;
     await fs.mkdir(outputDir, { recursive: true });
 
-    if (site.generated_html) {
-      // Use the AI-generated Tailwind HTML directly — it's self-contained (CDN)
+    // Check for multi-page content
+    const pages = await this.getPagesBySiteId(siteId);
+    const publishedPages = pages.filter(p => p.is_published);
+
+    if (publishedPages.length > 0) {
+      // ── Multi-page site: write each page as a separate HTML file ──
+      // Build shared navigation links
+      const navLinks = publishedPages.map(p => ({
+        slug: p.page_slug,
+        title: p.page_title,
+        href: p.page_slug === 'index' ? 'index.html' : `${p.page_slug}.html`
+      }));
+
+      for (const page of publishedPages) {
+        const fileName = page.page_slug === 'index' ? 'index.html' : `${page.page_slug}.html`;
+        if (page.generated_html) {
+          // Inject shared navigation if not already present
+          const htmlWithNav = this.injectNavigation(page.generated_html, navLinks, page.page_slug);
+          await fs.writeFile(path.join(outputDir, fileName), htmlWithNav, 'utf8');
+        }
+      }
+
+      // Also write index.html from the main site if no "index" page exists
+      const hasIndex = publishedPages.some(p => p.page_slug === 'index');
+      if (!hasIndex && site.generated_html) {
+        const htmlWithNav = this.injectNavigation(site.generated_html, navLinks, 'index');
+        await fs.writeFile(path.join(outputDir, 'index.html'), htmlWithNav, 'utf8');
+      }
+    } else if (site.generated_html) {
+      // ── Single-page site: use the AI-generated Tailwind HTML directly ──
       await fs.writeFile(path.join(outputDir, 'index.html'), site.generated_html, 'utf8');
     } else {
       // Fallback: build basic HTML + CSS from raw site data
@@ -303,6 +384,38 @@ export const siteBuilderService = {
     }
 
     return outputDir;
+  },
+
+  /**
+   * Inject a shared navigation bar into page HTML for multi-page sites
+   */
+  injectNavigation(html: string, navLinks: { slug: string; title: string; href: string }[], currentSlug: string): string {
+    const navItems = navLinks.map(link => {
+      const isCurrent = link.slug === currentSlug;
+      const classes = isCurrent
+        ? 'text-blue-600 font-semibold'
+        : 'text-gray-600 hover:text-gray-900 transition-colors';
+      return `<a href="${link.href}" class="${classes}">${link.title}</a>`;
+    }).join('\n          ');
+
+    const navBar = `<!-- Multi-page navigation -->
+<nav class="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200/50 shadow-sm">
+  <div class="max-w-6xl mx-auto flex items-center justify-between px-6 py-3">
+    <a href="index.html" class="text-lg font-bold text-gray-900">Home</a>
+    <div class="flex items-center gap-6 text-sm font-medium">
+          ${navItems}
+    </div>
+  </div>
+</nav>`;
+
+    // Try to replace existing <nav> or inject after <body>
+    if (html.includes('<nav')) {
+      // Replace the first nav element
+      return html.replace(/<nav[\s\S]*?<\/nav>/, navBar);
+    } else if (html.includes('<body')) {
+      return html.replace(/(<body[^>]*>)/, `$1\n${navBar}`);
+    }
+    return navBar + '\n' + html;
   },
 
   /**
@@ -651,5 +764,147 @@ footer p {
       protocol: site.ftp_protocol,
       directory: site.ftp_directory
     };
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Multi-page support (paid tiers only)
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Get all pages for a site, ordered by sort_order
+   */
+  async getPagesBySiteId(siteId: string): Promise<SitePage[]> {
+    return db.query<SitePage>(
+      'SELECT * FROM site_pages WHERE site_id = ? ORDER BY sort_order ASC, created_at ASC',
+      [siteId]
+    );
+  },
+
+  /**
+   * Get a single page by ID
+   */
+  async getPageById(pageId: string): Promise<SitePage | null> {
+    const page = await db.queryOne<SitePage>(
+      'SELECT * FROM site_pages WHERE id = ?',
+      [pageId]
+    );
+    return page || null;
+  },
+
+  /**
+   * Count pages for a site
+   */
+  async getPageCount(siteId: string): Promise<number> {
+    const row = await db.queryOne<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM site_pages WHERE site_id = ?',
+      [siteId]
+    );
+    return row?.cnt || 0;
+  },
+
+  /**
+   * Create a new page for a site
+   */
+  async createPage(data: {
+    siteId: string;
+    pageType: SitePage['page_type'];
+    pageSlug: string;
+    pageTitle: string;
+    contentData?: Record<string, any>;
+    sortOrder?: number;
+  }): Promise<SitePage> {
+    const id = randomUUID();
+    const now = toMySQLDate(new Date());
+
+    // Auto-assign sort_order if not provided
+    let sortOrder = data.sortOrder;
+    if (sortOrder === undefined) {
+      const row = await db.queryOne<{ mx: number | null }>(
+        'SELECT MAX(sort_order) AS mx FROM site_pages WHERE site_id = ?',
+        [data.siteId]
+      );
+      sortOrder = (row?.mx ?? -1) + 1;
+    }
+
+    await db.execute(
+      `INSERT INTO site_pages (id, site_id, page_type, page_slug, page_title, content_data, sort_order, is_published, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      [
+        id,
+        data.siteId,
+        data.pageType,
+        data.pageSlug,
+        data.pageTitle,
+        data.contentData ? JSON.stringify(data.contentData) : '{}',
+        sortOrder,
+        now,
+        now
+      ]
+    );
+
+    return this.getPageById(id) as Promise<SitePage>;
+  },
+
+  /**
+   * Update a page
+   */
+  async updatePage(pageId: string, data: {
+    pageTitle?: string;
+    pageSlug?: string;
+    pageType?: SitePage['page_type'];
+    contentData?: Record<string, any>;
+    generatedHtml?: string;
+    sortOrder?: number;
+    isPublished?: boolean;
+  }): Promise<void> {
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (data.pageTitle !== undefined) { updates.push('page_title = ?'); values.push(data.pageTitle); }
+    if (data.pageSlug !== undefined) { updates.push('page_slug = ?'); values.push(data.pageSlug); }
+    if (data.pageType !== undefined) { updates.push('page_type = ?'); values.push(data.pageType); }
+    if (data.contentData !== undefined) { updates.push('content_data = ?'); values.push(JSON.stringify(data.contentData)); }
+    if (data.generatedHtml !== undefined) { updates.push('generated_html = ?'); values.push(data.generatedHtml); }
+    if (data.sortOrder !== undefined) { updates.push('sort_order = ?'); values.push(data.sortOrder); }
+    if (data.isPublished !== undefined) { updates.push('is_published = ?'); values.push(data.isPublished ? 1 : 0); }
+
+    if (updates.length === 0) return;
+
+    updates.push('updated_at = ?');
+    values.push(toMySQLDate(new Date()));
+    values.push(pageId);
+
+    await db.execute(
+      `UPDATE site_pages SET ${updates.join(', ')} WHERE id = ?`,
+      values
+    );
+  },
+
+  /**
+   * Delete a page
+   */
+  async deletePage(pageId: string): Promise<void> {
+    await db.execute('DELETE FROM site_pages WHERE id = ?', [pageId]);
+  },
+
+  /**
+   * Get max_pages limit for a site
+   */
+  async getMaxPages(siteId: string): Promise<number> {
+    const row = await db.queryOne<{ max_pages: number }>(
+      'SELECT max_pages FROM generated_sites WHERE id = ?',
+      [siteId]
+    );
+    return row?.max_pages ?? 1;
+  },
+
+  /**
+   * Update max_pages for a site
+   */
+  async setMaxPages(siteId: string, maxPages: number): Promise<void> {
+    await db.execute(
+      'UPDATE generated_sites SET max_pages = ?, updated_at = ? WHERE id = ?',
+      [maxPages, toMySQLDate(new Date()), siteId]
+    );
   }
 };

@@ -1,216 +1,301 @@
-# Subscription — Field Definitions
+# Subscription Fields & Data Reference
 
-## Database Tables
+> **v3.0.0 — Hybrid Package Catalog**
+> Legacy credit tables (`credit_packages`, `credit_balances`, `credit_transactions`,
+> `package_transactions`, `subscription_tier_limits`) remain permanently dropped.
+> The `packages` and `contact_packages` tables have been **restored** with a rebuilt
+> architecture (see sections 8–10 below).
+>
+> **Terminology:** "Actions" = unified billing metric. "System Actions" = technical AI function calls.
 
-### subscription_plans
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| tier | ENUM | NO | — | `PERSONAL`, `TEAM`, `ENTERPRISE` |
-| name | VARCHAR | NO | — | Display name |
-| description | TEXT | YES | NULL | Plan description |
-| priceMonthly | INT | NO | — | Monthly price in ZAR cents |
-| priceAnnually | INT | YES | NULL | Annual price in ZAR cents |
-| maxUsers | INT | NO | — | Max team members (null = unlimited) |
-| maxAgents | INT | YES | NULL | Max AI agents |
-| maxDevices | INT | NO | — | Max connected devices |
-| cloudSyncAllowed | BOOLEAN | NO | — | Cloud sync feature flag |
-| vaultAllowed | BOOLEAN | NO | — | Vault feature flag |
-| prioritySupport | BOOLEAN | NO | — | Priority support flag |
-| trialDays | INT | NO | — | Trial period length |
-| isActive | BOOLEAN | NO | — | Plan availability |
-| displayOrder | INT | NO | — | Sort order |
-| createdAt | DATETIME | NO | — | — |
-| updatedAt | DATETIME | NO | — | — |
+---
 
-**Plan Pricing (ZAR cents)**:
-| Tier | Monthly | Annually | Max Users | Max Devices | Trial Days |
-|------|---------|----------|-----------|-------------|------------|
-| PERSONAL | 25,000 (R250) | 250,000 (R2,500) | 1 | 1 | 14 |
-| TEAM | 150,000 (R1,500) | 1,500,000 (R15,000) | 5 | 5 | 14 |
-| ENTERPRISE | 500,000 (R5,000) | 5,000,000 (R50,000) | unlimited | unlimited | 30 |
+## 1. User Tier Fields — `users` table
 
-### subscriptions
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| teamId | VARCHAR (UUID) | NO | — | FK → teams.id *(legacy: teams table retained only for credit/subscription scoping — not multi-tenant)* |
-| planId | VARCHAR (UUID) | NO | — | FK → subscription_plans.id |
-| status | ENUM | NO | — | `TRIAL`, `ACTIVE`, `PAST_DUE`, `CANCELLED`, `EXPIRED` |
-| billingCycle | VARCHAR | NO | — | `monthly` or `annually` |
-| trialEndsAt | DATETIME | YES | NULL | Trial expiration |
-| currentPeriodStart | DATETIME | NO | — | Current billing period start |
-| currentPeriodEnd | DATETIME | NO | — | Current billing period end |
-| cancelledAt | DATETIME | YES | NULL | When cancellation was requested |
-| paymentProvider | ENUM | YES | NULL | `PAYFAST`, `YOCO`, `MANUAL` |
-| externalCustomerId | VARCHAR | YES | NULL | Gateway customer reference |
-| externalSubscriptionId | VARCHAR | YES | NULL | Gateway subscription reference |
-| createdAt | DATETIME | NO | — | — |
-| updatedAt | DATETIME | NO | — | — |
+These three columns are the entire user-scoped pricing system:
 
-### billing_invoices
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| subscriptionId | VARCHAR (UUID) | NO | — | FK → subscriptions.id |
-| invoiceNumber | VARCHAR | NO | — | Human-readable invoice number |
-| description | VARCHAR | NO | — | Invoice line description |
-| subtotal | INT | NO | — | Amount in cents (ex VAT) |
-| vatAmount | INT | NO | — | VAT in cents |
-| total | INT | NO | — | Total in cents (incl VAT) |
-| periodStart | DATE | NO | — | Billing period start |
-| periodEnd | DATE | NO | — | Billing period end |
-| dueDate | DATE | NO | — | Payment due date |
-| paidAt | DATETIME | YES | NULL | When payment received |
-| pdfUrl | VARCHAR | YES | NULL | URL to generated PDF |
-| createdAt | DATETIME | NO | — | — |
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `plan_type` | `ENUM('free','starter','pro','advanced','enterprise')` | `'free'` | Current tier — determines ALL access limits via `config/tiers.ts` |
+| `has_used_trial` | `BOOLEAN` | `FALSE` | **Permanent flag.** Once TRUE, cannot be reset. Prevents trial re-use. |
+| `trial_expires_at` | `DATETIME NULL` | `NULL` | When the current trial ends. NULL = no active trial. Cleared on downgrade. |
 
-### credit_packages
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| name | VARCHAR(50) | NO | — | Package name |
-| description | VARCHAR(200) | YES | NULL | Description |
-| credits | INT | NO | — | Base credits |
-| price | INT | NO | — | Price in ZAR cents |
-| bonusCredits | INT | NO | 0 | Bonus credits on top |
-| isActive | BOOLEAN | NO | — | Availability flag |
-| featured | BOOLEAN | NO | false | Highlighted in UI |
-| displayOrder | INT | NO | 0 | Sort order |
-| createdAt | DATETIME | NO | — | — |
-| updatedAt | DATETIME | NO | — | — |
+**Added by:** Migration `031_trial_columns.ts`
 
-**Default Packages (ZAR cents)**:
-| Package | Credits | Bonus | Total | Price | Price/Credit |
-|---------|---------|-------|-------|-------|-------------|
-| Starter | 1,000 | 0 | 1,000 | 1,000 (R10) | R0.01 |
-| Standard | 5,000 | 250 | 5,250 | 4,750 (R47.50) | R0.009 |
-| Professional | 10,000 | 1,000 | 11,000 | 9,000 (R90) | R0.008 |
-| Business | 25,000 | 3,750 | 28,750 | 21,250 (R212.50) | R0.007 |
-| Enterprise | 100,000 | 25,000 | 125,000 | 75,000 (R750) | R0.006 |
+### Access Resolution Flow
 
-### credit_balances
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| teamId | VARCHAR (UUID) | NO | — | FK → teams.id (unique) *(legacy: teams table retained only for credit balance grouping)* |
-| balance | INT | NO | — | Current credit balance |
-| totalPurchased | INT | NO | 0 | Lifetime credits purchased |
-| totalUsed | INT | NO | 0 | Lifetime credits consumed |
-| lowBalanceThreshold | INT | NO | 5000 | Alert threshold |
-| lowBalanceAlertSent | BOOLEAN | NO | false | Alert already sent flag |
-| createdAt | DATETIME | NO | — | — |
-| updatedAt | DATETIME | NO | — | — |
+```
+users.plan_type → getLimitsForTier(plan_type) → TierLimits object → enforce limits
+```
 
-### credit_transactions
-| Column | Type | Nullable | Default | Description |
-|--------|------|----------|---------|-------------|
-| id | VARCHAR (UUID) | NO | — | Primary key |
-| creditBalanceId | VARCHAR (UUID) | NO | — | FK → credit_balances.id |
-| type | ENUM | NO | — | `PURCHASE`, `USAGE`, `REFUND`, `BONUS`, `ADJUSTMENT` |
-| amount | INT | NO | — | Positive = add, negative = deduct |
-| requestType | VARCHAR | YES | NULL | `TEXT_CHAT`, `CODE_AGENT_EXECUTE`, etc. |
-| requestMetadata | JSON | YES | NULL | Token counts, multipliers, etc. |
-| paymentProvider | ENUM | YES | NULL | `PAYFAST`, `YOCO`, `MANUAL` |
-| externalPaymentId | VARCHAR | YES | NULL | Gateway transaction ID (idempotency key) |
-| description | VARCHAR | YES | NULL | Human-readable description |
-| balanceAfter | INT | NO | — | Balance snapshot after this transaction |
-| createdAt | DATETIME | NO | — | — |
+There is **no join** to any pricing/limits table. The single `plan_type` string resolves to a static `TierLimits` object from `config/tiers.ts`.
 
-### subscription_tier_limits (Widget Tiers)
+---
+
+## 2. TierLimits Interface — `config/tiers.ts`
+
+The canonical type for all tier limits:
+
+```typescript
+export type TierName = 'free' | 'starter' | 'pro' | 'advanced' | 'enterprise';
+
+export interface TierLimits {
+  name: string;                  // Display name ("Free", "Starter", etc.)
+  priceZAR: number | 'Custom';  // Monthly price in ZAR (not cents)
+  gatewayPlanId: string | null;  // Yoco plan identifier
+  maxSites: number;              // Max generated sites
+  maxWidgets: number;            // Max widget clients
+  maxCollectionsPerSite: number; // Max collections per site
+  maxStorageBytes: number;       // Max storage in bytes
+  maxActionsPerMonth: number;    // Monthly action cap (chatbot + webhook = 1 Action each)
+  allowAutoRecharge: boolean;    // Can auto-charge R99/1000 extra actions on overage
+  maxKnowledgePages: number;     // Knowledge base page limit
+  allowedSiteType: string;       // Highest allowed site type
+  canRemoveWatermark: boolean;   // Can remove "Powered by SoftAware"
+  allowedSystemActions: string[];// Feature gates: email_capture, payment_gateway_hook, api_webhook, custom_middleware
+  hasCustomKnowledgeCategories: boolean;
+  hasOmniChannelEndpoints: boolean;
+  ingestionPriority: number;     // 1–5 (higher = faster ingestion queue)
+}
+```
+
+### OVERAGE_CONFIG — `config/tiers.ts`
+
+```typescript
+export const OVERAGE_CONFIG = {
+  priceZAR: 99,        // R99 per action pack
+  actionPackSize: 1000, // 1,000 additional actions per charge
+} as const;
+```
+
+### Static Tier Values
+
+| Field | Free | Starter | Pro | Advanced | Enterprise |
+|-------|------|---------|-----|----------|------------|
+| `priceZAR` | 0 | 349 | 699 | 1,499 | Custom |
+| `maxSites` | 1 | 3 | 10 | 25 | 999 |
+| `maxWidgets` | 1 | 3 | 10 | 25 | 999 |
+| `maxCollectionsPerSite` | 1 | 6 | 15 | 40 | 999 |
+| `maxStorageBytes` | 5 MB | 50 MB | 200 MB | 1 GB | 5 GB+ |
+| `maxActionsPerMonth` | 500 | 2,000 | 5,000 | 20,000 | 999,999 |
+| `allowAutoRecharge` | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `maxKnowledgePages` | 50 | 200 | 500 | 2,000 | 99,999 |
+| `allowedSiteType` | single_page | classic_cms | ecommerce | web_application | headless |
+| `canRemoveWatermark` | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `hasOmniChannelEndpoints` | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `ingestionPriority` | 1 | 2 | 3 | 4 | 5 |
+
+### allowedSystemActions by Tier
+
+| System Action | Free | Starter | Pro | Advanced | Enterprise |
+|---------------|------|---------|-----|----------|------------|
+| `email_capture` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `payment_gateway_hook` | ❌ | ❌ | ✅ | ✅ | ✅ |
+| `api_webhook` | ❌ | ❌ | ❌ | ✅ | ✅ |
+| `custom_middleware` | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+---
+
+## 2b. Dashboard Trial Metrics — Frontend Interface
+
+Returned by `GET /dashboard/metrics` and consumed by `Dashboard.tsx`:
+
+```typescript
+interface DashboardMetrics {
+  // ...existing stats...
+  trial?: {
+    hasUsedTrial: boolean;   // Permanent flag — TRUE once trial used
+    isOnTrial: boolean;      // Currently in an active trial
+    expiresAt: string | null;// ISO 8601 trial end date
+    daysRemaining: number;   // Days left (0 if not on trial)
+    canStartTrial: boolean;  // TRUE only if free tier AND never trialled
+  };
+}
+```
+
+**`canStartTrial` computation:** `!has_used_trial && plan_type === 'free'` — this drives the trial activation banner visibility.
+
+## 2c. AuthModel Register — Frontend Type
+
+```typescript
+// AuthModel.register() parameter
+{ name: string; email: string; password: string; company_name?: string; phone?: string; address?: string; trial?: boolean }
+
+// AuthModel.register() response
+{ success: boolean; message: string; trialActivated?: boolean; data: { token: string; user: User } }
+```
+
+---
+
+## 3. Widget Client Fields — `widget_clients` table
+
+Key subscription-related columns on widget clients:
+
 | Column | Type | Description |
 |--------|------|-------------|
-| tier | VARCHAR | `free`, `starter`, `advanced`, `enterprise` |
-| max_pages | INT | Max crawled pages |
-| max_messages_per_month | INT | Monthly message limit |
-| lead_capture | BOOLEAN | Lead capture enabled |
-| tone_control | BOOLEAN | Tone customization enabled |
-| daily_recrawl | BOOLEAN | Daily content refresh |
-| document_uploads | BOOLEAN | Document upload support |
+| `subscription_tier` | `VARCHAR` | Current tier of this widget (maps to TierName) |
+| `monthly_price` | `DECIMAL` | Price paid — set from `TierLimits.priceZAR` on upgrade |
+| `messages_this_cycle` | `INT` | Counter reset on upgrade; checked against `maxActionsPerMonth` |
+| `branding_enabled` | `BOOLEAN` | TRUE for free tier (watermark shown), FALSE for paid |
+| `status` | `VARCHAR` | `'active'` / `'suspended'` (frozen by trial enforcer) |
+| `tone_preset` | `VARCHAR` | AI tone setting |
+| `lead_capture_enabled` | `BOOLEAN` | Requires `email_capture` in tier's `allowedSystemActions` |
+| `preferred_model` | `VARCHAR` | AI model preference |
 
 ---
 
-## Credit Pricing Configuration
+## 4. Yoco Checkout Fields — `yoco_checkouts` table
 
-### Request Types & Costs
-| Type | Base Cost (credits) | Per-Token Cost | Description |
-|------|-------------------|----------------|-------------|
-| `TEXT_CHAT` | 10 | 0.01 | Full AI chat with token pricing |
-| `TEXT_SIMPLE` | 5 | 0.005 | Simple text requests |
-| `AI_BROKER` | 1 | — | External provider proxy (minimal) |
-| `CODE_AGENT_EXECUTE` | 20 | 0.02 | Code agent with file editing |
-| `FILE_OPERATION` | 1 | — | File read/write |
-| `MCP_TOOL` | 5 | — | MCP tool calls (× complexity multiplier) |
-
-### Cost Calculation
-```typescript
-cost = baseCost + (tokens × perTokenCost) × complexityMultiplier
-// Minimum cost: 1 credit
-```
-
-### Balance Thresholds
-| Level | Threshold | Action |
-|-------|-----------|--------|
-| WARNING | 5,000 credits | Console log alert |
-| CRITICAL | 1,000 credits | Console log alert |
-| EMPTY | 0 credits | Request rejected (402) |
-
-### Constants
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `SIGNUP_BONUS_CREDITS` | 100 | Free credits on team creation |
-| `REFERRAL_BONUS_CREDITS` | 500 | Credits for referrals |
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INT AUTO_INCREMENT` | Primary key |
+| `yoco_checkout_id` | `VARCHAR` | Yoco's external checkout ID |
+| `user_id` | `VARCHAR` | User who initiated checkout |
+| `contact_id` | `INT` | Associated contact |
+| `action` | `VARCHAR` | Always `'SUBSCRIBE'` now (no more `PURCHASE_CREDITS`) |
+| `amount` | `INT` | Amount in ZAR cents |
+| `display_name` | `VARCHAR` | e.g. "SoftAware Pro Plan — Monthly" |
+| `status` | `VARCHAR` | `'pending'` / `'completed'` / `'failed'` |
+| `mode` | `VARCHAR` | `'live'` or `'test'` (from `sys_settings.yoco_mode`) |
+| `payment_id` | `VARCHAR NULL` | Yoco payment ID (set on completion) |
+| `metadata` | `JSON` | Contains `{ "softaware_target_tier": "pro" }` |
+| `created_at` | `DATETIME` | Creation timestamp |
+| `updated_at` | `DATETIME` | Last update timestamp |
 
 ---
 
-## Zod Validation Schemas
+## 5. Yoco Refunds — `yoco_refunds` table
 
-### StartTrialSchema
-```typescript
-{ tier: z.enum(['PERSONAL', 'TEAM', 'ENTERPRISE']).optional().default('PERSONAL') }
-```
-
-### ChangePlanSchema
-```typescript
-{ tier: z.enum(['PERSONAL', 'TEAM', 'ENTERPRISE']),
-  billingCycle: z.enum(['monthly', 'annually']).optional().default('monthly') }
-```
-
-### PurchaseCreditsSchema
-```typescript
-{ packageId: z.string(),
-  paymentMethod: z.enum(['PAYFAST', 'YOCO', 'MANUAL']),
-  returnUrl: z.string().url().optional(),
-  cancelUrl: z.string().url().optional() }
-```
-
-### CreatePackageSchema (Admin)
-```typescript
-{ name: z.string().min(1).max(50),
-  description: z.string().max(200).optional(),
-  credits: z.number().int().positive(),
-  price: z.number().int().positive(),
-  bonusCredits: z.number().int().nonnegative().default(0),
-  featured: z.boolean().default(false) }
-```
-
-### AdjustCreditsSchema (Admin)
-```typescript
-{ amount: z.number().int(),
-  description: z.string().min(1).max(200),
-  type: z.enum(['ADJUSTMENT', 'BONUS', 'REFUND']).default('ADJUSTMENT') }
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INT AUTO_INCREMENT` | Primary key |
+| `checkout_id` | `INT` | FK to `yoco_checkouts.id` |
+| `yoco_refund_id` | `VARCHAR` | Yoco's refund ID |
+| `amount` | `INT` | Refund amount in ZAR cents |
+| `reason` | `VARCHAR` | Reason for refund |
+| `status` | `VARCHAR` | `'pending'` / `'completed'` / `'failed'` |
+| `idempotency_key` | `VARCHAR UNIQUE` | Prevents duplicate refunds |
 
 ---
 
-## Environment Variables
+## 6. Generated Sites Freeze Fields — `generated_sites` table
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PAYFAST_MERCHANT_ID` | For PayFast | PayFast merchant ID |
-| `PAYFAST_MERCHANT_KEY` | For PayFast | PayFast merchant key |
-| `PAYFAST_PASSPHRASE` | For PayFast | PayFast passphrase for signature |
-| `YOCO_SECRET_KEY` | For Yoco | Yoco API secret key |
-| `YOCO_WEBHOOK_SECRET` | For Yoco | Yoco webhook HMAC secret |
-| `PAYMENT_RETURN_URL` | Optional | Default return URL after payment |
-| `PAYMENT_CANCEL_URL` | Optional | Default cancel URL |
+| Column | Type | Description |
+|--------|------|-------------|
+| `status` | `VARCHAR` | Set to `'locked_tier_limit'` when user exceeds free tier's `maxSites` after downgrade |
+| `created_at` | `DATETIME` | Used by freeze algorithm (oldest sites survive) |
+
+---
+
+## 7. Team Subscription Fields (Legacy) — `subscriptions` & `subscription_plans` tables
+
+These tables are retained for desktop app team billing but are **separate** from the user-scoped `plan_type` system.
+
+| Table | Key Columns |
+|-------|------------|
+| `subscription_plans` | `id`, `tier` (PERSONAL/TEAM/ENTERPRISE), `name`, `priceMonthly`, `priceAnnually`, `maxTeamMembers`, `features` |
+| `subscriptions` | `id`, `teamId`, `planId`, `status`, `billingCycle`, `trialEndsAt`, `currentPeriodEnd`, `cancelledAt` |
+| `invoices` | `id`, `subscriptionId`, `invoiceNumber`, `subtotal`, `vatAmount`, `total`, `dueDate`, `paidAt`, `pdfUrl` |
+
+---
+
+## Dropped Tables (v2.0.0 — permanently removed)
+
+| Table | Former Purpose | Migration |
+|-------|---------------|-----------|
+| `credit_packages` | Purchasable credit bundles | `030_purge_legacy_pricing.ts` |
+| `package_transactions` | Credit purchase history | `030_purge_legacy_pricing.ts` |
+| `subscription_tier_limits` | Dynamic tier limits (DB-driven) — replaced by `packages` columns | `030_purge_legacy_pricing.ts` |
+| `credit_balances` | Per-contact credit balance | Already removed prior |
+| `credit_transactions` | Per-request credit deductions | Already removed prior |
+
+---
+
+## 8. Package Catalog — `packages` table (v3.0.0)
+
+The `packages` table stores admin-editable package definitions with full tier-limit columns. Each column overrides the corresponding `config/tiers.ts` fallback when non-NULL.
+
+### Original Columns (pre-existing)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INT AUTO_INCREMENT` | Primary key |
+| `slug` | `VARCHAR(50)` | Unique identifier (e.g. `free`, `starter`, `pro`, `advanced`, `enterprise`, `staff`) |
+| `name` | `VARCHAR(100)` | Display name |
+| `description` | `VARCHAR(500) NULL` | Package description |
+| `package_type` | `ENUM('CONSUMER','ENTERPRISE','STAFF','ADDON')` | Package category |
+| `price_monthly` | `INT` | Monthly price in ZAR **cents** (e.g. 34900 = R349) |
+| `price_annually` | `INT NULL` | Annual price in ZAR cents |
+| `max_users` | `INT NULL` | Legacy: max users per package |
+| `max_agents` | `INT NULL` | Legacy: max AI agents (mapped to `maxWidgets` by resolver) |
+| `max_widgets` | `INT NULL` | Max standalone AI widgets |
+| `max_landing_pages` | `INT NULL` | Legacy: max landing pages (mapped to `maxSites` by resolver) |
+| `max_enterprise_endpoints` | `INT NULL` | Max enterprise API endpoints |
+| `features` | `JSON` | Feature list as JSON string array |
+| `is_active` | `TINYINT(1)` | Whether package is active (soft-delete flag) |
+| `is_public` | `TINYINT(1)` | Whether package appears on public pricing pages |
+| `display_order` | `INT` | Sort order for UI display |
+| `featured` | `TINYINT(1)` | Whether to highlight this package in pricing UI |
+| `cta_text` | `VARCHAR(50)` | Call-to-action button text |
+| `created_at` | `DATETIME` | Creation timestamp |
+| `updated_at` | `DATETIME` | Last update timestamp |
+
+### Tier-Limit Columns (added by Migration 032)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `gateway_plan_id` | `VARCHAR(100) NULL` | Payment gateway plan identifier |
+| `max_sites` | `INT NULL` | Maximum sites (overrides `config/tiers.ts.maxSites` if non-NULL) |
+| `max_collections_per_site` | `INT NULL` | Maximum collections per site |
+| `max_storage_bytes` | `BIGINT NULL` | Storage limit in bytes |
+| `max_actions_per_month` | `INT NULL` | Monthly action cap |
+| `allow_auto_recharge` | `TINYINT(1) DEFAULT 0` | Whether overage billing is allowed |
+| `max_knowledge_pages` | `INT NULL` | Knowledge base page limit |
+| `allowed_site_type` | `VARCHAR(32) DEFAULT 'single_page'` | Highest site type: `single_page` / `classic_cms` / `ecommerce` / `web_application` / `headless` |
+| `can_remove_watermark` | `TINYINT(1) DEFAULT 0` | Watermark removal permission |
+| `allowed_system_actions` | `JSON NULL` | Array of allowed system action strings (e.g. `["email_capture","payment_gateway_hook"]`) |
+| `has_custom_knowledge_categories` | `TINYINT(1) DEFAULT 0` | Custom knowledge categories flag |
+| `has_omni_channel_endpoints` | `TINYINT(1) DEFAULT 0` | Omni-channel endpoints flag |
+| `ingestion_priority` | `INT DEFAULT 1` | Ingestion queue priority (1–10, higher = faster) |
+
+---
+
+## 9. Contact–Package Assignments — `contact_packages` table (v3.0.0)
+
+Links contacts (companies) to packages. Each contact has at most one active package assignment.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INT AUTO_INCREMENT` | Primary key |
+| `contact_id` | `INT` | FK to `contacts.id` |
+| `package_id` | `INT` | FK to `packages.id` |
+| `status` | `VARCHAR` | `'ACTIVE'` / `'TRIAL'` / `'CANCELLED'` |
+| `billing_cycle` | `VARCHAR` | `'MONTHLY'` / `'ANNUALLY'` / `'NONE'` |
+| `credits_balance` | `INT` | Legacy column (always 0) |
+| `credits_used` | `INT` | Legacy column (always 0) |
+| `current_period_start` | `DATETIME` | Billing period start date |
+| `current_period_end` | `DATETIME` | Billing period end date |
+| `cancelled_at` | `DATETIME NULL` | When the assignment was cancelled |
+| `created_at` | `DATETIME` | Creation timestamp |
+| `updated_at` | `DATETIME` | Last update timestamp |
+
+---
+
+## 10. Package Resolution Interfaces (v3.0.0)
+
+### `PackageCatalogRow` (from `services/packageResolver.ts`)
+
+TypeScript interface representing a raw `packages` table row. All tier-limit columns are optional (nullable) — when NULL, the static fallback from `config/tiers.ts` is used.
+
+### `ResolvedUserPackage` (from `services/packageResolver.ts`)
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `contactId` | `number` | Resolved contact ID |
+| `contactPackageId` | `number` | `contact_packages.id` |
+| `packageId` | `number` | `packages.id` |
+| `packageSlug` | `string` | Package slug (e.g. `pro`) |
+| `packageName` | `string` | Package display name |
+| `packageStatus` | `string` | `'ACTIVE'` or `'TRIAL'` |
+| `limits` | `TierLimits` | Fully resolved tier limits (DB overrides merged with static fallbacks) |
+| `rawPackage` | `PackageCatalogRow` | Raw database row |

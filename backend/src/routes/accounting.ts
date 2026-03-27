@@ -2,10 +2,14 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 import type { Account, Transaction, Ledger, TaxRate } from '../db/businessTypes.js';
 
 export const accountingRouter = Router();
+
+// All accounting routes require admin
+accountingRouter.use(requireAuth, requireAdmin);
 
 // ============= Accounts Routes =============
 
@@ -23,7 +27,7 @@ const updateAccountSchema = createAccountSchema.partial();
 /**
  * GET /accounting/accounts - List all accounts
  */
-accountingRouter.get('/accounts', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/accounts', async (req: AuthRequest, res: Response, next) => {
   try {
     const type = req.query.type as string | undefined;
     let query = 'SELECT * FROM accounts WHERE active = 1';
@@ -46,7 +50,7 @@ accountingRouter.get('/accounts', requireAuth, async (req: AuthRequest, res: Res
 /**
  * GET /accounting/accounts/:id - Get single account
  */
-accountingRouter.get('/accounts/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/accounts/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const account = await db.queryOne<Account>(
@@ -67,7 +71,7 @@ accountingRouter.get('/accounts/:id', requireAuth, async (req: AuthRequest, res:
 /**
  * POST /accounting/accounts - Create account
  */
-accountingRouter.post('/accounts', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.post('/accounts', async (req: AuthRequest, res: Response, next) => {
   try {
     const data = createAccountSchema.parse(req.body);
 
@@ -100,7 +104,7 @@ accountingRouter.post('/accounts', requireAuth, async (req: AuthRequest, res: Re
 /**
  * PUT /accounting/accounts/:id - Update account
  */
-accountingRouter.put('/accounts/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.put('/accounts/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const data = updateAccountSchema.parse(req.body);
@@ -138,7 +142,7 @@ const createTransactionSchema = z.object({
 /**
  * GET /accounting/transactions - List transactions with filtering
  */
-accountingRouter.get('/transactions', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/transactions', async (req: AuthRequest, res: Response, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
@@ -213,7 +217,7 @@ accountingRouter.get('/transactions', requireAuth, async (req: AuthRequest, res:
 /**
  * POST /accounting/transactions - Create transaction
  */
-accountingRouter.post('/transactions', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.post('/transactions', async (req: AuthRequest, res: Response, next) => {
   try {
     const data = createTransactionSchema.parse(req.body);
 
@@ -255,7 +259,7 @@ const createLedgerSchema = z.object({
 /**
  * GET /accounting/ledger - Get ledger entries
  */
-accountingRouter.get('/ledger', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/ledger', async (req: AuthRequest, res: Response, next) => {
   try {
     const account_id = req.query.account_id ? parseInt(req.query.account_id as string) : undefined;
     const page = parseInt(req.query.page as string) || 1;
@@ -296,7 +300,7 @@ accountingRouter.get('/ledger', requireAuth, async (req: AuthRequest, res: Respo
 /**
  * GET /accounting/accounts/:id/balance - Get account balance
  */
-accountingRouter.get('/accounts/:id/balance', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/accounts/:id/balance', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
 
@@ -341,7 +345,7 @@ const updateTaxRateSchema = createTaxRateSchema.partial();
 /**
  * GET /accounting/tax-rates - List tax rates
  */
-accountingRouter.get('/tax-rates', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.get('/tax-rates', async (req: AuthRequest, res: Response, next) => {
   try {
     const taxRates = await db.query<TaxRate>(
       'SELECT * FROM tax_rates WHERE active = 1 ORDER BY tax_name'
@@ -355,7 +359,7 @@ accountingRouter.get('/tax-rates', requireAuth, async (req: AuthRequest, res: Re
 /**
  * POST /accounting/tax-rates - Create tax rate
  */
-accountingRouter.post('/tax-rates', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.post('/tax-rates', async (req: AuthRequest, res: Response, next) => {
   try {
     const data = createTaxRateSchema.parse(req.body);
 
@@ -379,7 +383,7 @@ accountingRouter.post('/tax-rates', requireAuth, async (req: AuthRequest, res: R
 /**
  * PUT /accounting/tax-rates/:id - Update tax rate
  */
-accountingRouter.put('/tax-rates/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+accountingRouter.put('/tax-rates/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const data = updateTaxRateSchema.parse(req.body);

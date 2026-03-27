@@ -1,9 +1,9 @@
-import { prisma } from './src/db/prisma.js';
+import { db } from './src/db/mysql.js';
 import crypto from 'crypto';
 
 async function createApiKey() {
   // Get first user
-  const user = await prisma.user.findFirst();
+  const user: any = await db.queryOne('SELECT id, email FROM users LIMIT 1');
   
   if (!user) {
     console.log('No users found. Please create a user first.');
@@ -12,16 +12,15 @@ async function createApiKey() {
   
   // Generate API key
   const apiKey = crypto.randomBytes(32).toString('hex');
+  const id = crypto.randomUUID();
+  const now = new Date();
   
   // Create API key in database
-  const newKey = await prisma.apiKey.create({
-    data: {
-      name: 'Desktop App - Auto Generated',
-      key: apiKey,
-      userId: user.id,
-      isActive: true,
-    }
-  });
+  await db.execute(
+    `INSERT INTO api_keys (id, name, \`key\`, userId, isActive, createdAt)
+     VALUES (?, ?, ?, ?, 1, ?)`,
+    [id, 'Desktop App - Auto Generated', apiKey, user.id, now]
+  );
   
   console.log('');
   console.log('='.repeat(60));
@@ -30,12 +29,10 @@ async function createApiKey() {
   console.log('');
   console.log('API Key:', apiKey);
   console.log('User:', user.email);
-  console.log('Key ID:', newKey.id);
+  console.log('Key ID:', id);
   console.log('');
   console.log('Use this in your desktop app with X-API-Key header');
   console.log('');
-  
-  await prisma.$disconnect();
 }
 
 createApiKey().catch(console.error);

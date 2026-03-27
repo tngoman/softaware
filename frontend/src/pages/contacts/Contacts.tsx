@@ -177,6 +177,8 @@ const Contacts: React.FC = () => {
                   const parsed = JSON.parse(data);
                   if (parsed.done) continue;
                   if (parsed.error) { fullText += `\n⚠️ ${parsed.error}`; continue; }
+                  if (parsed.toolExecuted) { fullText = parsed.replace ?? ''; continue; }
+                  if (parsed.toolCall?.message) { fullText = parsed.toolCall.message; continue; }
                   fullText += parsed.token || parsed.content || parsed.text || '';
                 } catch { /* skip malformed */ }
               }

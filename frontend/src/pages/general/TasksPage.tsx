@@ -1002,7 +1002,7 @@ const TaskDetailsDialog: React.FC<{
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-900 dark:text-white">{c.user_name || c.username || c.created_by || 'Unknown'}</span>
                         {c.created_at && <span className="text-xs text-gray-400">{relativeDate(c.created_at)}</span>}
-                        {c.time_spent && <span className="text-xs text-gray-400">· {c.time_spent}h</span>}
+                        {c.time_spent != null && c.time_spent !== 0 && <span className="text-xs text-gray-400">· {c.time_spent}h</span>}
                         {c.is_internal === 1 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">Internal</span>}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
@@ -1324,7 +1324,14 @@ const WorkflowDialog: React.FC<{
     
     setLoading(true);
     try {
-      const taskData: any = { id: task.id };
+      const localId = task._local_id;
+      if (!localId) {
+        notify.error('Cannot assign: task has no local ID');
+        setLoading(false);
+        return;
+      }
+
+      const updateData: Record<string, any> = {};
       
       if (sendBackToIntake) {
         // Prefer a client_manager, fall back to first available user
@@ -1337,22 +1344,23 @@ const WorkflowDialog: React.FC<{
           return false;
         };
         const intakeUser = allowedAssignees.find(findClientManager) || allowedAssignees[0];
-        taskData.assigned_to = intakeUser?.id;
-        taskData.workflow_phase = 'intake';
-        taskData.module_id = null;
+        updateData.assigned_to_name = intakeUser?.name || intakeUser?.first_name || intakeUser?.email || null;
+        updateData.workflow_phase = 'intake';
+        updateData.module_id = null;
       } else if (needsModule && moduleId && moduleId !== 'none') {
-        taskData.module_id = parseInt(moduleId);
-        taskData.workflow_phase = 'development';
-        taskData.assigned_to = null;
+        const mod = modules.find((m: any) => m.id.toString() === moduleId);
+        updateData.module_id = parseInt(moduleId);
+        updateData.module_name = mod?.name || null;
+        updateData.workflow_phase = 'development';
       } else if (assignedTo && assignedTo !== 'none') {
-        taskData.assigned_to = parseInt(assignedTo);
+        const chosenUser = users.find(u => u.id?.toString() === assignedTo);
+        updateData.assigned_to_name = chosenUser?.name || chosenUser?.first_name || chosenUser?.email || null;
         if (resultingPhase) {
-          taskData.workflow_phase = resultingPhase;
+          updateData.workflow_phase = resultingPhase;
         }
       }
 
-      await api.put('/softaware/tasks', { apiUrl, task: taskData }, {
-      });
+      await LocalTasksModel.update(localId, updateData);
 
       if (comment.trim()) {
         try {
@@ -1362,7 +1370,8 @@ const WorkflowDialog: React.FC<{
         } catch { /* ignore */ }
       }
 
-      notify.success(sendBackToIntake ? 'Sent back to intake' : needsModule ? 'Assigned to module' : `Assigned to ${selectedUser?.username || selectedUser?.user_name}`);
+      const displayName = selectedUser?.name || selectedUser?.first_name || selectedUser?.email || 'user';
+      notify.success(sendBackToIntake ? 'Sent back to intake' : needsModule ? 'Assigned to module' : `Assigned to ${displayName}`);
       onSuccess();
       onClose();
     } catch (err: any) {

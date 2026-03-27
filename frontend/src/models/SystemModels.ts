@@ -16,6 +16,7 @@ export interface User {
   is_active: boolean;
   is_admin: boolean;
   is_staff?: boolean;
+  ai_developer_tools_granted?: boolean | number;
   contact_id?: number | null;
   roles?: Role[];
   created_at: string;
@@ -411,6 +412,7 @@ export interface StaffAssistant {
   primary_goal: string | null;
   custom_greeting: string | null;
   voice_style: string | null;
+  tts_voice: string | null;
   preferred_model: string | null;
   business_type: string | null;
   website: string | null;
@@ -432,6 +434,7 @@ export interface StaffAssistantCreate {
   primary_goal?: string;
   custom_greeting?: string;
   voice_style?: string;
+  tts_voice?: string;
   preferred_model?: string;
   business_type?: string;
   website?: string;
@@ -532,6 +535,7 @@ export interface MyAssistantCreate {
   primary_goal?: string;
   custom_greeting?: string;
   voice_style?: string;
+  tts_voice?: string;
   preferred_model?: string;
   business_type?: string;
   website?: string;

@@ -9,6 +9,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
+import { enforceEndpointLimit } from '../middleware/packageEnforcement.js';
 import {
   getAllEndpoints,
   getEndpoint,
@@ -17,6 +18,7 @@ import {
   deleteEndpoint,
   setEndpointStatus,
   getRequestLogs,
+  getEndpointStats,
   type EndpointCreateInput,
 } from '../services/enterpriseEndpoints.js';
 
@@ -83,7 +85,7 @@ adminEnterpriseEndpointsRouter.get('/:id', (req: AuthRequest, res: Response) => 
 // ═══════════════════════════════════════════════════════════════════════════
 // POST / — Create a new enterprise endpoint
 // ═══════════════════════════════════════════════════════════════════════════
-adminEnterpriseEndpointsRouter.post('/', (req: AuthRequest, res: Response) => {
+adminEnterpriseEndpointsRouter.post('/', enforceEndpointLimit, (req: AuthRequest, res: Response) => {
   try {
     const data = createSchema.parse(req.body);
     const endpoint = createEndpoint(data as EndpointCreateInput);
@@ -212,6 +214,24 @@ adminEnterpriseEndpointsRouter.get('/:id/logs', (req: AuthRequest, res: Response
     res.json({ success: true, data: logs, pagination: { limit, offset } });
   } catch (error: any) {
     console.error('[AdminEnterprise] Logs error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET /:id/stats — Get analytics / aggregate stats for an endpoint
+// ═══════════════════════════════════════════════════════════════════════════
+adminEnterpriseEndpointsRouter.get('/:id/stats', (req: AuthRequest, res: Response) => {
+  try {
+    const existing = getEndpoint(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Endpoint not found' });
+    }
+    const days = parseInt(req.query.days as string) || 30;
+    const stats = getEndpointStats(req.params.id, days);
+    res.json({ success: true, data: stats });
+  } catch (error: any) {
+    console.error('[AdminEnterprise] Stats error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

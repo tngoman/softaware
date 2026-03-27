@@ -2,6 +2,24 @@
 
 ## Recent Changes (Latest First)
 
+### 2025-06 — Supplier Expenses Feature (3-Tab Supplier Interface)
+- **New backend endpoint** `GET /contacts/:id/expenses` added to `contacts.ts` (lines 409–464):
+  - Looks up contact's `company_name`, queries `transactions_vat` WHERE `party_name` matches and `transaction_type = 'expense'`
+  - JOINs with `tb_expense_categories` (legacy table) for category names
+  - Returns `{ data: expenses[], summary: { total_expenses, total_vat, total_exclusive, count } }`
+  - **Bug fix**: Initially used `expense_categories` table (new schema, `id` PK) but `transactions_vat.expense_category_id` references `tb_expense_categories.category_id` (legacy table). Fixed to use `tb_expense_categories`.
+- **New model method** `ContactModel.getExpenses(id)` added to `ContactModel.ts` (line 85):
+  - Calls `GET /contacts/${id}/expenses`, returns typed expense data + summary
+- **New supplier tab interface** in `ContactDetails.tsx` (replaces empty supplier placeholder):
+  - **Overview tab**: 4 summary cards (Total Expenses, Excl. Amount, VAT, Transaction Count) + recent expenses list (top 5 with click-through)
+  - **Expenses tab**: Full DataTable with 7 columns (Date, Invoice #, Category, Excl. Amount, VAT, Total, VAT Type with color-coded badges: blue=Standard, gray=Zero-rated, yellow=Exempt)
+  - **Documentation tab**: Markdown renderer for supplier documentation
+- New state variables: `supplierExpenses` (any[]), `supplierExpenseSummary` ({ total_expenses, total_vat, total_exclusive, count })
+- New function: `loadSupplierExpenses(contactId)` — called when `contact_type === 2`
+- New column definition: `expenseColumns` — 7-column TanStack Table config
+- `activeTab` union type now includes `'expenses'`
+- File LOC changes: `contacts.ts` 240→464, `ContactModel.ts` 79→98, `ContactDetails.tsx` 1322→1956
+
 ### 2025-06 — Package System Integration (contact_type + user_contact_link)
 - **Added `contact_type` column** to `contacts` table via migration 023:
   - `0` = Standard external company
@@ -181,6 +199,7 @@ ALTER TABLE assistant_knowledge
 | **Widgets** | Data | Overview loads widgets with status (admin hub only — removed from ContactDetails) |
 | **Enterprise Endpoints** | Data | Overview loads endpoints from SQLite |
 | **Packages** | Data + Billing | Contacts linked to packages via `contact_packages` table; credits billed per-contact; `user_contact_link` maps users to contacts |
+| **Accounting** | Data | Supplier expenses sourced from `transactions_vat` table (matched by `party_name`); expense categories from `tb_expense_categories` |
 | **Settings** | Config | SMTP configuration for contact form email delivery |
 
 ## Modules That Depend on Contacts

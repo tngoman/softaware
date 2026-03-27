@@ -1,7 +1,7 @@
 # Assistants Module — Architecture Patterns
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine internals.
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-This document catalogs the architecture patterns found in the Assistants module, covering knowledge ingestion, RAG retrieval, health scoring, dashboard display, assistant deletion, and frontend UI customization.
+This document catalogs the architecture patterns found in the Assistants module, covering knowledge ingestion, RAG retrieval, health scoring, dashboard display, assistant deletion, frontend UI customization, widget inline chat delivery, and dynamic theming.
 
 ---
 
@@ -615,6 +615,153 @@ if (hasImage) {
 - ❌ Base64 encoding increases payload size ~33% (10MB image → ~13.3MB body)
 - ❌ Express body limit at 20mb may be tight for very large images
 - ❌ Only one image per message supported in current UI (backend supports multiple)
+
+---
+
+### 2.12 Inline Widget Chat Pattern ⭐ NEW (v2.4.0)
+
+**Context:** The original widget used an iframe pointing to `softaware.net.za/chat/{id}`, which was blocked by `X-Frame-Options` headers on third-party sites. The fix replaces the iframe with a fully inline DOM-based chat UI.
+
+**Implementation:**
+
+```javascript
+// Widget script (template literal in assistants.ts GET /widget.js)
+// All UI built via document.createElement() — no iframe
+
+var chatContainer = document.createElement('div');
+chatContainer.style.cssText = 'position: fixed; bottom: 90px; right: 20px; width: 400px; ...';
+
+// SSE streaming via fetch() + ReadableStream (not EventSource)
+var response = await fetch(chatApiUrl, { method: 'POST', headers: {...}, body: JSON.stringify({...}) });
+var reader = response.body.getReader();
+var decoder = new TextDecoder();
+while (true) {
+  var result = reader.read();
+  if (result.done) break;
+  var text = decoder.decode(result.value, { stream: true });
+  // Parse SSE lines → extract tokens → append to message bubble
+}
+```
+
+**Benefits:**
+- ✅ No iframe — eliminates X-Frame-Options / CSP blocking
+- ✅ Full CSS control — widget styles don't conflict with host page
+- ✅ SSE streaming works with `fetch()` + `ReadableStream` (no CORS preflight issues)
+- ✅ Single script tag deployment — no additional HTML required
+
+**Drawbacks:**
+- ❌ ~500-line template literal string is hard to maintain/test
+- ❌ No source maps or TypeScript checking for widget code
+- ❌ All styles are inline — no CSS class reuse
+
+---
+
+### 2.13 Dynamic Widget Theming Pattern ⭐ NEW (v2.4.0)
+
+**Context:** Each assistant can have a custom `themeColor` hex value that should propagate to all branded elements (FAB button, header, send button, pulse animation shadows).
+
+**Implementation:**
+
+```javascript
+// Widget script — dynamic theming helpers
+var themeFrom = '#667eea';  // default
+var themeTo = '#764ba2';
+
+function darkenHex(hex, pct) {
+  var r = parseInt(hex.slice(1,3),16), ...;
+  r = Math.max(0, Math.round(r * (1 - pct)));
+  return '#' + ((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);
+}
+
+function hexToRgba(hex, a) { ... }
+function makeGradient() { return 'linear-gradient(135deg, ' + themeFrom + ', ' + themeTo + ')'; }
+
+function applyTheme() {
+  var g = makeGradient();
+  button.style.background = g;
+  button.style.boxShadow = '0 4px 14px ' + hexToRgba(themeFrom, 0.35);
+  header.style.background = g;
+  sendBtn.style.background = g;
+  // Update pulse animation keyframes with new color
+  styleEl.textContent = '@keyframes sa-pulse{...box-shadow: ' + hexToRgba(themeFrom, 0.5) + '...}';
+}
+
+// On config load:
+if (a.themeColor) {
+  themeFrom = a.themeColor;
+  themeTo = darkenHex(a.themeColor, 0.25);
+  applyTheme();
+}
+```
+
+**Benefits:**
+- ✅ Single hex input generates full gradient theme (from + 25% darker to)
+- ✅ All branded elements updated in one `applyTheme()` call
+- ✅ Pulse animation keyframes dynamically rewritten with new color
+- ✅ Box shadows use rgba for semi-transparent glow effect
+
+**Drawbacks:**
+- ❌ No accessibility contrast checking — dark theme color on dark page could be invisible
+- ❌ `darkenHex()` is simplistic — could produce muddy results for some colors
+
+---
+
+### 2.14 Proactive Greeting Toggle Pattern ⭐ NEW (v2.4.0)
+
+**Context:** The proactive greeting feature needs an explicit on/off toggle, not just presence/absence of text. Users should be able to disable the greeting without losing their configured text.
+
+**Implementation (Frontend):**
+
+```tsx
+// CreateAssistant.tsx
+const [proactiveEnabled, setProactiveEnabled] = useState(false);
+
+// On load (edit mode):
+setProactiveEnabled(!!a.proactiveGreeting);
+
+// Toggle switch:
+<button role="switch" aria-checked={proactiveEnabled}
+  onClick={() => {
+    setProactiveEnabled(prev => !prev);
+    if (proactiveEnabled) {
+      setForm(prev => ({ ...prev, proactiveGreeting: '' }));
+    }
+  }}
+  className={proactiveEnabled ? 'bg-picton-blue' : 'bg-gray-300'}
+>
+  <span className={proactiveEnabled ? 'translate-x-6' : 'translate-x-1'} />
+</button>
+
+// Save payload:
+proactiveGreeting: proactiveEnabled ? (form.proactiveGreeting || undefined) : undefined,
+proactiveDelay: proactiveEnabled ? form.proactiveDelay : 5,
+```
+
+**Implementation (Widget):**
+
+```javascript
+// Widget only triggers proactive tooltip if greeting text is non-empty
+if (a.proactiveGreeting) {
+  setTimeout(function() {
+    if (!isOpen && !proactiveShown) {
+      proactiveText.textContent = proactiveGreeting;
+      proactiveBubble.style.display = 'block';
+      proactiveShown = true;
+      setTimeout(function() { proactiveBubble.style.display = 'none'; }, 12000);
+    }
+  }, proactiveDelay);
+}
+```
+
+**Benefits:**
+- ✅ Explicit toggle is clearer than presence/absence of text
+- ✅ Accessible — uses `role="switch"` and `aria-checked`
+- ✅ Toggle OFF clears greeting text — prevents orphan config
+- ✅ Widget naturally handles empty greeting (no tooltip shown)
+
+**Drawbacks:**
+- ❌ Toggling OFF clears the greeting text — user loses their draft text
+- ❌ No server-side "enabled" flag — relies on empty string to mean disabled
 
 ---
 

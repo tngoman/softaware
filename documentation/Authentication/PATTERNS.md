@@ -1,7 +1,7 @@
 # Authentication Module - Architecture Patterns
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -802,6 +802,100 @@ if (lastEmail) {
 - ❌ `lastEmail` in localStorage — reveals which email was used on this browser (acceptable for trusted devices)
 - ❌ No PIN expiry — PIN remains valid indefinitely (user must manually remove)
 - ❌ No PIN change notification — user not notified via email when PIN is changed
+
+---
+
+### 2.13 Google OAuth2 SSO Pattern (v2.0.0)
+
+**Context:** Users want to sign in with their existing Google account for convenience and reduced friction. The system must support both a server-side redirect flow (for web) and a stateless token verification flow (for mobile/SPA).
+
+**Implementation:**
+
+```
+Dual Flow Architecture:
+
+Flow 1 — Web (Server-Side Redirect):
+  GET /auth/google
+    → Generate random state
+    → Set state as httpOnly cookie (CSRF protection)
+    → Build Google consent URL with scopes: openid, email, profile
+    → Return URL to frontend
+
+  Frontend redirects browser to Google consent URL (window.location.href)
+
+  GET /auth/google/callback?code=...&state=...
+    → Verify state matches cookie (CSRF check)
+    → Clear state cookie
+    → Exchange code for tokens via OAuth2Client.getToken()
+    → Verify ID token via OAuth2Client.verifyIdToken()
+    → Extract sub, email, name, picture from payload
+    → Lookup/create/link user (see below)
+    → Sign JWT via signAccessToken()
+    → Redirect to ${frontendOrigin}/auth/oauth-callback?token=<jwt>
+
+  OAuthCallback.tsx
+    → Read ?token= from URL
+    → Store JWT in localStorage
+    → Fetch profile via /auth/me
+    → Set Zustand store state
+    → Navigate to /dashboard
+
+Flow 2 — Mobile/SPA (Token Verification):
+  POST /auth/google/token { id_token: '...' }
+    → Verify ID token via OAuth2Client.verifyIdToken()
+    → Extract sub, email, name, picture
+    → Lookup/create/link user (see below)
+    → Return { token: '<jwt>', user: {...} }
+
+User Lookup/Link/Create Logic (shared):
+  1. SELECT * FROM users WHERE oauth_provider='google' AND oauth_provider_id=sub
+  2. If found → use existing user
+  3. If not → SELECT * FROM users WHERE email=payload.email
+  4. If email match → UPDATE users SET oauth_provider='google', oauth_provider_id=sub
+  5. If no match → Transaction: INSERT contact, user (passwordHash=''), team, team_member, user_roles, activation_key
+```
+
+**Auto-Migration:**
+
+```typescript
+async function ensureOAuthColumns() {
+  const [cols] = await db.execute(`SHOW COLUMNS FROM users LIKE 'oauth_provider'`);
+  if ((cols as any[]).length === 0) {
+    await db.execute(`ALTER TABLE users ADD COLUMN oauth_provider VARCHAR(20) NULL AFTER is_staff`);
+    await db.execute(`ALTER TABLE users ADD COLUMN oauth_provider_id VARCHAR(255) NULL AFTER oauth_provider`);
+    await db.execute(`ALTER TABLE users ADD INDEX idx_oauth (oauth_provider, oauth_provider_id)`);
+  }
+}
+ensureOAuthColumns().catch((e) => console.warn('[OAuth] migration:', e));
+```
+
+**Security Measures:**
+
+| Measure | Implementation |
+|---------|---------------|
+| CSRF protection | Random `state` param set as httpOnly cookie, verified on callback |
+| Token verification | `google-auth-library` checks signature, audience, issuer, expiry |
+| OAuth-only accounts | Empty `passwordHash` (`''`) prevents password/PIN login |
+| Email auto-linking | Existing accounts linked by exact email match only |
+| No user enumeration | OAuth creates accounts silently — no error if email exists/doesn't exist |
+
+**Benefits:**
+- ✅ Dual flow supports web, mobile, and SPA clients with the same backend
+- ✅ Auto-migration adds columns on startup — no manual DDL required
+- ✅ Auto-linking prevents duplicate accounts when existing users try Google sign-in
+- ✅ OAuth-only accounts cannot use password reset or PIN — no orphaned credentials
+- ✅ CSRF state cookie prevents redirect-based attacks
+- ✅ `google-auth-library` handles all cryptographic verification — no custom JWT/OIDC parsing
+- ✅ Full transaction on user creation — same atomicity guarantees as regular registration
+- ✅ Frontend uses `window.location.href` redirect — works with all browsers, no popup issues
+- ✅ OAuthCallback.tsx provides loading/error states — user never sees a blank screen
+
+**Drawbacks:**
+- ❌ OAuth-only accounts cannot set a password later — no "add password" flow exists yet
+- ❌ No Google account unlinking UI — once linked, cannot be unlinked through the frontend
+- ❌ `google-auth-library` is an additional dependency (~2MB)
+- ❌ If Google is down, OAuth-only users cannot login at all (no fallback)
+- ❌ No 2FA integration for OAuth login — Google's own 2FA is relied upon instead
 
 ---
 

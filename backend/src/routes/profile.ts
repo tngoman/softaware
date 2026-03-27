@@ -54,18 +54,7 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
       );
     }
 
-    // Get credit balance (from package system)
-    let credits = null;
-    if (membership) {
-      // Look up credits via contact_packages linked to the user's team contact
-      credits = await db.queryOne<any>(
-        `SELECT COALESCE(SUM(credits_balance), 0) AS balance,
-                COALESCE(SUM(credits_used), 0) AS totalUsed
-         FROM contact_packages
-         WHERE status IN ('ACTIVE', 'TRIAL')`,
-        []
-      );
-    }
+    // Credits system removed — pricing is now static via config/tiers.ts
 
     res.json({
       user: {
@@ -96,13 +85,7 @@ profileRouter.get('/', async (req: AuthRequest, res, next) => {
             currentPeriodEnd: subscription.currentPeriodEnd,
           }
         : null,
-      credits: credits
-        ? {
-            balance: credits.balance,
-            totalPurchased: 0,
-            totalUsed: credits.totalUsed,
-          }
-        : null,
+      credits: null,
     });
   } catch (err) {
     next(err);

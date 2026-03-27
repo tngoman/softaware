@@ -12,42 +12,10 @@ import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { getHealthStatus, runHealthChecks } from '../services/healthMonitor.js';
 import { createNotification } from '../services/notificationService.js';
+import { safeJson, mapCaseRow } from '../utils/caseMappers.js';
 
 export const adminCasesRouter = Router();
 
-/** Safely handle MySQL JSON columns (already parsed objects or JSON strings) */
-function safeJson(val: any, fallback: any = null) {
-  if (val == null) return fallback;
-  if (typeof val === 'object') return val;
-  try { return JSON.parse(val); } catch { return fallback; }
-}
-
-/** Map a raw DB case row to the frontend-expected shape */
-function mapCaseRow(row: any) {
-  if (!row) return row;
-  const source = row.source || (() => {
-    switch (row.type) {
-      case 'auto_detected': return 'auto_detected';
-      case 'monitoring': return 'health_monitor';
-      default: return 'user_report';
-    }
-  })();
-  return {
-    ...row,
-    category: row.category || 'other',
-    source,
-    user_rating: row.rating ?? null,
-    user_feedback: row.rating_comment ?? null,
-    page_url: row.url ?? null,
-    reporter_name: row.reported_by_name ?? null,
-    reporter_email: row.reported_by_email ?? null,
-    assignee_name: row.assigned_to_name ?? null,
-    ai_analysis: safeJson(row.ai_analysis, null),
-    metadata: safeJson(row.metadata, {}),
-    tags: safeJson(row.tags, []),
-    browser_info: safeJson(row.browser_info, {}),
-  };
-}
 adminCasesRouter.use(requireAuth, requireAdmin);
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -204,17 +172,20 @@ adminCasesRouter.post('/bulk-assign', async (req: AuthRequest, res: Response) =>
     );
     const assignerName = assigner?.name || 'An admin';
     
-    for (const caseId of case_ids) {
-      await db.execute(
-        'UPDATE cases SET assigned_to = ?, updated_at = ? WHERE id = ?',
-        [assigned_to, now, caseId]
-      );
-      
-      await db.execute(
-        'INSERT INTO case_activity (id, case_id, user_id, action, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [generateId(), caseId, userId, 'assigned', assigned_to, now]
-      );
-    }
+    // Batch update all cases in a single query
+    const placeholders = case_ids.map(() => '?').join(',');
+    await db.execute(
+      `UPDATE cases SET assigned_to = ?, updated_at = ? WHERE id IN (${placeholders})`,
+      [assigned_to, now, ...case_ids]
+    );
+
+    // Batch insert activity records
+    const activityValues = case_ids.map(caseId => `(${['?','?','?','?','?','?'].join(',')})`).join(',');
+    const activityParams = case_ids.flatMap(caseId => [generateId(), caseId, userId, 'assigned', assigned_to, now]);
+    await db.execute(
+      `INSERT INTO case_activity (id, case_id, user_id, action, new_value, created_at) VALUES ${activityValues}`,
+      activityParams
+    );
 
     // Notify assignee about all assigned cases
     const assignedCases = await db.query<any>(
@@ -254,25 +225,27 @@ adminCasesRouter.post('/bulk-update-status', async (req: AuthRequest, res: Respo
     const userId = (req as any).userId;
     const now = toMySQLDate(new Date());
     
-    for (const caseId of case_ids) {
-      let updateQuery = 'UPDATE cases SET status = ?, updated_at = ?';
-      const updateParams: any[] = [status, now];
-      
-      if (status === 'resolved' || status === 'closed') {
-        updateQuery += ', resolved_at = ?, resolved_by = ?';
-        updateParams.push(now, userId);
-      }
-      
-      updateQuery += ' WHERE id = ?';
-      updateParams.push(caseId);
-      
-      await db.execute(updateQuery, updateParams);
-      
+    // Batch update all cases in a single query
+    const placeholders = case_ids.map(() => '?').join(',');
+    if (status === 'resolved' || status === 'closed') {
       await db.execute(
-        'INSERT INTO case_activity (id, case_id, user_id, action, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [generateId(), caseId, userId, 'status_changed', status, now]
+        `UPDATE cases SET status = ?, updated_at = ?, resolved_at = ?, resolved_by = ? WHERE id IN (${placeholders})`,
+        [status, now, now, userId, ...case_ids]
+      );
+    } else {
+      await db.execute(
+        `UPDATE cases SET status = ?, updated_at = ? WHERE id IN (${placeholders})`,
+        [status, now, ...case_ids]
       );
     }
+
+    // Batch insert activity records
+    const activityValues = case_ids.map(() => '(?, ?, ?, ?, ?, ?)').join(',');
+    const activityParams = case_ids.flatMap(caseId => [generateId(), caseId, userId, 'status_changed', status, now]);
+    await db.execute(
+      `INSERT INTO case_activity (id, case_id, user_id, action, new_value, created_at) VALUES ${activityValues}`,
+      activityParams
+    );
 
     // Notify reporters about status changes on their cases
     const updatedCases = await db.query<any>(
@@ -359,9 +332,12 @@ adminCasesRouter.post('/bulk-delete', async (req: AuthRequest, res: Response) =>
       : [];
 
     for (const caseId of case_ids) {
-      await db.execute('DELETE FROM case_comments WHERE case_id = ?', [caseId]);
-      await db.execute('DELETE FROM case_activity WHERE case_id = ?', [caseId]);
-      await db.execute('DELETE FROM cases WHERE id = ?', [caseId]);
+      // Delete all related records in a transaction for data integrity
+      await db.transaction(async (conn) => {
+        await conn.execute('DELETE FROM case_comments WHERE case_id = ?', [caseId]);
+        await conn.execute('DELETE FROM case_activity WHERE case_id = ?', [caseId]);
+        await conn.execute('DELETE FROM cases WHERE id = ?', [caseId]);
+      });
     }
 
     // Notify reporters about their deleted cases (fire-and-forget)
@@ -397,10 +373,12 @@ adminCasesRouter.delete('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ success: false, error: 'Case not found' });
     }
     
-    // Delete related records (comments, activity) - cascade should handle this but explicit for safety
-    await db.execute('DELETE FROM case_comments WHERE case_id = ?', [caseId]);
-    await db.execute('DELETE FROM case_activity WHERE case_id = ?', [caseId]);
-    await db.execute('DELETE FROM cases WHERE id = ?', [caseId]);
+    // Delete related records in a transaction for data integrity
+    await db.transaction(async (conn) => {
+      await conn.execute('DELETE FROM case_comments WHERE case_id = ?', [caseId]);
+      await conn.execute('DELETE FROM case_activity WHERE case_id = ?', [caseId]);
+      await conn.execute('DELETE FROM cases WHERE id = ?', [caseId]);
+    });
 
     // Notify reporter their case was deleted (if they didn't delete it)
     if (caseData.reported_by && caseData.reported_by !== userId) {

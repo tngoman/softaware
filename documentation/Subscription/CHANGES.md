@@ -1,622 +1,260 @@
-# Subscription Module - Changes
-
-**Version:** 1.0.0  
-**Last Updated:** 2026-03-04
-
-> ⚠️ **DEPRECATION NOTICE (June 2025)**: The team-scoped credit system has been superseded by the [Packages module](../Packages/README.md). Legacy routes and tables are retained for backward compatibility but are no longer the active billing path. New credit operations flow through `services/packages.ts` and `middleware/packages.ts`. See [Packages CHANGES.md](../Packages/CHANGES.md) for the replacement system.
+# Subscription Changelog
 
 ---
 
-## 1. Overview
+## v3.0.0 — Hybrid Package Catalog (April 2026)
 
-This document tracks version history, known issues, and migration notes for the Subscription module.
+The `packages` and `contact_packages` tables have been **restored** with a rebuilt architecture. Pricing is now a hybrid system: `config/tiers.ts` provides static fallbacks while admin-editable `packages` rows carry their own tier-limit overrides, resolved at runtime by a new `packageResolver` service.
 
----
+### New Features
 
-## 2. Version History
+| Feature | File | Description |
+|---------|------|-------------|
+| Package Catalog DB | `migrations/032_package_limits_catalog.ts` | Adds 13 tier-limit columns to `packages` table, seeds 6 canonical packages |
+| Package Resolver | `services/packageResolver.ts` | Hybrid resolver: DB package → static fallback. Core interfaces (`PackageCatalogRow`, `ResolvedUserPackage`) |
+| Package Access Middleware | `middleware/packageAccess.ts` | `requireActivePackageAccess` + `requireOwnerPackageAccess` enforce contact→package link |
+| Admin Package CRUD | `routes/adminPackages.ts` | Full CRUD: list, create, update packages + assign/reassign contacts |
+| Public Packages API | `routes/publicPackages.ts` | `GET /api/public/packages` — active + public packages for pricing pages |
+| Admin Packages UI | `pages/admin/AdminPackages.tsx` | Tabbed admin page: Packages catalog, Client Assignments, Create Package |
+| Admin Packages Model | `models/AdminPackagesModel.ts` | Frontend API model with typed interfaces and methods |
+| Dynamic Landing Pricing | `pages/public/LandingPage.tsx` | Fetches live pricing from `/api/public/packages` with hardcoded fallback |
+| User–Package Sync | `services/packageResolver.ts` | `syncUsersForContactPackage()` keeps `users.plan_type` in sync when packages are assigned |
 
-### Version 1.1.0 — Superseded by Packages (June 2025)
+### New Files
 
-**Status:** ⚠️ Legacy — Superseded  
-**Release Notes:**
+| File | Type | Purpose |
+|------|------|---------|
+| `services/packageResolver.ts` | Service | Hybrid tier resolution: user → contact → contact_packages → packages → `TierLimits` |
+| `middleware/packageAccess.ts` | Middleware | Route-level package enforcement (active package link required) |
+| `routes/adminPackages.ts` | Route | Admin package CRUD + contact assignment |
+| `routes/publicPackages.ts` | Route | Public package listing endpoint |
+| `pages/admin/AdminPackages.tsx` | Frontend | Tabbed admin UI with search/filter, accordion cards, toggle switches |
+| `models/AdminPackagesModel.ts` | Frontend | Typed interfaces (`AdminPackage`, `PackageContactAssignment`, `PackagePayload`) + API |
 
-The team-scoped credit model has been replaced by the contact-scoped [Packages system](../Packages/README.md):
+### New Database Columns — `packages` table (Migration 032)
 
-| Legacy Concept | New Equivalent | Notes |
-|---------------|---------------|-------|
-| `teams` credit owner | `contacts` (via `contact_packages`) | Billing scoped per-contact, not per-team |
-| `credit_balances` | `contact_packages.credits_balance` | Per-subscription balance |
-| `credit_transactions` | `package_transactions` | Full audit trail with `balance_after` |
-| `credit_packages` (purchase tiers) | `packages` (subscription tiers) | 7 seeded packages (Free → Staff) |
-| `middleware/credits.ts` | `middleware/packages.ts` | New middleware chain: requirePackage → requireCredits → deductCreditsAfterResponse |
-| `CREDIT_COSTS` config | `REQUEST_PRICING` config | Renamed with `baseCost`, `perToken`, `perMultiplier` |
-| `adminCredits.ts` routes | `adminPackages.ts` routes | New admin API at `/admin/packages/*` |
-| `AICredits.tsx` frontend | `AIPackages.tsx` frontend | 4-tab interface (Packages, Subscriptions, Transactions, User Links) |
+| Column | Type | Description |
+|--------|------|-------------|
+| `gateway_plan_id` | `VARCHAR(100) NULL` | Yoco/payment gateway plan identifier |
+| `max_sites` | `INT NULL` | Maximum sites (overrides `config/tiers.ts` if non-NULL) |
+| `max_collections_per_site` | `INT NULL` | Maximum collections per site |
+| `max_storage_bytes` | `BIGINT NULL` | Storage limit in bytes |
+| `max_actions_per_month` | `INT NULL` | Monthly action cap |
+| `allow_auto_recharge` | `TINYINT(1) DEFAULT 0` | Whether overage billing is allowed |
+| `max_knowledge_pages` | `INT NULL` | Knowledge base page limit |
+| `allowed_site_type` | `VARCHAR(32) DEFAULT 'single_page'` | Highest site type allowed |
+| `can_remove_watermark` | `TINYINT(1) DEFAULT 0` | Watermark removal permission |
+| `allowed_system_actions` | `JSON NULL` | Array of allowed system action strings |
+| `has_custom_knowledge_categories` | `TINYINT(1) DEFAULT 0` | Custom knowledge categories flag |
+| `has_omni_channel_endpoints` | `TINYINT(1) DEFAULT 0` | Omni-channel endpoints flag |
+| `ingestion_priority` | `INT DEFAULT 1` | Ingestion queue priority (1–10) |
 
-**Migration**: `023_packages_system.ts` — creates 4 new tables, seeds 7 packages, links Soft Aware (contact 1) to Staff package.
+### Restored Database Tables
 
-**Legacy tables retained** (not dropped): `credit_packages`, `credit_balances`, `credit_transactions`, `teams`, `team_members`  
-**Legacy routes retained** (not removed): `/admin/credits/*`, `/v1/credits/*`
+| Table | Purpose | Migration |
+|-------|---------|-----------|
+| `contact_packages` | Per-contact package assignment with billing cycle, status, period dates | Pre-existing (was dropped in 030, restored by manual DB operations) |
 
-### Version 1.0.0 — Current (2026-03-04)
+### Seeded Packages (6 canonical)
 
-**Status:** ✅ Production  
-**Release Notes:**
+| Slug | Type | Price (ZAR) | Public |
+|------|------|-------------|--------|
+| `free` | CONSUMER | R0 | ✅ |
+| `starter` | CONSUMER | R349 | ✅ |
+| `pro` | CONSUMER | R699 | ✅ |
+| `advanced` | CONSUMER | R1,499 | ✅ |
+| `enterprise` | ENTERPRISE | Custom | ✅ |
+| `staff` | STAFF | R0 (internal) | ❌ |
 
-Core subscription and credit systems operational:
-- Team subscription plans (PERSONAL, TEAM, ENTERPRISE) with 14-day trials
-- AI credit packages with PayFast and Yoco payment integration
-- Widget subscription tiers (Free, Starter, Advanced, Enterprise)
-- Credit balance tracking and transaction history
-- Webhook processing for payment confirmations
-- Admin credit management tools
+### Architecture Changes
 
-**Features:**
-- ✅ Subscription plan management (create trial, change plan, cancel)
-- ✅ Credit package purchases via PayFast/Yoco
-- ✅ Automated credit deduction middleware
-- ✅ Invoice generation for subscriptions
-- ✅ Widget tier management with usage tracking
-- ✅ Admin credit top-ups and balance adjustments
-- ✅ Transaction history and usage statistics
-
-**Limitations:**
-- ❌ No automated trial expiry enforcement (requires manual admin review)
-- ❌ No proactive low-balance notifications
-- ❌ Single currency support (ZAR only)
-- ❌ No subscription downgrades (only upgrades/cancellations)
-- ❌ No credit refunds (purchases are final)
-- ❌ Widget tier upgrades require manual payment processing
-
-**Known Issues:** See Section 3 below
-
-**Migration Notes:** Initial release, no migrations required
-
----
-
-### Version 0.9.0 — Pre-Launch (2026-02-15)
-
-**Status:** 🟡 Beta Testing  
-**Changes:**
-- Added widget subscription tiers
-- Implemented Yoco payment gateway (alongside PayFast)
-- Split credit packages into 5 tiers (Starter → Enterprise)
-- Added bonus credits to packages
-
-**Migration:**
-```sql
--- Add bonusCredits column to credit_packages
-ALTER TABLE credit_packages ADD COLUMN bonusCredits INT DEFAULT 0;
-
--- Add widget subscription tables
-CREATE TABLE subscription_tiers (
-  id VARCHAR(50) PRIMARY KEY,
-  name VARCHAR(100) NOT NULL,
-  price INT NOT NULL,
-  features JSON,
-  active BOOLEAN DEFAULT 1
-);
-```
+| Before (v2.0.0) | After (v3.0.0) |
+|-----------------|----------------|
+| Tier limits only in `config/tiers.ts` (static) | Tier limits in `packages` table (editable) with `config/tiers.ts` as fallback |
+| No `packages` or `contact_packages` tables | Both tables restored with full schema |
+| `users.plan_type` is sole access authority | `plan_type` is a denormalized cache; package catalog is authoritative |
+| No package enforcement middleware | `requireActivePackageAccess` + `requireOwnerPackageAccess` |
+| No admin package management UI | Tabbed admin page with CRUD, contact assignment, search/filter |
+| Static pricing on landing page | Dynamic pricing from `/api/public/packages` with static fallback |
+| No public package API | `GET /api/public/packages` endpoint |
 
 ---
 
-### Version 0.5.0 — Initial Alpha (2026-01-10)
+## v2.0.2 — Trial Frontend Implementation (March 2026)
 
-**Status:** 🟢 Internal Testing  
-**Changes:**
-- Basic subscription plan CRUD
-- PayFast payment integration
-- Credit balance tracking
-- Simple trial management
+### Summary
 
----
+Full end-to-end trial engine wired across landing page, registration, portal dashboard, and site builder. Four distinct entry points all converge on `POST /billing/start-trial` or the registration `trial` flag.
 
-## 3. Known Issues
+### Backend Changes
 
-### Issue 1: Webhook Idempotency Not Enforced
+| File | Changes |
+|------|---------|
+| `routes/auth.ts` | `RegisterSchema` now accepts `trial: z.boolean().optional()`. On `trial: true`, auto-activates 14-day Starter trial during registration (no second API call). Response includes `trialActivated: boolean`. |
+| `routes/dashboard.ts` | Queries `plan_type`, `has_used_trial`, `trial_expires_at`. Returns `trial` object: `hasUsedTrial`, `isOnTrial`, `expiresAt`, `daysRemaining`, `canStartTrial`. |
+| `routes/billing.ts` | Created — `POST /start-trial`, `GET /trial-status` |
+| `services/trialEnforcer.ts` | Created — hourly cron sweep, oldest-survives freeze |
+| `app.ts` | Mounts billing router at `/billing`, starts trial enforcer at boot |
+| `db/mysql.ts` | `User` interface: added `plan_type`, `has_used_trial`, `trial_expires_at`, `contact_id` |
+| `db/migrations/031_trial_columns.ts` | Adds 3 columns + index. **Run & applied.** |
 
-**Severity:** 🔴 CRITICAL  
-**Status:** 🔴 Open  
-**File:Line:** [credits.ts](../backend/src/routes/credits.ts#L345-L360)
+### Frontend Changes
 
-**Description:**  
-PayFast and Yoco webhooks do not check if a payment has already been processed before adding credits. If a webhook is retried (which payment gateways do automatically on timeout), credits will be added multiple times for the same purchase.
+| File | Changes |
+|------|---------|
+| `LandingPage.tsx` | Hero CTA → "Start 14-Day Free Trial" links to `/register?trial=true`. Starter card badge → "14-Day Free Trial". Starter CTA → "Start 14-Day Free Trial". |
+| `RegisterPage.tsx` | Reads `?trial=true` via `useSearchParams`. Shows trial heading, badge ("14 days free • Downgrades to Free automatically"), submit button "Start Free Trial". Passes `trial: true` to `AuthModel.register()`. |
+| `Dashboard.tsx` | Added trial activation banner (blue gradient, `RocketLaunchIcon`, "Start 14-Day Free Trial" button calling `POST /billing/start-trial`). Added trial countdown banner (amber gradient, `ClockIcon`, days remaining, "Upgrade Now — R349/mo" link). |
+| `SiteBuilderEditor.tsx` | Queue Swal for free-tier users now includes upsell: "⚡ Want to skip the queue?" with "Start Free Trial & Skip Queue" confirm button. Calls `POST /billing/start-trial` directly from editor. |
+| `AuthModel.ts` | `register()` signature: added `trial?: boolean`. Response type: added `trialActivated?: boolean`. Removed `as any` cast. |
 
-**Impact:**
-- Financial loss (users get free credits)
-- Data integrity issues
-- Cannot trust transaction history
+### Trial Entry Points
 
-**Recommended Fix:**
+| Entry Point | Component | Trigger | Backend Call |
+|-------------|-----------|---------|-------------|
+| Landing page CTA | `LandingPage.tsx` | Click hero/card button | Navigates to `/register?trial=true` |
+| Registration form | `RegisterPage.tsx` | Submit with `?trial=true` | `POST /auth/register` with `trial: true` |
+| Portal dashboard | `Dashboard.tsx` | Click "Start 14-Day Free Trial" | `POST /billing/start-trial` |
+| Site builder queue | `SiteBuilderEditor.tsx` | Click "Start Free Trial & Skip Queue" | `POST /billing/start-trial` |
 
-```typescript
-// routes/credits.ts
-creditsRouter.post('/webhook/payfast', async (req, res, next) => {
-  const transactionId = req.body.custom_str1;
-  
-  // Check if already processed
-  const transaction = await db.queryOne(
-    'SELECT * FROM credit_transactions WHERE id = ? AND status = ?',
-    [transactionId, 'COMPLETED']
-  );
-  
-  if (transaction) {
-    return res.json({ success: true, message: 'Already processed' });
-  }
-  
-  // Process payment in transaction
-  await db.transaction(async (trx) => {
-    await trx.update('credit_transactions', { status: 'COMPLETED' }, { id: transactionId });
-    await addCredits(teamId, amount, { transactionId });
-  });
-  
-  res.json({ success: true });
-});
-```
+### Database Changes
 
-**Effort:** 🟡 MEDIUM (4 hours + testing with sandbox webhooks)
+Migration `031_trial_columns.ts` executed — added `plan_type VARCHAR(20)`, `has_used_trial BOOLEAN`, `trial_expires_at DATETIME NULL`, and `idx_users_trial_expiry` index to `users` table.
 
 ---
 
-### Issue 2: Manual Team Lookup in Every API Key Endpoint
+## v2.0.1 — Terminology Alignment (March 2026)
 
-**Severity:** 🟡 WARNING  
-**Status:** 🔴 Open  
-**File:Line:** [credits.ts](../backend/src/routes/credits.ts#L145), [credits.ts#L168](../backend/src/routes/credits.ts#L168), [credits.ts#L218](../backend/src/routes/credits.ts#L218), etc.
+### Summary
 
-**Description:**  
-Every API key-protected endpoint repeats the same team lookup query:
+Renamed billing metric fields and added auto-recharge overage support:
 
-```typescript
-const membership = await db.queryOne<team_members>(
-  'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
-  [req.apiKey.userId]
-);
-const teamId = membership?.teamId;
-```
+- `maxAiMessagesPerMonth` → `maxActionsPerMonth` — unified billing metric for chatbot + webhook
+- `allowedActions` → `allowedSystemActions` — prevents confusion between billing "Actions" and technical AI function calls
+- Added `allowAutoRecharge` boolean per tier — controls whether overage billing is allowed
+- Added `OVERAGE_CONFIG` global constant — R99 per 1,000 extra actions
 
-**Impact:**
-- 10+ duplicated database queries across routes
-- Code duplication (DRY violation)
-- Inconsistent error messages
-- Extra latency per request
+### Field Renames
 
-**Recommended Fix:**
+| Before | After | Reason |
+|--------|-------|--------|
+| `maxAiMessagesPerMonth` | `maxActionsPerMonth` | Unified metric: chatbot response OR webhook execution = 1 Action |
+| `allowedActions` | `allowedSystemActions` | Disambiguate from billing "Actions" — these are technical AI function calls |
 
-Move team lookup into the `requireApiKey` middleware so `req.teamId` is available to all routes.
+### New Fields
 
-```typescript
-// middleware/apiKey.ts
-export async function requireApiKey(req: ApiKeyRequest, res: Response, next: NextFunction) {
-  // ... existing API key validation ...
-  
-  const membership = await db.queryOne<team_members>(
-    'SELECT * FROM team_members WHERE userId = ? LIMIT 1',
-    [req.apiKey.userId]
-  );
-  
-  req.teamId = membership?.teamId;
-  
-  if (!req.teamId) {
-    return res.status(404).json({ 
-      error: 'No team found for user. Please create a team first.' 
-    });
-  }
-  
-  next();
-}
+| Field | Type | Location | Description |
+|-------|------|----------|-------------|
+| `allowAutoRecharge` | `boolean` | `TierLimits` interface | Whether the tier can auto-charge for overage (false = hard cap) |
+| `OVERAGE_CONFIG` | `{ priceZAR, actionPackSize }` | `config/tiers.ts` export | R99 per 1,000 extra actions |
 
-// Now all routes can use req.teamId directly
-creditsRouter.get('/balance', requireApiKey, async (req: ApiKeyRequest, res, next) => {
-  const balance = await getTeamCreditBalance(req.teamId);
-  res.json({ balance });
-});
-```
+### Files Modified
 
-**Effort:** 🟢 LOW (1-2 hours)
+| File | Changes |
+|------|---------|
+| `config/tiers.ts` | All renames + new fields + OVERAGE_CONFIG export |
+| `routes/billing.ts` | `maxAiMessagesPerMonth` → `maxActionsPerMonth` in trial response |
+| `routes/subscriptionTiers.ts` | Both field renames in enrichment + tiers endpoint + config validation |
+| `routes/dashboard.ts` | `maxAiMessagesPerMonth` → `maxActionsPerMonth` in usage calc |
+| `middleware/usageTracking.ts` | All 5 references to `maxAiMessagesPerMonth` → `maxActionsPerMonth` |
+
+### NOT Modified (by design)
+
+| File | Reason |
+|------|--------|
+| `routes/clientApiGateway.ts` | Local `allowedActions` variable parses `config.allowed_actions` DB column — per-client API config, not tier system actions |
+| `migrations/027_seed_client_api_configs.ts` | Same — client API config actions, not tier system actions |
 
 ---
 
-### Issue 3: No Low Credit Balance Alerts
+## v2.0.0 — Static Tier Pricing (March 2026)
 
-**Severity:** 🟡 WARNING  
-**Status:** 🔴 Open  
-**File:Line:** [credits.ts](../backend/src/services/credits.ts)
+### Summary
 
-**Description:**  
-Users only discover they're out of credits when API requests fail with `402 Payment Required`. No proactive notifications are sent when balance drops below a threshold.
+Complete removal of the legacy dynamic credit/package system. All pricing is now static,
+defined in a single file (`config/tiers.ts`). No database-driven pricing, no per-request
+credit deductions, no credit balances.
 
-**Impact:**
-- Poor user experience (unexpected failures mid-workflow)
-- Missed opportunities to prompt credit purchases
-- Higher support ticket volume
+### Breaking Changes
 
-**Recommended Fix:**
+- **All credit-related endpoints removed** — `GET /credits/balance`, `POST /credits/purchase`, etc.
+- **All package endpoints removed** — `GET /packages`, `POST /packages`, etc.
+- **Stripe gateway removed** — all Stripe endpoints return 410 Gone
+- **PayFast gateway removed** — no IPNs, no PayFast integration
+- **`subscription_tier_limits` table dropped** — tier limits are now static in code
+- **`contact_packages` table dropped** — per-contact subscriptions replaced by `users.plan_type`
+- **`package_transactions` table dropped** — transaction history removed
+- **`credit_packages` table dropped** — credit bundles removed
 
-Add a background job or post-deduction check that sends email/notification when balance < 500 credits.
+### New Features
 
-```typescript
-// services/credits.ts
-export async function checkLowBalanceAlert(teamId: string, currentBalance: number) {
-  const THRESHOLD = 500;
-  
-  if (currentBalance < THRESHOLD) {
-    const recentAlert = await db.queryOne(
-      'SELECT * FROM low_balance_alerts WHERE teamId = ? AND createdAt > DATE_SUB(NOW(), INTERVAL 24 HOUR)',
-      [teamId]
-    );
-    
-    if (!recentAlert) {
-      await notificationService.send({
-        teamId,
-        type: 'LOW_CREDIT_BALANCE',
-        message: `Your credit balance is low (${currentBalance} remaining).`,
-        actionUrl: '/credits/purchase',
-      });
-      
-      await db.insertOne('low_balance_alerts', { teamId, balance: currentBalance });
-    }
-  }
-}
+| Feature | File | Description |
+|---------|------|-------------|
+| Static tier config | `config/tiers.ts` | 5 canonical tiers with all limits hard-coded |
+| Trial engine | `routes/billing.ts` | One-time 14-day Starter trial with abuse prevention |
+| Trial enforcer | `services/trialEnforcer.ts` | Hourly background sweep + graceful freeze |
+| Graceful freeze | `services/trialEnforcer.ts` | Oldest-survives asset locking on downgrade |
+| Static tier API | `routes/subscriptionTiers.ts` | Rewritten to read from config, not DB |
+| Yoco-only payments | `routes/yoco.ts` | Checkout, polling, webhook — all plan-based |
 
-// Call after every deduction
-await deductCreditsFromBalance(teamId, cost);
-await checkLowBalanceAlert(teamId, newBalance);
-```
+### Deleted Files
 
-**Effort:** 🟡 MEDIUM (6 hours + email templates)
+| File | Type | Former Purpose |
+|------|------|---------------|
+| `routes/credits.ts` | Route | Credit balance, purchase, transaction list |
+| `routes/adminCredits.ts` | Route | Admin credit adjustment CRUD |
+| `routes/packages.ts` | Route | Package CRUD endpoints |
+| `services/credits.ts` | Service | Balance operations, per-request deduction |
+| `services/packages.ts` | Service | Contact-package lifecycle management |
+| `services/payment.ts` | Service | PayFast IPN, legacy payment creation |
+| `config/credits.ts` | Config | AI request pricing (cost per model) |
+| `middleware/credits.ts` | Middleware | Pre-request credit balance check |
+| `middleware/packages.ts` | Middleware | Package enforcement |
+| `pages/admin/AICredits.tsx` | Frontend | Admin credits management panel |
+| `pages/admin/AIPackages.tsx` | Frontend | Admin packages management panel |
 
----
+### Dropped Database Tables (later restored in v3.0.0)
 
-### Issue 4: Price Formatting Inconsistency
+> **Note:** The `contact_packages` table was restored in v3.0.0. The `packages` table was never
+> actually dropped (only its legacy rows were replaced). `credit_packages`, `package_transactions`,
+> and `subscription_tier_limits` remain permanently removed.
 
-**Severity:** 🟢 LOW  
-**Status:** 🔴 Open  
-**File:Line:** [subscription.ts](../backend/src/routes/subscription.ts#L20), [credits.ts#L67](../backend/src/routes/credits.ts#L67), etc.
+| Table | Migration | Former Purpose |
+|-------|-----------|---------------|
+| `credit_packages` | `030_purge_legacy_pricing.ts` | Purchasable credit bundles (permanently removed) |
+| `contact_packages` | `030_purge_legacy_pricing.ts` | Per-contact subscriptions — **restored in v3.0.0** |
+| `package_transactions` | `030_purge_legacy_pricing.ts` | Credit purchase transaction history (permanently removed) |
+| `subscription_tier_limits` | `030_purge_legacy_pricing.ts` | Dynamic tier limit definitions (permanently removed — replaced by `packages` columns) |
 
-**Description:**  
-Price formatting is duplicated across routes with inconsistent methods:
+### New Database Columns
 
-- Some use `toLocaleString()` (adds commas but no decimals)
-- Others use `toFixed(2)` (adds decimals but no commas)
-- All manually prepend `R` currency symbol
+| Table | Column | Type | Migration |
+|-------|--------|------|-----------|
+| `users` | `plan_type` | `ENUM('free','starter','pro','advanced','enterprise')` | Pre-existing (default changed to 'free') |
+| `users` | `has_used_trial` | `BOOLEAN DEFAULT FALSE` | `031_trial_columns.ts` |
+| `users` | `trial_expires_at` | `DATETIME NULL` | `031_trial_columns.ts` |
 
-**Impact:**
-- Inconsistent display formats across API
-- Hard to change currency or locale
-- Cluttered response mapping code
+### Architecture Changes
 
-**Recommended Fix:**
-
-Create a shared `formatZAR()` utility function:
-
-```typescript
-// utils/currency.ts
-export function formatZAR(cents: number, options?: { decimals?: number }): string {
-  const amount = cents / 100;
-  const decimals = options?.decimals ?? (amount % 1 === 0 ? 0 : 2);
-  return `R${amount.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
-}
-
-// Usage:
-priceMonthlyDisplay: formatZAR(plan.priceMonthly),  // → "R1,500"
-formattedPrice: formatZAR(pkg.price),               // → "R100.00"
-```
-
-**Effort:** 🟢 LOW (2 hours)
+| Before (v1.x) | After (v2.0.0) |
+|---------------|----------------|
+| Tier limits in `subscription_tier_limits` table | Tier limits in `config/tiers.ts` (static) |
+| Per-request credit deduction via middleware | Monthly action cap per tier (no middleware) |
+| Credits purchased as bundles via packages | Flat monthly subscription per tier |
+| PayFast + Stripe + Yoco gateways | Yoco only (Stripe returns 410) |
+| `contact_packages` table for subscriptions | `users.plan_type` column (single string) |
+| Dynamic pricing in database | Static pricing in code |
+| No trial system | 14-day one-time Starter trial with abuse prevention |
+| Hard delete on downgrade | Graceful freeze (oldest survives) |
 
 ---
 
-### Issue 5: No Subscription Downgrade Support
-
-**Severity:** 🟢 LOW  
-**Status:** 🟡 By Design (Future Feature)  
-**File:Line:** [subscription.ts#L141-L173](../backend/src/routes/subscription.ts#L141-L173)
-
-**Description:**  
-The `change-plan` endpoint only supports upgrades. Users cannot downgrade from ENTERPRISE → TEAM or TEAM → PERSONAL. They must cancel and start a new subscription.
-
-**Impact:**
-- Users forced to cancel + re-subscribe (poor UX)
-- Lost revenue during gap
-- Extra support overhead
-
-**Recommended Fix:**
-
-Add downgrade logic with proration:
-
-```typescript
-subscriptionRouter.post('/change-plan', requireAuth, async (req: AuthRequest, res, next) => {
-  const currentPlan = subscription.plan;
-  const newPlan = await getSubscriptionPlan(input.tier);
-  
-  if (newPlan.priceMonthly < currentPlan.priceMonthly) {
-    // Downgrade: Apply at end of current period
-    await db.update('subscriptions', {
-      pendingPlanId: newPlan.id,
-      changeAtPeriodEnd: true,
-    }, { id: subscription.id });
-    
-    return res.json({
-      message: 'Plan will be downgraded at end of billing period',
-      effectiveDate: subscription.currentPeriodEnd,
-    });
-  } else {
-    // Upgrade: Apply immediately with proration
-    const proration = calculateProration(currentPlan, newPlan, subscription.currentPeriodEnd);
-    await db.update('subscriptions', { planId: newPlan.id });
-    await createInvoice({ amount: proration });
-    
-    return res.json({ message: 'Plan upgraded successfully' });
-  }
-});
-```
-
-**Effort:** 🟡 MEDIUM (8 hours + proration calculations)
-
----
-
-### Issue 6: Pricing Routes in Wrong Module
-
-**Severity:** 🟢 LOW  
-**Status:** 🔴 Open  
-**File:Line:** [pricing.ts](../backend/src/routes/pricing.ts)
-
-**Description:**  
-The `pricing.ts` routes handle general business pricing (for quoting services like hosting, consulting, etc.) and are NOT related to subscription plans or AI credits. This file doesn't belong in the Subscription module.
-
-**Impact:**
-- Confusing module organization
-- Misleading documentation
-- Harder to find pricing logic for subscriptions
-
-**Recommended Fix:**
-
-Move `pricing.ts` to a separate `Services` or `Quotations` module:
-
-```bash
-# Current:
-/routes/subscription.ts    → Subscription module ✅
-/routes/credits.ts          → Subscription module ✅
-/routes/pricing.ts          → Subscription module ❌
-
-# Proposed:
-/routes/subscription.ts    → Subscription module
-/routes/credits.ts          → Subscription module
-/routes/services/pricing.ts → Services module (new)
-```
-
-Update documentation to clarify:
-- Subscription module = SaaS plans + AI credits
-- Services module = General business pricing/quoting
-
-**Effort:** 🟢 LOW (1 hour)
-
----
-
-### Issue 7: Trial Expiry Not Automated
-
-**Severity:** 🟡 WARNING  
-**Status:** 🟡 By Design (Manual Review)  
-**File:Line:** [subscription.ts#L40-L99](../backend/src/routes/subscription.ts#L40-L99)
-
-**Description:**  
-Expired trials are soft-flagged (`effectiveStatus: 'EXPIRED'`) but not automatically downgraded or blocked. Desktop app shows upgrade prompt, but users retain access until admin manually intervenes.
-
-**Impact:**
-- Trial abuse (users continue using after expiry)
-- Revenue loss
-- Manual admin workload
-
-**Current Behavior:**
-
-```typescript
-// Soft expiry check
-if (subscription.status === 'TRIAL' && subscription.trialEndsAt) {
-  if (new Date() > subscription.trialEndsAt) {
-    effectiveStatus = 'EXPIRED';  // Display only, no enforcement
-  }
-}
-```
-
-**Recommended Fix:**
-
-Add a daily cron job to auto-downgrade expired trials:
-
-```typescript
-// jobs/expireTrials.ts
-export async function expireTrialsJob() {
-  const expiredTrials = await db.query(
-    'SELECT * FROM subscriptions WHERE status = ? AND trialEndsAt < NOW()',
-    ['TRIAL']
-  );
-  
-  for (const sub of expiredTrials) {
-    await db.update('subscriptions', { status: 'EXPIRED' }, { id: sub.id });
-    
-    await notificationService.send({
-      teamId: sub.teamId,
-      type: 'TRIAL_EXPIRED',
-      message: 'Your trial has ended. Upgrade to continue using SoftAware.',
-      actionUrl: '/subscription/plans',
-    });
-  }
-  
-  console.log(`Expired ${expiredTrials.length} trials`);
-}
-
-// Schedule: Every day at 2 AM
-cron.schedule('0 2 * * *', expireTrialsJob);
-```
-
-**Effort:** 🟡 MEDIUM (4 hours + cron setup)
-
----
-
-### Issue 8: No Credit Refund Support
-
-**Severity:** 🟢 LOW  
-**Status:** 🟡 By Design (Policy Decision)  
-**File:Line:** N/A
-
-**Description:**  
-All credit purchases are final. No API endpoint or admin tool exists to refund credits or reverse transactions.
-
-**Impact:**
-- Poor customer service options
-- Manual database edits required for refunds
-- Risk of errors in manual refunds
-
-**Recommended Fix:**
-
-Add admin refund endpoint:
-
-```typescript
-// routes/adminCredits.ts
-adminCreditsRouter.post('/refund', requireAuth, requireAdmin, async (req, res) => {
-  const { transactionId, reason } = req.body;
-  
-  const transaction = await db.queryOne('SELECT * FROM credit_transactions WHERE id = ?', [transactionId]);
-  
-  if (transaction.type !== 'PURCHASE') {
-    throw badRequest('Can only refund purchases');
-  }
-  
-  // Reverse transaction
-  await db.transaction(async (trx) => {
-    await trx.insertOne('credit_transactions', {
-      teamId: transaction.teamId,
-      type: 'REFUND',
-      amount: -transaction.amount,
-      description: `Refund: ${reason}`,
-      relatedTransactionId: transactionId,
-    });
-    
-    await trx.update('credit_balances', {
-      credits: db.raw('credits - ?', [transaction.amount]),
-    }, { teamId: transaction.teamId });
-  });
-  
-  res.json({ success: true, message: 'Refund processed' });
-});
-```
-
-**Effort:** 🟡 MEDIUM (6 hours + payment gateway reversals)
-
----
-
-## 4. Migration Notes
-
-### Upgrading to 1.0.0 from Beta
-
-**Database Changes:**
-
-```sql
--- Add bonusCredits column (if not exists)
-ALTER TABLE credit_packages ADD COLUMN bonusCredits INT DEFAULT 0;
-
--- Add widget subscription tables
-CREATE TABLE IF NOT EXISTS subscription_tiers (
-  id VARCHAR(50) PRIMARY KEY,
-  name VARCHAR(100) NOT NULL,
-  price INT NOT NULL,
-  features JSON,
-  active BOOLEAN DEFAULT 1,
-  createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS client_subscriptions (
-  id VARCHAR(50) PRIMARY KEY,
-  clientId VARCHAR(50) NOT NULL,
-  tierId VARCHAR(50) NOT NULL,
-  status ENUM('ACTIVE', 'CANCELLED', 'EXPIRED') DEFAULT 'ACTIVE',
-  currentPeriodEnd TIMESTAMP NOT NULL,
-  createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (clientId) REFERENCES clients(id),
-  FOREIGN KEY (tierId) REFERENCES subscription_tiers(id)
-);
-
--- Add indexes
-CREATE INDEX idx_client_subscriptions_clientId ON client_subscriptions(clientId);
-CREATE INDEX idx_client_subscriptions_status ON client_subscriptions(status);
-```
-
-**Code Changes:**
-
-- Update API key endpoints to expect `req.teamId` after middleware refactor
-- Replace hardcoded price formatting with `formatZAR()` utility
-- Add webhook idempotency checks to payment handlers
-
-**Breaking Changes:**
-
-None. All endpoints maintain backward compatibility.
-
----
-
-## 5. Roadmap
-
-### Planned for 1.1.0 (Q2 2026)
-
-- ✅ Automated trial expiry enforcement
-- ✅ Low credit balance alerts (email + in-app)
-- ✅ Webhook idempotency guarantees
-- ✅ Subscription downgrade support with proration
-- ✅ Credit refund admin endpoint
-
-### Planned for 1.2.0 (Q3 2026)
-
-- Multi-currency support (USD, EUR)
-- Annual subscription discounts (10% off)
-- Team member seat-based billing
-- Credit usage analytics dashboard
-- Subscription pause/resume feature
-
-### Planned for 2.0.0 (Q4 2026)
-
-- Stripe payment gateway integration
-- Recurring credit top-ups (subscription + credits hybrid)
-- Enterprise custom pricing
-- Usage-based billing (pay-per-request alternative to credits)
-
----
-
-## 6. Support & Troubleshooting
-
-### Common Issues
-
-**Issue:** "Insufficient credits" error  
-**Solution:** Check balance via `/credits/balance` endpoint. Purchase credits via `/credits/purchase`.
-
-**Issue:** Webhook not processing payment  
-**Solution:** Check webhook signature validation. Verify payment amounts match. Check logs for errors.
-
-**Issue:** Trial expired but user still has access  
-**Solution:** Expected behavior. Trials are soft-expired. Admin must manually downgrade via database:
-```sql
-UPDATE subscriptions SET status = 'EXPIRED' WHERE id = ?
-```
-
-**Issue:** Price displays wrong currency  
-**Solution:** Only ZAR supported currently. Multi-currency planned for 1.2.0.
-
----
-
-## 7. Summary
-
-| Issue | Severity | Status | Effort | Priority |
-|-------|----------|--------|--------|----------|
-| Webhook Idempotency | 🔴 CRITICAL | Open | 🟡 MEDIUM | HIGH |
-| Manual Team Lookup | 🟡 WARNING | Open | 🟢 LOW | HIGH |
-| No Low Balance Alerts | 🟡 WARNING | Open | 🟡 MEDIUM | MEDIUM |
-| Price Formatting | 🟢 LOW | Open | 🟢 LOW | LOW |
-| No Downgrade Support | 🟢 LOW | Future | 🟡 MEDIUM | LOW |
-| Pricing Route Location | 🟢 LOW | Open | 🟢 LOW | LOW |
-| Trial Not Automated | 🟡 WARNING | By Design | 🟡 MEDIUM | MEDIUM |
-| No Refunds | 🟢 LOW | By Design | 🟡 MEDIUM | LOW |
-
-**Total Open Issues:** 6 critical/high priority
-
----
-
-*This document is updated with every release. Report new issues via GitHub or support@softaware.net.za.*
+## v1.x — Legacy Credit System (Historical)
+
+> This version is no longer supported. All code has been removed.
+
+- Credit-based pricing with per-request deductions
+- Dynamic package bundles stored in database
+- Multiple payment gateways (PayFast, Stripe, Yoco)
+- Middleware-enforced credit checks before AI requests
+- Admin-managed credit packages and adjustments

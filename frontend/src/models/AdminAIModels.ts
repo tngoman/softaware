@@ -31,6 +31,7 @@ export interface EnterpriseEndpoint {
   id: string;
   client_id: string;
   client_name: string;
+  contact_id?: number | null;
   status: 'active' | 'paused' | 'disabled';
   inbound_provider: string;
   inbound_auth_type?: string;
@@ -105,6 +106,7 @@ export interface AIOverviewData {
   telemetry: TelemetrySummary;
   providers: { openRouter: OpenRouterStatus | null; openAI: OpenAIStatus | null; glm: GLMStatus | null; ollama: OllamaStatus | null };
   enterprise: EnterpriseSummary;
+  clientApiGateway: ClientApiGatewaySummary;
   modelConfig: ModelConfig;
   system: { uptime: string; nodeVersion: string; memoryUsageMB: number; platform: string };
 }
@@ -136,6 +138,19 @@ export interface SpendingSummary {
   openRouterLimitUSD: number | null;
   openRouterRemainingUSD: number | null;
   profitMarginRands: number;
+  // OpenAI
+  openAISpendUSD: number | null;
+  openAIRequests: number;
+  openAIAvgMs: number;
+  // GLM (free cloud)
+  glmRequests: number;
+  glmAvgMs: number;
+  // Ollama (local)
+  ollamaRequests: number;
+  ollamaAvgMs: number;
+  ollamaLoadedModels: number;
+  ollamaInstalledModels: number;
+  ollamaTotalSize: number;
 }
 
 export interface TelemetrySummary {
@@ -194,6 +209,15 @@ export interface EnterpriseSummary {
   endpoints?: Array<{ id: string; client_name: string; status: string; llm_provider: string; llm_model: string; total_requests: number; last_request_at: string }>;
 }
 
+export interface ClientApiGatewaySummary {
+  total: number;
+  active: number;
+  paused: number;
+  disabled: number;
+  totalRequests: number;
+  configs?: Array<{ id: string; client_id: string; client_name: string; status: string; auth_type: string; target_base_url: string; total_requests: number; last_request_at: string; created_at: string }>;
+}
+
 export interface ModelConfig {
   primaryModel: string;
   primaryProvider: string;
@@ -211,70 +235,8 @@ export interface ModelConfig {
   siteBuilderOpenRouter: string;
 }
 
-// ─── Package System Types ────────────────────────────────────────────────
-
-export interface PackageDefinition {
-  id: number;
-  slug: string;
-  name: string;
-  description: string | null;
-  package_type: 'CONSUMER' | 'ENTERPRISE' | 'STAFF' | 'ADDON';
-  price_monthly: number;
-  price_annually: number | null;
-  credits_included: number;
-  max_users: number | null;
-  max_agents: number | null;
-  max_widgets: number | null;
-  max_landing_pages: number | null;
-  max_enterprise_endpoints: number | null;
-  features: string | string[] | null;
-  is_active: boolean;
-  is_public: boolean;
-  display_order: number;
-  featured: boolean;
-  cta_text: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ContactPackageSubscription {
-  id: number;
-  contact_id: number;
-  package_id: number;
-  status: 'TRIAL' | 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'EXPIRED' | 'SUSPENDED';
-  billing_cycle: 'MONTHLY' | 'ANNUALLY' | 'NONE';
-  credits_balance: number;
-  credits_used: number;
-  trial_ends_at: string | null;
-  current_period_start: string | null;
-  current_period_end: string | null;
-  cancelled_at: string | null;
-  payment_provider: 'PAYFAST' | 'YOCO' | 'MANUAL';
-  low_balance_threshold: number;
-  low_balance_alert_sent: boolean;
-  created_at: string;
-  updated_at: string;
-  // Joined
-  contact_name?: string;
-  package_name?: string;
-  package_slug?: string;
-}
-
-export interface PackageTransaction {
-  id: number;
-  contact_package_id: number;
-  contact_id: number;
-  user_id: string | null;
-  type: 'PURCHASE' | 'USAGE' | 'BONUS' | 'REFUND' | 'ADJUSTMENT' | 'MONTHLY_ALLOCATION' | 'EXPIRY';
-  amount: number;
-  request_type: string | null;
-  request_metadata: any;
-  description: string | null;
-  balance_after: number;
-  created_at: string;
-  contact_name?: string;
-  package_name?: string;
-}
+// ─── Legacy Package System Types removed ──────────────────────────────────
+// Pricing is now entirely static via config/tiers.ts
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Client Manager
@@ -434,112 +396,127 @@ export class AdminEnterpriseModel {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AI Packages (New unified package system)
+// Client API Gateway Configs
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class AdminPackagesModel {
-  // ── Package CRUD ────────────────────────────────────────────────────
-  static async getPackages(): Promise<PackageDefinition[]> {
-    const res = await api.get<{ success: boolean; packages: PackageDefinition[] }>('/admin/packages');
-    return res.data.packages || [];
+export interface ClientApiConfig {
+  id: string;
+  client_id: string;
+  client_name: string;
+  contact_id: number | null;
+  endpoint_id: string | null;
+  status: 'active' | 'paused' | 'disabled';
+  target_base_url: string;
+  auth_type: 'rolling_token' | 'bearer' | 'basic' | 'api_key' | 'none';
+  auth_secret: string | null;
+  auth_header: string;
+  allowed_actions: string | null; // JSON array of strings
+  rate_limit_rpm: number;
+  timeout_ms: number;
+  created_at: string;
+  updated_at: string;
+  total_requests: number;
+  last_request_at: string | null;
+}
+
+export interface ClientApiConfigInput {
+  client_id: string;
+  client_name: string;
+  contact_id?: number;
+  endpoint_id?: string;
+  target_base_url: string;
+  auth_type?: string;
+  auth_secret?: string;
+  auth_header?: string;
+  allowed_actions?: string[];
+  rate_limit_rpm?: number;
+  timeout_ms?: number;
+}
+
+export interface ClientApiLog {
+  id: string;
+  config_id: string;
+  client_id: string;
+  action: string;
+  status_code: number;
+  duration_ms: number;
+  error_message: string | null;
+  created_at: string;
+}
+
+export class AdminClientApiModel {
+  static async getAll(): Promise<ClientApiConfig[]> {
+    const res = await api.get<{ success: boolean; data: ClientApiConfig[] }>('/admin/client-api-configs');
+    return res.data.data;
   }
 
-  static async getPackage(id: number): Promise<PackageDefinition> {
-    const res = await api.get<{ success: boolean; package: PackageDefinition }>(`/admin/packages/${id}`);
-    return res.data.package;
+  static async get(id: string): Promise<ClientApiConfig> {
+    const res = await api.get<{ success: boolean; data: ClientApiConfig }>(`/admin/client-api-configs/${id}`);
+    return res.data.data;
   }
 
-  static async createPackage(pkg: Partial<PackageDefinition>): Promise<PackageDefinition> {
-    const res = await api.post<{ success: boolean; package: PackageDefinition }>('/admin/packages', pkg);
-    return res.data.package;
+  static async create(data: ClientApiConfigInput): Promise<ClientApiConfig> {
+    const res = await api.post<{ success: boolean; data: ClientApiConfig }>('/admin/client-api-configs', data);
+    return res.data.data;
   }
 
-  static async updatePackage(id: number, pkg: Partial<PackageDefinition>): Promise<PackageDefinition> {
-    const res = await api.put<{ success: boolean; package: PackageDefinition }>(`/admin/packages/${id}`, pkg);
-    return res.data.package;
+  static async update(id: string, data: Partial<ClientApiConfigInput>): Promise<ClientApiConfig> {
+    const res = await api.put<{ success: boolean; data: ClientApiConfig }>(`/admin/client-api-configs/${id}`, data);
+    return res.data.data;
   }
 
-  static async deletePackage(id: number): Promise<void> {
-    await api.delete(`/admin/packages/${id}`);
+  static async setStatus(id: string, status: 'active' | 'paused' | 'disabled'): Promise<void> {
+    await api.patch(`/admin/client-api-configs/${id}/status`, { status });
   }
 
-  // ── Subscriptions ──────────────────────────────────────────────────
-  static async getAllSubscriptions(status?: string): Promise<ContactPackageSubscription[]> {
-    const params = status ? { status } : {};
-    const res = await api.get<{ success: boolean; subscriptions: ContactPackageSubscription[] }>(
-      '/admin/packages/subscriptions/all', { params }
-    );
-    return res.data.subscriptions || [];
+  static async delete(id: string): Promise<void> {
+    await api.delete(`/admin/client-api-configs/${id}`);
   }
 
-  static async getContactSubscriptions(contactId: number) {
-    const res = await api.get<{
-      success: boolean;
-      subscriptions: ContactPackageSubscription[];
-      balance: { total: number; byPackage: any[] };
-    }>(`/admin/packages/subscriptions/${contactId}`);
-    return res.data;
-  }
-
-  static async assignPackage(data: {
-    contact_id: number;
-    package_id: number;
-    billing_cycle?: string;
-    payment_provider?: string;
-    status?: string;
-    trial_days?: number;
-  }): Promise<ContactPackageSubscription> {
-    const res = await api.post<{ success: boolean; subscription: ContactPackageSubscription }>(
-      '/admin/packages/subscriptions/assign', data
-    );
-    return res.data.subscription;
-  }
-
-  static async updateSubscriptionStatus(id: number, status: string) {
-    const res = await api.patch(`/admin/packages/subscriptions/${id}/status`, { status });
-    return res.data;
-  }
-
-  // ── Credits ────────────────────────────────────────────────────────
-  static async adjustCredits(contactPackageId: number, amount: number, reason: string) {
-    const res = await api.post('/admin/packages/credits/adjust', {
-      contact_package_id: contactPackageId,
-      amount,
-      reason,
+  static async getLogs(id: string, limit = 50, offset = 0): Promise<ClientApiLog[]> {
+    const res = await api.get<{ success: boolean; data: ClientApiLog[] }>(`/admin/client-api-configs/${id}/logs`, {
+      params: { limit, offset },
     });
+    return res.data.data;
+  }
+
+  /** Sync tool definitions to the linked enterprise endpoint's llm_tools_config */
+  static async syncTools(id: string, tools: any[]): Promise<void> {
+    await api.post(`/admin/client-api-configs/${id}/sync-tools`, { tools });
+  }
+
+  /** Download a blank gateway template JSON */
+  static async exportTemplate(): Promise<any> {
+    const res = await api.get('/admin/client-api-configs/export-template');
     return res.data;
   }
 
-  // ── Transactions ───────────────────────────────────────────────────
-  static async getTransactions(options?: { contact_id?: number; type?: string; limit?: number; offset?: number }) {
-    const res = await api.get<{ success: boolean; transactions: PackageTransaction[]; total: number }>(
-      '/admin/packages/transactions/all', { params: options }
-    );
+  /** Export an existing gateway config as a re-importable JSON */
+  static async exportConfig(id: string): Promise<any> {
+    const res = await api.get(`/admin/client-api-configs/${id}/export`);
     return res.data;
   }
 
-  static async getContactTransactions(contactId: number, limit = 50, offset = 0) {
-    const res = await api.get<{ success: boolean; transactions: PackageTransaction[]; total: number }>(
-      `/admin/packages/transactions/${contactId}`, { params: { limit, offset } }
-    );
+  /** Import a gateway by selecting a client + endpoint + tools. Backend derives all config. */
+  static async importConfig(payload: {
+    contact_id: number;
+    endpoint_id: string;
+    selected_tools: string[];
+    connection_overrides?: {
+      target_base_url?: string;
+      auth_type?: string;
+      auth_secret?: string;
+      auth_header?: string;
+    };
+  }): Promise<{ data: ClientApiConfig; tools_selected: string[]; allowed_actions: string[]; message: string }> {
+    const res = await api.post<{ success: boolean; data: ClientApiConfig; tools_selected: string[]; allowed_actions: string[]; message: string }>('/admin/client-api-configs/import', payload);
     return res.data;
   }
 
-  // ── Usage Stats ────────────────────────────────────────────────────
-  static async getUsageStats(contactId: number, days = 30) {
-    const res = await api.get(`/admin/packages/usage/${contactId}`, { params: { days } });
+  /** List tools available on an enterprise endpoint (for the import tool picker) */
+  static async getEndpointTools(endpointId: string): Promise<{ endpoint_id: string; endpoint_name: string; tools: Array<{ name: string; description: string; paramCount: number }> }> {
+    const res = await api.get<{ success: boolean; endpoint_id: string; endpoint_name: string; tools: Array<{ name: string; description: string; paramCount: number }> }>(`/admin/client-api-configs/endpoint-tools/${endpointId}`);
     return res.data;
-  }
-
-  // ── User-Contact Links ─────────────────────────────────────────────
-  static async linkUser(userId: string, contactId: number, role = 'MEMBER') {
-    const res = await api.post('/admin/packages/link-user', { user_id: userId, contact_id: contactId, role });
-    return res.data;
-  }
-
-  static async getContactUsers(contactId: number) {
-    const res = await api.get(`/admin/packages/contact-users/${contactId}`);
-    return res.data.users || [];
   }
 }
 

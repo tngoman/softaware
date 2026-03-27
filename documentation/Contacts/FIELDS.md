@@ -162,6 +162,43 @@ All fields from `createContactSchema` are optional (`.partial()`).
 }
 ```
 
+### `GET /contacts/:id/expenses` — Supplier Expenses
+**Response** `200`:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "transaction_date": "2024-03-15",
+      "invoice_number": "EXP-001",
+      "party_name": "Office Supplies Inc",
+      "exclusive_amount": 1000.00,
+      "vat_amount": 150.00,
+      "total_amount": 1150.00,
+      "transaction_type": "expense",
+      "vat_type": "standard",
+      "expense_category_id": 3,
+      "category_name": "Office Supplies",
+      "description": "Monthly office supplies"
+    }
+  ],
+  "summary": {
+    "total_expenses": 5750.00,
+    "total_vat": 750.00,
+    "total_exclusive": 5000.00,
+    "count": 5
+  }
+}
+```
+
+**Notes**:
+- `data` contains all fields from `transactions_vat` row plus `category_name` from `tb_expense_categories` JOIN
+- `summary` is server-calculated from all matching expenses
+- Matches supplier by `party_name` = contact's `company_name` in the `contacts` table
+- Only returns rows where `transaction_type = 'expense'`
+- `vat_type` values: `"standard"`, `"zero-rated"`, `"exempt"`
+
 ---
 
 ## Contact Form (Public)
@@ -528,7 +565,7 @@ Stored in `/var/opt/backend/data/enterprise_endpoints.db`.
 
 | State | Type | Default | Description |
 |-------|------|---------|-------------|
-| `activeTab` | `union` | `'overview'` | Current tab (overview/invoices/quotations/statement/assistants/landing-pages) |
+| `activeTab` | `union` | `'overview'` | Current tab — customers: overview/invoices/quotations/statement/assistants/landing-pages; suppliers: overview/expenses/documentation |
 | `contact` | `Contact \| null` | `null` | Loaded contact data |
 | `statementData` | `StatementData \| null` | `null` | Statement with aging analysis |
 | `invoices` | `Invoice[]` | `[]` | Contact's invoices |
@@ -536,6 +573,8 @@ Stored in `/var/opt/backend/data/enterprise_endpoints.db`.
 | `loading` | `boolean` | `false` | API call in progress |
 | `clientDetail` | `any \| null` | `null` | Enriched client data from `AdminClientModel.getClient()` |
 | `linkedUserId` | `string \| null` | `null` | User ID linked to this contact via `users.contact_id` |
+| `supplierExpenses` | `any[]` | `[]` | Expense transactions for supplier contacts (from `transactions_vat`) |
+| `supplierExpenseSummary` | `{ total_expenses, total_vat, total_exclusive, count }` | `{ 0, 0, 0, 0 }` | Aggregated expense summary for supplier contacts |
 | `chatModal` | `{ id, name } \| null` | `null` | Open chat modal for assistant |
 | `chatMessages` | `Array<{id, role, content}>` | `[]` | Chat conversation messages |
 | `chatInput` | `string` | `''` | Current chat input text |

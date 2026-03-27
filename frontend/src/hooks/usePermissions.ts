@@ -18,7 +18,8 @@ export const usePermissions = () => {
    */
   const isAdmin = (): boolean => {
     // Handle both boolean and number (1/0) from database using truthy check
-    return !!user?.is_admin || !!user?.is_staff;
+    // Only true admins bypass permission checks — staff use assigned permissions
+    return !!user?.is_admin;
   };
 
   /**

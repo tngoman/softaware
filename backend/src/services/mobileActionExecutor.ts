@@ -41,11 +41,20 @@ export interface MobileExecutionContext {
   role: MobileRole;
   /** The selected assistant ID (if any) */
   assistantId?: string;
+  /** Gateway tool names this user can call (set when user is a gateway client) */
+  gatewayTools?: string[];
+  /** The client_id for the gateway config (e.g. 'braai-online') */
+  gatewayClientId?: string;
 }
 
 // ============================================================================
 // Main Dispatcher
 // ============================================================================
+
+import {
+  execListCodebaseFiles, execReadCodebaseFile, execSearchCodebase,
+  execModifyCodebase, execRunDevServer, execCommitAndPushBugfix, execRunMigrations
+} from './debugExecutor.js';
 
 /**
  * Execute a tool call from the mobile AI assistant.
@@ -270,7 +279,26 @@ export async function executeMobileAction(
       case 'get_bug_stats':
         return requireStaff(ctx, () => execGetBugStats());
 
+      case 'list_codebase_files':
+        return requireStaff(ctx, () => execListCodebaseFiles(args, ctx));
+      case 'read_codebase_file':
+        return requireStaff(ctx, () => execReadCodebaseFile(args, ctx));
+      case 'search_codebase':
+        return requireStaff(ctx, () => execSearchCodebase(args, ctx));
+      case 'modify_codebase':
+        return requireStaff(ctx, () => execModifyCodebase(args, ctx));
+      case 'run_dev_server':
+        return requireStaff(ctx, () => execRunDevServer(args, ctx));
+      case 'commit_and_push_bugfix':
+        return requireStaff(ctx, () => execCommitAndPushBugfix(args, ctx));
+      case 'run_migrations':
+        return requireStaff(ctx, () => execRunMigrations(args, ctx));
+
       default:
+        // ── Gateway tool proxy — forward to the client's real API ──
+        if (ctx.gatewayTools?.includes(name) && ctx.gatewayClientId) {
+          return await execGatewayToolProxy(name, args, ctx);
+        }
         return { success: false, message: `Unknown tool: ${name}` };
     }
   } catch (err) {
@@ -293,6 +321,53 @@ async function requireStaff(
     return { success: false, message: 'This action requires staff privileges.' };
   }
   return fn();
+}
+
+// ============================================================================
+// Gateway Tool Proxy — Forward tool calls to the client's real API
+// ============================================================================
+
+/**
+ * Proxies a gateway tool call through the internal client API gateway route.
+ * This calls the same endpoint as POST /api/v1/client-api/:clientId/:action
+ * but directly via an internal HTTP call so the mobile AI loop can use it.
+ */
+async function execGatewayToolProxy(
+  toolName: string,
+  args: Record<string, unknown>,
+  ctx: MobileExecutionContext,
+): Promise<ToolResult> {
+  const clientId = ctx.gatewayClientId!;
+  console.log(`[MobileAction] Gateway proxy: ${clientId}/${toolName}`, JSON.stringify(args));
+
+  try {
+    const port = env.PORT || 8787;
+    const res = await fetch(`http://localhost:${port}/api/v1/client-api/${clientId}/${toolName}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    });
+
+    const data = await res.json() as Record<string, unknown>;
+
+    if (!res.ok) {
+      const errMsg = (data as any).message || (data as any).error || `Gateway returned ${res.status}`;
+      console.warn(`[MobileAction] Gateway proxy ${toolName} failed (${res.status}):`, errMsg);
+      return { success: false, message: `Gateway tool error: ${errMsg}` };
+    }
+
+    // Return the full response data so the LLM can describe it
+    const summary = JSON.stringify(data).slice(0, 3000);
+    return {
+      success: true,
+      message: summary,
+      data: data,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[MobileAction] Gateway proxy ${toolName} error:`, msg);
+    return { success: false, message: `Gateway connection failed: ${msg}` };
+  }
 }
 
 /**
@@ -1561,15 +1636,21 @@ async function execCheckClientHealth(args: Record<string, unknown>): Promise<Too
     [clientId],
   );
 
-  // Get health scores for each assistant
+  // Get health scores for each assistant (batched via Promise.allSettled)
   const healthLines: string[] = [];
-  for (const a of assistants.slice(0, 5)) {
-    try {
-      const health = await getAssistantKnowledgeHealth(a.id);
+  const topAssistants = assistants.slice(0, 5);
+  const healthResults = await Promise.allSettled(
+    topAssistants.map(a => getAssistantKnowledgeHealth(a.id))
+  );
+  for (let i = 0; i < topAssistants.length; i++) {
+    const a = topAssistants[i];
+    const result = healthResults[i];
+    if (result.status === 'fulfilled') {
+      const health = result.value;
       healthLines.push(
         `  • **${a.name}** [${a.status}] — Health: ${health.score}%, ${a.pages_indexed} pages (${a.tier})`,
       );
-    } catch {
+    } else {
       healthLines.push(`  • **${a.name}** [${a.status}] — Health: N/A, ${a.pages_indexed} pages (${a.tier})`);
     }
   }
@@ -2656,14 +2737,14 @@ async function execGetInvoiceDetails(args: Record<string, unknown>): Promise<Too
 }
 
 async function execSearchPricing(args: Record<string, unknown>): Promise<ToolResult> {
-  let sql = `SELECT p.id, p.item_name, p.description, p.unit_price, p.category_id
-     FROM pricing p WHERE 1=1`;
+  let sql = `SELECT p.id, p.item_name, p.description, p.unit, p.notes, p.unit_price, p.category_id
+     FROM pricing p WHERE p.is_deleted = 0`;
   const params: any[] = [];
 
   const search = String(args.search || '').trim();
   if (search) {
-    sql += ' AND (p.item_name LIKE ? OR p.description LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`);
+    sql += ' AND (p.item_name LIKE ? OR p.description LIKE ? OR p.unit LIKE ? OR p.notes LIKE ?)';
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
 
   if (args.categoryId) {
@@ -2675,6 +2756,7 @@ async function execSearchPricing(args: Record<string, unknown>): Promise<ToolRes
 
   const items = await db.query<{
     id: number; item_name: string; description: string | null;
+    unit: string | null; notes: string | null;
     unit_price: number; category_id: number | null;
   }>(sql, params);
 
@@ -2683,7 +2765,7 @@ async function execSearchPricing(args: Record<string, unknown>): Promise<ToolRes
   }
 
   const lines = items.map(
-    (p, i) => `${i + 1}. **${p.item_name}** — R${Number(p.unit_price).toFixed(2)}${p.description ? `\n   ${p.description.substring(0, 100)}` : ''}`,
+    (p, i) => `${i + 1}. **${p.item_name}** — R${Number(p.unit_price).toFixed(2)}${p.unit ? ` (${p.unit})` : ''}${p.notes ? `\n   ${p.notes.substring(0, 100)}` : ''}`,
   );
 
   return {

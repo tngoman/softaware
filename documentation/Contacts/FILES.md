@@ -2,8 +2,8 @@
 
 ## Backend Files
 
-### `/var/opt/backend/src/routes/contacts.ts` (240 LOC)
-**Purpose**: Authenticated CRUD for contacts plus per-contact invoice and quotation listing.
+### `/var/opt/backend/src/routes/contacts.ts` (464 LOC)
+**Purpose**: Authenticated CRUD for contacts plus per-contact invoice, quotation, and expense listing.
 
 | Section | Lines | Description |
 |---------|-------|-------------|
@@ -18,6 +18,7 @@
 | `DELETE /contacts/:id` | 142–164 | Soft delete: sets `active = 0`, updates timestamp. |
 | `GET /contacts/:id/quotations` | 166–196 | All quotations for contact. Joins `quotations` + `contacts`. Calculates `valid_until` as `quotation_date + 30 days`. |
 | `GET /contacts/:id/invoices` | 198–240 | All invoices for contact. Joins `invoices` + `contacts`. Returns payment status and related fields. |
+| `GET /contacts/:id/expenses` | 409–464 | All expense transactions for a supplier contact. Looks up `company_name`, queries `transactions_vat` where `party_name` matches. JOINs `tb_expense_categories` for category names. Returns expenses array + summary (total_expenses, total_vat, total_exclusive, count). |
 
 ---
 
@@ -96,8 +97,8 @@
 
 ---
 
-### `/var/opt/frontend/src/pages/contacts/ContactDetails.tsx` (1322 LOC)
-**Purpose**: Rich contact detail page with 6-tab interface — financial overview, invoices, quotations, statement, plus AI-enriched assistants and landing pages tabs filtered by the contact's linked user.
+### `/var/opt/frontend/src/pages/contacts/ContactDetails.tsx` (1956 LOC)
+**Purpose**: Rich contact detail page with type-aware tab interface — customers get 6 tabs (financial overview, invoices, quotations, statement, AI assistants, landing pages); suppliers get 3 tabs (expense overview, expenses DataTable, documentation).
 
 | Section | Lines (approx) | Description |
 |---------|-------|-------------|
@@ -115,7 +116,12 @@
 | Quotations tab | 830–860 | Full quotations DataTable |
 | **Assistants tab** | 860–1030 | Rich card grid: 2×2 info grid (Personality/Primary Goal/Business Type/Pages Indexed), Knowledge Health Score (progress bar + checklist), Knowledge Base stats (Sources/Pages/Chunks), meta info (website, lead capture email, timestamps), status dropdown, Chat/Embed/Link action buttons |
 | **Landing Pages tab** | 1032–1185 | Rich card grid: hero image with gradient overlay (or theme color fallback), status badges + theme swatch, tagline/about, stats grid (HTML size/services/deployed), info grid (contact/phone/FTP deployment), Preview/Live Site/ID action buttons |
-| Supplier placeholder | 1185–1190 | Placeholder for future supplier-specific features |
+| Supplier state | 138–139 | `supplierExpenses` (any[]), `supplierExpenseSummary` ({ total_expenses, total_vat, total_exclusive, count }) |
+| `loadSupplierExpenses()` | 288–297 | Calls `ContactModel.getExpenses(id)`, sets `supplierExpenses` and `supplierExpenseSummary` |
+| `expenseColumns` | 600–680 | 7-column TanStack Table definition: Date, Invoice #, Category, Excl. Amount, VAT, Total, VAT Type (with color-coded badges for Standard/Zero-rated/Exempt) |
+| **Supplier Overview tab** | 1500–1615 | 3-tab navigation (Overview/Expenses/Documentation) + summary cards (Total Expenses, Excl. Amount, VAT, Transaction Count) + recent expenses list (top 5) |
+| **Supplier Expenses tab** | 1620–1635 | Full DataTable with `expenseColumns` and `supplierExpenses` data |
+| **Supplier Documentation tab** | 1636–1660 | Markdown renderer for supplier documentation |
 | **Chat Modal** | 1192–1275 | Full SSE streaming chat: conversation history, auto-scroll, typing indicators, clear button, message bubbles with user/assistant avatars |
 | **Embed Modal** | 1277–1317 | Embed code snippet (`<script>` tag), direct chat URL, copy button |
 
@@ -140,7 +146,7 @@
 
 ---
 
-### `/var/opt/frontend/src/models/ContactModel.ts` (79 LOC)
+### `/var/opt/frontend/src/models/ContactModel.ts` (98 LOC)
 **Purpose**: Static API wrapper class for contact endpoints.
 
 | Method | Endpoint | Description |
@@ -152,3 +158,4 @@
 | `delete(id)` | `DELETE /contacts/:id` | Soft delete |
 | `getStatementData(id)` | `GET /contacts/:id/statement-data` | Statement transactions + aging |
 | `downloadStatement(id)` | `GET /contacts/:id/statement` | PDF generation |
+| `getExpenses(id)` | `GET /contacts/:id/expenses` | Supplier expense transactions + summary |

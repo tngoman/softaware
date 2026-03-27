@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { db, toMySQLDate, type api_keys } from '../db/mysql.js';
 
 export interface ApiKeyRequest extends Request {
@@ -17,13 +18,14 @@ export async function requireApiKey(req: ApiKeyRequest, res: Response, next: Nex
       return res.status(401).json({ error: 'API key required. Provide X-API-Key header.' });
     }
 
-    // Lookup API key in database
+    // Hash the incoming key and lookup by hash
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
     const keyRecord = await db.queryOne<api_keys & { userEmail: string }>(
       `SELECT ak.*, u.email as userEmail 
        FROM api_keys ak 
        JOIN users u ON ak.userId = u.id 
-       WHERE ak.\`key\` = ?`,
-      [apiKey]
+       WHERE ak.key_hash = ?`,
+      [keyHash]
     );
 
     if (!keyRecord) {

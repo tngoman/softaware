@@ -13,6 +13,22 @@
  *   - Professional design with the site's theme colour
  */
 
+interface FormFieldConfig {
+  name: string;
+  label: string;
+  type: 'text' | 'email' | 'tel' | 'textarea' | 'select';
+  required: boolean;
+  placeholder?: string;
+  options?: string[]; // for select fields
+}
+
+interface FormConfig {
+  fields: FormFieldConfig[];
+  destinationEmail: string;
+  autoReplyMessage?: string;
+  submitButtonText?: string;
+}
+
 interface SiteData {
   businessName: string;
   tagline: string;
@@ -27,6 +43,10 @@ interface SiteData {
   contactEmail?: string;
   contactPhone?: string;
   themeColor?: string;
+  includeForm?: boolean;
+  includeAssistant?: boolean;
+  formConfig?: FormConfig;
+  siteId?: string; // needed for form submission endpoint
 }
 
 /* ── SVG icon bank (Heroicons, stroke style) ─────────────────────────── */
@@ -89,6 +109,10 @@ export function generateSiteHtml(data: SiteData): string {
     heroImageUrl,
     clientId,
     themeColor = '#0044cc',
+    includeForm = true,
+    includeAssistant = false,
+    formConfig,
+    siteId,
   } = data;
 
   const year = new Date().getFullYear();
@@ -133,31 +157,103 @@ export function generateSiteHtml(data: SiteData): string {
       </div>`;
   }).join('\n');
 
-  /* ── Contact form ─────────────────────────────────────────────────── */
-  const contactForm = `
-      <form action="https://api.softaware.net.za/api/v1/leads/submit" method="POST" class="space-y-5">
-        <input type="hidden" name="client_id" value="${escapeHtml(clientId)}">
+  /* ── Contact form — conditional, supports custom fields ─────────── */
+  let contactForm = '';
+  if (includeForm) {
+    const submitUrl = 'https://api.softaware.net.za/api/v1/sites/forms/submit';
+    const submitBtnText = formConfig?.submitButtonText || 'Send Message';
+    const formId = siteId || '';
+
+    // Build form fields — use custom config or fallback to default Name/Email/Message
+    let formFieldsHtml = '';
+    const fields: FormFieldConfig[] = formConfig?.fields?.length
+      ? formConfig.fields
+      : [
+          { name: 'name', label: 'Your Name', type: 'text', required: true, placeholder: 'Your Name' },
+          { name: 'email', label: 'Email Address', type: 'email', required: true, placeholder: 'Email Address' },
+          { name: 'message', label: 'Message', type: 'textarea', required: true, placeholder: 'Tell us about your project...' },
+        ];
+
+    for (const field of fields) {
+      const placeholder = field.placeholder || field.label;
+      const req = field.required ? 'required' : '';
+      const inputClass = 'w-full px-5 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-blue-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent outline-none transition';
+
+      if (field.type === 'textarea') {
+        formFieldsHtml += `
+        <div>
+          <textarea name="${escapeHtml(field.name)}" placeholder="${escapeHtml(placeholder)}" ${req} rows="4"
+                    class="${inputClass} resize-none"></textarea>
+        </div>`;
+      } else if (field.type === 'select' && field.options?.length) {
+        const optionsHtml = field.options.map(o =>
+          `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`
+        ).join('');
+        formFieldsHtml += `
+        <div>
+          <select name="${escapeHtml(field.name)}" ${req}
+                  class="${inputClass} bg-transparent">
+            <option value="" disabled selected>${escapeHtml(placeholder)}</option>
+            ${optionsHtml}
+          </select>
+        </div>`;
+      } else {
+        formFieldsHtml += `
+        <div>
+          <input name="${escapeHtml(field.name)}" type="${field.type}" placeholder="${escapeHtml(placeholder)}" ${req}
+                 class="${inputClass}">
+        </div>`;
+      }
+    }
+
+    contactForm = `
+      <form id="site-contact-form" class="space-y-5">
+        <input type="hidden" name="site_id" value="${escapeHtml(formId)}">
         <input type="text" name="bot_check_url" style="display:none" tabindex="-1" autocomplete="off">
-        <div>
-          <input name="name" type="text" placeholder="Your Name" required
-                 class="w-full px-5 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-blue-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent outline-none transition">
-        </div>
-        <div>
-          <input name="email" type="email" placeholder="Email Address" required
-                 class="w-full px-5 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-blue-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent outline-none transition">
-        </div>
-        <div>
-          <textarea name="message" placeholder="Tell us about your project..." required rows="4"
-                    class="w-full px-5 py-3 bg-white/10 border border-white/20 rounded-xl text-white placeholder-blue-200 focus:ring-2 focus:ring-blue-400 focus:border-transparent outline-none transition resize-none"></textarea>
-        </div>
+${formFieldsHtml}
         <button type="submit"
                 class="w-full bg-blue-500 hover:bg-blue-400 text-white font-semibold py-3 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300">
-          Send Message
+          ${escapeHtml(submitBtnText)}
         </button>
-      </form>`;
+        <p id="form-status" class="text-sm text-center mt-2 hidden"></p>
+      </form>
+      <script>
+      (function(){
+        var form = document.getElementById('site-contact-form');
+        var status = document.getElementById('form-status');
+        if(!form) return;
+        form.addEventListener('submit', function(e){
+          e.preventDefault();
+          status.className = 'text-sm text-center mt-2 text-blue-200';
+          status.textContent = 'Sending...';
+          status.classList.remove('hidden');
+          var fd = new FormData(form);
+          var data = {};
+          fd.forEach(function(v,k){ data[k] = v; });
+          fetch('${submitUrl}', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(data)
+          }).then(function(r){ return r.json(); }).then(function(d){
+            if(d.success){
+              status.className = 'text-sm text-center mt-2 text-green-300';
+              status.textContent = d.message || 'Thank you! We\\'ll be in touch soon.';
+              form.reset();
+            } else {
+              status.className = 'text-sm text-center mt-2 text-red-300';
+              status.textContent = d.error || 'Something went wrong. Please try again.';
+            }
+          }).catch(function(){
+            status.className = 'text-sm text-center mt-2 text-red-300';
+            status.textContent = 'Network error. Please try again.';
+          });
+        });
+      })();
+      </script>`;
+  }
 
-  /* ── Widget script — only include when a real assistant is selected ── */
-  const isRealAssistant = clientId && clientId !== 'preview' && /^(assistant-|staff-assistant-|[0-9a-f]{8}-)/i.test(clientId);
+  /* ── Widget script — only include when includeAssistant is true and a real assistant is selected ── */
+  const isRealAssistant = includeAssistant && clientId && clientId !== 'preview' && /^(assistant-|staff-assistant-|[0-9a-f]{8}-)/i.test(clientId);
   const widgetScript = isRealAssistant
     ? `<script src="https://softaware.net.za/api/assistants/widget.js" data-assistant-id="${escapeHtml(clientId)}" defer></script>`
     : '';
@@ -192,7 +288,7 @@ tailwind.config = {
     <div class="hidden sm:flex items-center gap-6 text-sm font-medium text-gray-600">
       <a href="#about" class="hover:text-gray-900 transition-colors">About</a>
       <a href="#services" class="hover:text-gray-900 transition-colors">Services</a>
-      <a href="#contact" class="bg-gray-900 text-white px-5 py-2 rounded-full hover:bg-gray-800 transition-colors">${safeCta}</a>
+      ${includeForm ? `<a href="#contact" class="bg-gray-900 text-white px-5 py-2 rounded-full hover:bg-gray-800 transition-colors">${safeCta}</a>` : ''}
     </div>
   </div>
 </nav>
@@ -210,10 +306,10 @@ tailwind.config = {
     </p>
     ${safeHeroSubtitle ? `<p class="mt-3 text-base sm:text-lg text-blue-200/80 max-w-xl mx-auto">${safeHeroSubtitle}</p>` : ''}
     <div class="mt-8 flex flex-col sm:flex-row gap-4 justify-center">
-      <a href="#contact"
+      ${includeForm ? `<a href="#contact"
          class="inline-block bg-white text-gray-900 font-semibold px-8 py-3 rounded-full shadow-lg hover:shadow-xl hover:bg-blue-50 transition-all duration-300">
         ${safeCta}
-      </a>
+      </a>` : ''}
       <a href="#services"
          class="inline-block border-2 border-white/50 text-white font-semibold px-8 py-3 rounded-full hover:bg-white/10 transition-all duration-300">
         Our Services
@@ -247,7 +343,7 @@ ${serviceCards}
   </div>
 </section>
 
-<!-- ═══ CONTACT ═══ -->
+${includeForm ? `<!-- ═══ CONTACT ═══ -->
 <section id="contact" class="py-20 px-6 bg-gradient-to-br from-gray-900 via-blue-900 to-indigo-900">
   <div class="max-w-4xl mx-auto">
     <div class="text-center mb-12">
@@ -259,7 +355,7 @@ ${serviceCards}
 ${contactForm}
     </div>
   </div>
-</section>
+</section>` : ''}
 
 <!-- ═══ FOOTER ═══ -->
 <footer class="bg-gray-950 text-gray-400 py-8 px-6 text-center">

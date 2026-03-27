@@ -19,6 +19,7 @@ import {
 } from '@heroicons/react/24/outline';
 import api, { API_BASE_URL } from '../../services/api';
 import Swal from 'sweetalert2';
+import { useTierLimits } from '../../hooks/useTierLimits';
 
 interface Site {
   id: string;
@@ -129,6 +130,7 @@ const SitesPage: React.FC = () => {
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
   const prevSitesRef = useRef<Site[]>([]);
+  const { canCreate, limits } = useTierLimits();
 
   const loadSites = useCallback(async () => {
     try {
@@ -277,13 +279,23 @@ const SitesPage: React.FC = () => {
           <h1 className="text-2xl font-bold text-gray-900">Landing Pages</h1>
           <p className="text-gray-500 text-sm mt-1">Build and manage your web presence</p>
         </div>
-        <Link
-          to="/portal/sites/new"
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-        >
-          <PlusIcon className="h-4 w-4" />
-          Create Landing Page
-        </Link>
+        {canCreate('sites') ? (
+          <Link
+            to="/portal/sites/new"
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+          >
+            <PlusIcon className="h-4 w-4" />
+            Create Landing Page
+          </Link>
+        ) : (
+          <span
+            title={`${limits.tier} plan limit reached (${limits.sites.used}/${limits.sites.limit})`}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-300 text-gray-500 text-sm font-semibold rounded-lg cursor-not-allowed"
+          >
+            <PlusIcon className="h-4 w-4" />
+            Limit Reached
+          </span>
+        )}
       </div>
 
       {/* Empty state */}
@@ -294,13 +306,20 @@ const SitesPage: React.FC = () => {
           <p className="text-gray-500 mb-6 max-w-sm mx-auto">
             Build and deploy professional single-page websites in minutes.
           </p>
-          <Link
-            to="/portal/sites/new"
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-          >
-            <PlusIcon className="h-4 w-4" />
-            Create Your First Landing Page
-          </Link>
+          {canCreate('sites') ? (
+            <Link
+              to="/portal/sites/new"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+            >
+              <PlusIcon className="h-4 w-4" />
+              Create Your First Landing Page
+            </Link>
+          ) : (
+            <span className="inline-flex items-center gap-2 px-5 py-2.5 bg-gray-300 text-gray-500 text-sm font-semibold rounded-lg cursor-not-allowed">
+              <PlusIcon className="h-4 w-4" />
+              Site Limit Reached — Upgrade to Create More
+            </span>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">

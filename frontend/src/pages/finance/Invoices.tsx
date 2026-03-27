@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { PlusIcon, CheckIcon, DocumentArrowDownIcon, EyeIcon, PaperAirplaneIcon, BanknotesIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
-import { InvoiceModel, ContactModel, PaymentModel } from '../../models';
+import { PlusIcon, CheckIcon, DocumentArrowDownIcon, EyeIcon, PaperAirplaneIcon, BanknotesIcon, ArrowPathIcon, DocumentDuplicateIcon, ClipboardDocumentCheckIcon } from '@heroicons/react/24/outline';
+import { InvoiceModel, ContactModel, PaymentModel, CreditNoteModel, PurchaseOrderModel } from '../../models';
 import AppSettingsModel from '../../models/AppSettingsModel';
 import { API_BASE_URL } from '../../services/api';
 import { useAppStore } from '../../store';
@@ -19,11 +19,13 @@ const Invoices: React.FC = () => {
   
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
   const [loading, setLoading] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
   const [emailModalOpen, setEmailModalOpen] = useState(false);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [payments, setPayments] = useState<any[]>([]);
   const [pagination, setPagination] = useState({ page: 0, limit: 10, total: 0 });
   const [search, setSearch] = useState('');
+  const [invoiceTypeFilter, setInvoiceTypeFilter] = useState<'tax' | 'proforma'>('tax');
 
   // DataTable columns configuration
   const columns: any[] = [
@@ -78,7 +80,7 @@ const Invoices: React.FC = () => {
   useEffect(() => {
     loadInvoices();
     loadCustomers();
-  }, [pagination.page, pagination.limit, search]);
+  }, [pagination.page, pagination.limit, search, invoiceTypeFilter]);
 
   // Handle route changes - clear selection when no ID
   useEffect(() => {
@@ -139,7 +141,8 @@ const Invoices: React.FC = () => {
       const data = await InvoiceModel.getAll({
         page: pagination.page,
         limit: pagination.limit,
-        search: search
+        search: search,
+        invoice_type: invoiceTypeFilter,
       });
       
       if (Array.isArray(data)) {
@@ -192,20 +195,12 @@ const Invoices: React.FC = () => {
   const handleSendEmail = async (data: { to: string; cc?: string; subject: string; body: string }) => {
     if (!selectedInvoice || !selectedInvoice.invoice_id) return;
     
-    try {
-      await InvoiceModel.sendEmail(selectedInvoice.invoice_id, data);
-      notify.success('Email sent successfully');
-      setEmailModalOpen(false);
-      // Reload to get updated status
-      loadInvoices();
-      if (selectedInvoice.invoice_id) {
-        const updatedInvoice = await InvoiceModel.getById(selectedInvoice.invoice_id);
-        setSelectedInvoice(updatedInvoice);
-      }
-    } catch (error: any) {
-      console.error('Error sending email:', error);
-      notify.error(error.response?.data?.error || 'Failed to send email');
-      throw error; // Re-throw to keep modal open
+    await InvoiceModel.sendEmail(selectedInvoice.invoice_id, data);
+    // Reload to get updated status
+    loadInvoices();
+    if (selectedInvoice.invoice_id) {
+      const updatedInvoice = await InvoiceModel.getById(selectedInvoice.invoice_id);
+      setSelectedInvoice(updatedInvoice);
     }
   };
 
@@ -291,6 +286,7 @@ const Invoices: React.FC = () => {
         notify.error('Invalid invoice ID');
         return;
       }
+      setGeneratingPdf(true);
       
       const response = await InvoiceModel.generatePDF(invoice.invoice_id);
       
@@ -305,11 +301,49 @@ const Invoices: React.FC = () => {
     } catch (error) {
       console.error('Error generating PDF:', error);
       notify.error('Failed to generate PDF');
+    } finally {
+      setGeneratingPdf(false);
     }
   };
 
   const createNewInvoice = () => {
     navigate('/invoices/new');
+  };
+
+  const convertToTaxInvoice = async () => {
+    if (!selectedInvoice || !selectedInvoice.invoice_id) return;
+    try {
+      const data = await InvoiceModel.convertToTax(selectedInvoice.invoice_id);
+      notify.success('Tax invoice created from proforma');
+      navigate(`/invoices/${data.data?.invoice_id || data.data?.id}`);
+    } catch (error) {
+      console.error('Error converting to tax invoice:', error);
+      notify.error('Failed to create tax invoice');
+    }
+  };
+
+  const createCreditNote = async () => {
+    if (!selectedInvoice || !selectedInvoice.invoice_id) return;
+    try {
+      const data = await CreditNoteModel.createFromInvoice(selectedInvoice.invoice_id);
+      notify.success('Credit note created');
+      navigate(`/credit-notes/${data.id}`);
+    } catch (error) {
+      console.error('Error creating credit note:', error);
+      notify.error('Failed to create credit note');
+    }
+  };
+
+  const createPurchaseOrder = async () => {
+    if (!selectedInvoice || !selectedInvoice.invoice_id) return;
+    try {
+      const data = await PurchaseOrderModel.createFromInvoice(selectedInvoice.invoice_id);
+      notify.success('Purchase order created');
+      navigate(`/purchase-orders/${data.data?.po_id || data.data?.id}`);
+    } catch (error) {
+      console.error('Error creating purchase order:', error);
+      notify.error('Failed to create purchase order');
+    }
   };
 
   // If viewing a specific invoice
@@ -354,7 +388,7 @@ const Invoices: React.FC = () => {
           <div className="flex justify-between items-start">
             <div>
               <h1 className="text-3xl font-bold mb-2">
-                INVOICE
+                {(selectedInvoice as any).invoice_type === 'proforma' ? 'PROFORMA INVOICE' : 'TAX INVOICE'}
               </h1>
               <p className="text-xl font-semibold">
                 #{String(selectedInvoice.invoice_id).padStart(5, '0')}
@@ -380,10 +414,23 @@ const Invoices: React.FC = () => {
               <Can permission="invoices.view">
                 <button
                   onClick={() => generatePDF(selectedInvoice)}
-                  className="inline-flex items-center px-4 py-2 bg-white text-picton-blue rounded-lg hover:bg-gray-100 font-medium shadow-md transition-all"
+                  disabled={generatingPdf}
+                  className="inline-flex items-center px-4 py-2 bg-white text-picton-blue rounded-lg hover:bg-gray-100 disabled:opacity-50 font-medium shadow-md transition-all"
                 >
-                  <DocumentArrowDownIcon className="h-5 w-5 mr-2" />
-                  Download PDF
+                  {generatingPdf ? (
+                    <>
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <DocumentArrowDownIcon className="h-5 w-5 mr-2" />
+                      Download PDF
+                    </>
+                  )}
                 </button>
               </Can>
               <Can permission="invoices.email">
@@ -408,6 +455,35 @@ const Invoices: React.FC = () => {
                   </button>
                 </Can>
               )}
+              {(selectedInvoice as any).invoice_type === 'proforma' && (
+                <Can permission="invoices.edit">
+                  <button
+                    onClick={convertToTaxInvoice}
+                    className="inline-flex items-center px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium shadow-md transition-all"
+                  >
+                    <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+                    Create Tax Invoice
+                  </button>
+                </Can>
+              )}
+              <Can permission="invoices.edit">
+                <button
+                  onClick={createCreditNote}
+                  className="inline-flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium shadow-md transition-all"
+                >
+                  <DocumentDuplicateIcon className="h-5 w-5 mr-2" />
+                  Credit Note
+                </button>
+              </Can>
+              <Can permission="invoices.edit">
+                <button
+                  onClick={createPurchaseOrder}
+                  className="inline-flex items-center px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium shadow-md transition-all"
+                >
+                  <ClipboardDocumentCheckIcon className="h-5 w-5 mr-2" />
+                  Create PO
+                </button>
+              </Can>
             </div>
           </div>
         </div>
@@ -696,8 +772,25 @@ const Invoices: React.FC = () => {
       <div className="bg-gradient-to-r from-picton-blue to-picton-blue/80 rounded-xl shadow-lg p-6 text-white">
         <div className="flex justify-between items-start">
           <div>
-            <h1 className="text-3xl font-bold mb-2">Invoices</h1>
+            <h1 className="text-3xl font-bold mb-2">
+              {invoiceTypeFilter === 'proforma' ? 'Proforma Invoices' : 'Tax Invoices'}
+            </h1>
             <p className="text-white/90">Manage your customer invoices and payments</p>
+            {/* Type toggle */}
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => { setInvoiceTypeFilter('tax'); setPagination(prev => ({ ...prev, page: 0 })); }}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${invoiceTypeFilter === 'tax' ? 'bg-white text-picton-blue' : 'bg-white/20 text-white hover:bg-white/30'}`}
+              >
+                Tax Invoices
+              </button>
+              <button
+                onClick={() => { setInvoiceTypeFilter('proforma'); setPagination(prev => ({ ...prev, page: 0 })); }}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${invoiceTypeFilter === 'proforma' ? 'bg-white text-amber-600' : 'bg-white/20 text-white hover:bg-white/30'}`}
+              >
+                Proforma Invoices
+              </button>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="relative">

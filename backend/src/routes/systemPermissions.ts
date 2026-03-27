@@ -5,6 +5,7 @@
 import { Router, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest, getAuth } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 
 export const permissionsRouter = Router();
@@ -12,7 +13,7 @@ export const permissionsRouter = Router();
 /**
  * GET /permissions — List all permissions
  */
-permissionsRouter.get('/', requireAuth, async (_req: AuthRequest, res: Response, next) => {
+permissionsRouter.get('/', requireAuth, requireAdmin, async (_req: AuthRequest, res: Response, next) => {
   try {
     const permissions = await db.query<any>(
       'SELECT * FROM permissions ORDER BY permission_group, name'
@@ -61,7 +62,7 @@ permissionsRouter.get('/user', requireAuth, async (req: AuthRequest, res: Respon
 /**
  * GET /permissions/:id — Get single permission
  */
-permissionsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.get('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const perm = await db.queryOne<any>('SELECT * FROM permissions WHERE id = ?', [id]);
@@ -75,7 +76,7 @@ permissionsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
 /**
  * POST /permissions — Create permission
  */
-permissionsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.post('/', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { name, slug, description, permission_group } = req.body;
     if (!name || !slug) throw badRequest('name and slug are required');
@@ -100,7 +101,7 @@ permissionsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
 /**
  * PUT /permissions/:id — Update permission
  */
-permissionsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.put('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { name, slug, description, permission_group } = req.body;
@@ -129,7 +130,7 @@ permissionsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
 /**
  * DELETE /permissions/:id — Delete permission
  */
-permissionsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.delete('/:id', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const perm = await db.queryOne<any>('SELECT * FROM permissions WHERE id = ?', [id]);
@@ -147,7 +148,7 @@ permissionsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Resp
 /**
  * POST /permissions/:id/assign — Assign permission to role
  */
-permissionsRouter.post('/:id/assign', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.post('/:id/assign', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { role_id } = req.body;
@@ -173,7 +174,7 @@ permissionsRouter.post('/:id/assign', requireAuth, async (req: AuthRequest, res:
 /**
  * POST /permissions/:id/remove — Remove permission from role
  */
-permissionsRouter.post('/:id/remove', requireAuth, async (req: AuthRequest, res: Response, next) => {
+permissionsRouter.post('/:id/remove', requireAuth, requireAdmin, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { role_id } = req.body;

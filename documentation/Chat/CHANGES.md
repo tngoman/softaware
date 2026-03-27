@@ -1,6 +1,6 @@
 # Staff Chat — Changelog
 
-> **Last Updated**: 2026-03-08
+> **Last Updated**: 2026-03-18
 > **Status**: 144/144 tasks complete (100%)
 
 ---
@@ -19,6 +19,7 @@
 | **v4.6** | 2026-03 | **Phase 6 final**: WebAuthn biometric auth (migration 016), session management API, external groups tab in sidebar, migration 017 drops legacy `team_chats` tables |
 | **v4.7** | 2026-03 | **Scheduled calls + E2E validation**: 9 scheduled-call endpoints, `ScheduleCallDialog.tsx` + `ScheduledCallsPanel.tsx` + `GifPicker.tsx` UI components. Full E2E test suite (77/77 passing). Fixed shared Socket.IO server, DB column mismatches, ISO datetime handling |
 | **v4.8** | 2026-03 | **Socket event alignment + call bug fixes**: Fixed 13 backend event name/payload mismatches (hyphenated → underscored, camelCase → snake_case). Fixed WebRTC relay, call accept `started_at`, caller name lookup. Fixed `emitMessageStatusUpdate` to be room-scoped. Fixed `call_sessions.id` type (BIGINT, not UUID). Created comprehensive mobile wiring document |
+| **v4.9** | 2026-03 | **Mobile push notification reliability**: Fixed stale presence causing skipped pushes after server restart. Added user notification preference checks to chat push path. Improved FCM payloads (iOS `content-available`, `mutable-content`, `apns-priority: 10`; Android dedicated `softaware_chat` channel; data payload duplication for background delivery). |
 
 ---
 

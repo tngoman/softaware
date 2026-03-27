@@ -57,8 +57,8 @@ export class AuthModel {
   /**
    * Register a new user
    */
-  static async register(data: { name: string; email: string; password: string; company_name?: string; phone?: string; address?: string }) {
-    const response = await api.post<{ success: boolean; message: string; data: { token: string; user: User } }>(
+  static async register(data: { name: string; email: string; password: string; company_name?: string; phone?: string; address?: string; trial?: boolean }) {
+    const response = await api.post<{ success: boolean; message: string; trialActivated?: boolean; data: { token: string; user: User } }>(
       '/auth/register',
       data
     );
@@ -460,5 +460,31 @@ export class AuthModel {
   /** Get the last logged-in email */
   static getLastEmail(): string | null {
     return localStorage.getItem('last_login_email');
+  }
+
+  // ─── Google OAuth ───────────────────────────────────────────────
+
+  /**
+   * Get the Google OAuth consent screen URL from the backend.
+   * Backend returns the URL; frontend redirects the browser to it.
+   */
+  static async getGoogleAuthUrl(): Promise<string> {
+    const response = await api.get<{ success: boolean; data: { url: string } }>('/auth/google');
+    return response.data.data.url;
+  }
+
+  /**
+   * Login or register with a Google ID token (for SPA / mobile flow).
+   * The backend verifies the token, finds or creates the user, and returns a JWT.
+   */
+  static async loginWithGoogleToken(idToken: string) {
+    const response = await api.post<{
+      success: boolean;
+      message: string;
+      data: { token: string; user: User };
+      accessToken: string;
+      token: string;
+    }>('/auth/google/token', { id_token: idToken });
+    return response.data;
   }
 }

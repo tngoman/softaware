@@ -5,6 +5,9 @@ package-lock.json
 # Build output
 dist/
 
+# JS mirrors of TS source (tsx runs .ts directly)
+src/**/*.js
+
 # Environment files
 .env
 .env.local

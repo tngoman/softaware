@@ -1,15 +1,19 @@
 import { Router, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest } from '../utils/httpErrors.js';
 
 export const vatReportsRouter = Router();
+
+// All VAT report routes require admin
+vatReportsRouter.use(requireAuth, requireAdmin);
 
 /**
  * GET /vat-reports - Generate VAT reports from transactions_vat table
  * Query params: type (vat201 | itr14 | irp6), period_start, period_end, year, to_date
  */
-vatReportsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+vatReportsRouter.get('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const type = req.query.type as string;
     if (!type) {

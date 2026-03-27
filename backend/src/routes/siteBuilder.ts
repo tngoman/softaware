@@ -11,8 +11,33 @@ import { env } from '../config/env.js';
 import { getSecret } from '../services/credentialVault.js';
 import { db } from '../db/mysql.js';
 import jwt from 'jsonwebtoken';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
+
+import { guardMaxSites, TierLimitError } from '../middleware/tierGuard.js';
+import { requireActivePackageForUser } from '../services/packageResolver.js';
+
+async function resolveUserTier(userId: string | number) {
+  const pkg = await requireActivePackageForUser(userId);
+  const tierName = pkg.packageSlug;
+  const limits = pkg.limits;
+  // Page limits per Pricing.md allowedSiteType
+  const pageMap: Record<string, number> = {
+    single_page: 1,
+    classic_cms: 5,
+    ecommerce: 15,
+    web_application: 50,
+    headless: 999,
+  };
+  return { 
+    tier: tierName === 'free' ? 'free' : 'paid',
+    tierName,
+    maxPages: pageMap[limits.allowedSiteType] || 1,
+    limits 
+  };
+}
 
 const router = express.Router();
+
 
 // ── Helper: parse AI enrichment JSON safely ──────────────────
 function parseEnrichmentJson(raw: string): { tagline: string; heroSubtitle: string; ctaText: string; about: string; serviceDescs: string[] } | null {
@@ -59,11 +84,11 @@ function extractHtml(raw: string): string | null {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ── Ensure generated_html + generation_error columns exist ───
+// ── Ensure generated_html + generation_error + form_config columns exist ───
 (async () => {
   try {
     const cols = await db.query<{ Field: string }>(
-      `SHOW COLUMNS FROM generated_sites WHERE Field IN ('generated_html', 'generation_error')`,
+      `SHOW COLUMNS FROM generated_sites WHERE Field IN ('generated_html', 'generation_error', 'form_config', 'include_form', 'include_assistant')`,
     );
     const existing = new Set((cols || []).map(c => c.Field));
     if (!existing.has('generated_html')) {
@@ -74,15 +99,44 @@ const __dirname = path.dirname(__filename);
       await db.execute(`ALTER TABLE generated_sites ADD COLUMN generation_error VARCHAR(2000) NULL AFTER generated_html`);
       console.log('[SiteBuilder] Added generation_error column');
     }
+    if (!existing.has('form_config')) {
+      await db.execute(`ALTER TABLE generated_sites ADD COLUMN form_config JSON NULL AFTER generation_error`);
+      console.log('[SiteBuilder] Added form_config column');
+    }
+    if (!existing.has('include_form')) {
+      await db.execute(`ALTER TABLE generated_sites ADD COLUMN include_form TINYINT(1) NOT NULL DEFAULT 1 AFTER form_config`);
+      console.log('[SiteBuilder] Added include_form column');
+    }
+    if (!existing.has('include_assistant')) {
+      await db.execute(`ALTER TABLE generated_sites ADD COLUMN include_assistant TINYINT(1) NOT NULL DEFAULT 0 AFTER include_form`);
+      console.log('[SiteBuilder] Added include_assistant column');
+    }
     // Ensure 'generating' is a valid status
     await db.execute(`ALTER TABLE generated_sites MODIFY COLUMN status ENUM('draft','generating','generated','deployed','failed') NOT NULL DEFAULT 'draft'`);
+
+    // ── Create site_form_submissions table ──
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS site_form_submissions (
+        id VARCHAR(36) PRIMARY KEY,
+        site_id VARCHAR(36) NOT NULL,
+        form_data JSON NOT NULL,
+        submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ip_address VARCHAR(45) NULL,
+        is_read TINYINT(1) NOT NULL DEFAULT 0,
+        notification_sent TINYINT(1) NOT NULL DEFAULT 0,
+        INDEX idx_site_id (site_id),
+        INDEX idx_submitted_at (submitted_at),
+        FOREIGN KEY (site_id) REFERENCES generated_sites(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('[SiteBuilder] site_form_submissions table ready');
   } catch (err) {
     console.warn('[SiteBuilder] Column migration note:', (err as Error).message);
   }
 })();
 
 // Configure multer for image uploads
-// __dirname at runtime = dist/routes/ → go up two levels to project root, then into uploads/sites
+// __dirname at runtime = src/routes/ → go up two levels to project root, then into uploads/sites
 const SITE_UPLOADS_DIR = path.resolve(__dirname, '..', '..', 'uploads', 'sites');
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
@@ -144,6 +198,9 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: 'Business name is required' });
     }
 
+    // ── Tier guard: enforce maxSites ────────────────────────
+    await guardMaxSites(userId);
+
     const site = await siteBuilderService.createSite({
       userId,
       widgetClientId,
@@ -164,6 +221,16 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
       themeColor
     });
 
+    // Auto-set max_pages based on subscription tier
+    try {
+      const userTier = await resolveUserTier(userId);
+      if (userTier.maxPages > 1) {
+        await siteBuilderService.setMaxPages(site.id, userTier.maxPages);
+      }
+    } catch (e) {
+      console.warn('[SiteBuilder] Could not resolve tier for max_pages:', (e as Error).message);
+    }
+
     return res.status(201).json({
       success: true,
       site: {
@@ -173,11 +240,38 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
     });
 
   } catch (error) {
+    if (error instanceof TierLimitError) {
+      return res.status(403).json({
+        error: error.message,
+        code: error.code,
+        resource: error.resource,
+        current: error.current,
+        limit: error.limit,
+        tier: error.tier,
+      });
+    }
     console.error('Create site error:', error);
     return res.status(500).json({
       error: 'Failed to create site',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
+/**
+ * GET /api/v1/sites/tier
+ * Get the current user's subscription tier info for the site builder
+ */
+router.get('/tier', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const tierInfo = await resolveUserTier(userId);
+    return res.json({ success: true, ...tierInfo });
+  } catch (error) {
+    console.error('Get tier error:', error);
+    return res.status(500).json({ error: 'Failed to resolve tier' });
   }
 });
 
@@ -594,16 +688,20 @@ router.post('/generate-ai', requireAuth, async (req: AuthRequest, res) => {
       logoUrl,
       heroImageUrl,
       clientId,
-      tier = 'free'
+      includeForm,
+      includeAssistant,
+      formConfig,
     } = req.body;
 
-    const resolvedTier = (tier === 'paid' ? 'paid' : 'free') as 'free' | 'paid';
+    // Server-side tier resolution — never trust client-supplied tier
+    const userTier = await resolveUserTier(userId);
+    const resolvedTier = userTier.tier;
 
     // Validate required fields
-    if (!businessName || !tagline || !aboutText || !services || !clientId) {
+    if (!businessName || !tagline || !aboutText || !services) {
       return res.status(400).json({
         error: 'Missing required fields',
-        required: ['businessName', 'tagline', 'aboutText', 'services', 'clientId']
+        required: ['businessName', 'tagline', 'aboutText', 'services']
       });
     }
 
@@ -716,6 +814,9 @@ IMPORTANT:
                   serviceDescriptions = parsed.serviceDescs;
                   paidEnriched = true;
                   console.log('[ai-generation] All content enriched via GLM');
+                  logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                    source: 'sitebuilder', model: glmModel, provider: 'glm',
+                  });
                 }
               } else {
                 console.warn(`[ai-generation] GLM ${glmRes.status} — trying OpenRouter`);
@@ -765,6 +866,9 @@ IMPORTANT:
                     serviceDescriptions = parsed.serviceDescs;
                     paidEnriched = true;
                     console.log('[ai-generation] All content enriched via OpenRouter');
+                    logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                      source: 'sitebuilder', model: orModel, provider: 'openrouter',
+                    });
                   }
                 }
               } else {
@@ -781,6 +885,7 @@ IMPORTANT:
             try {
               const ollamaUrl = `${env.OLLAMA_BASE_URL.replace(/\/$/, '')}/api/chat`;
               const model = env.SITE_BUILDER_OLLAMA_MODEL;
+              const ollamaStart = Date.now();
 
               const aiRes = await axios.post(
                 ollamaUrl,
@@ -791,12 +896,14 @@ IMPORTANT:
                     { role: 'user', content: enrichPrompt }
                   ],
                   stream: false,
-                  options: { temperature: 0.6, num_predict: 1024 }
+                  options: { temperature: 0.6, num_predict: 512 }
                 },
-                { timeout: 120000 }
+                { timeout: 300000 }
               );
 
+              const ollamaMs = Date.now() - ollamaStart;
               const raw = (aiRes.data.message?.content || '').trim();
+              console.log(`[ai-generation] Ollama (paid fallback) responded in ${ollamaMs}ms, raw length: ${raw.length}`);
               const parsed = parseEnrichmentJson(raw);
               if (parsed) {
                 enhancedTagline = parsed.tagline || enhancedTagline;
@@ -804,10 +911,17 @@ IMPORTANT:
                 enhancedCtaText = parsed.ctaText || enhancedCtaText;
                 enhancedAbout = parsed.about || enhancedAbout;
                 serviceDescriptions = parsed.serviceDescs;
-                console.log('[ai-generation] All content enriched via Ollama (paid fallback)');
+                console.log('[ai-generation] All content enriched via Ollama (paid fallback) ✓');
+                logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                  source: 'sitebuilder', model, provider: 'ollama', durationMs: ollamaMs,
+                });
+              } else {
+                console.warn('[ai-generation] Ollama (paid fallback) returned non-parseable JSON:', raw.slice(0, 300));
               }
             } catch (aiErr) {
-              console.log('[ai-generation] Ollama fallback also failed (non-fatal):', aiErr instanceof Error ? aiErr.message : 'unknown');
+              const errMsg = aiErr instanceof Error ? aiErr.message : 'unknown';
+              const errCode = axios.isAxiosError(aiErr) ? aiErr.code : undefined;
+              console.error('[ai-generation] Ollama fallback also FAILED:', errMsg, errCode ? `(${errCode})` : '');
             }
           }
         } else {
@@ -815,7 +929,8 @@ IMPORTANT:
           try {
             const ollamaUrl = `${env.OLLAMA_BASE_URL.replace(/\/$/, '')}/api/chat`;
             const model = env.SITE_BUILDER_OLLAMA_MODEL;
-            console.log('[ai-generation] Free tier — enriching all content via', model);
+            const ollamaStart = Date.now();
+            console.log('[ai-generation] Free tier — enriching all content via', model, '| URL:', ollamaUrl);
 
             const aiRes = await axios.post(
               ollamaUrl,
@@ -826,12 +941,14 @@ IMPORTANT:
                   { role: 'user', content: enrichPrompt }
                 ],
                 stream: false,
-                options: { temperature: 0.6, num_predict: 1024 }
+                options: { temperature: 0.6, num_predict: 512 }
               },
-              { timeout: 120000 }
+              { timeout: 300000 }
             );
 
+            const ollamaMs = Date.now() - ollamaStart;
             const raw = (aiRes.data.message?.content || '').trim();
+            console.log(`[ai-generation] Ollama responded in ${ollamaMs}ms, raw length: ${raw.length}`);
             const parsed = parseEnrichmentJson(raw);
             if (parsed) {
               enhancedTagline = parsed.tagline || enhancedTagline;
@@ -839,10 +956,17 @@ IMPORTANT:
               enhancedCtaText = parsed.ctaText || enhancedCtaText;
               enhancedAbout = parsed.about || enhancedAbout;
               serviceDescriptions = parsed.serviceDescs;
-              console.log('[ai-generation] All content enriched via Ollama');
+              console.log('[ai-generation] All content enriched via Ollama ✓');
+              logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                source: 'sitebuilder', model, provider: 'ollama', durationMs: ollamaMs,
+              });
+            } else {
+              console.warn('[ai-generation] Ollama returned non-parseable JSON:', raw.slice(0, 300));
             }
           } catch (aiErr) {
-            console.log('[ai-generation] Ollama enrichment skipped (non-fatal):', aiErr instanceof Error ? aiErr.message : 'unknown');
+            const errMsg = aiErr instanceof Error ? aiErr.message : 'unknown';
+            const errCode = axios.isAxiosError(aiErr) ? aiErr.code : undefined;
+            console.error('[ai-generation] Ollama enrichment FAILED:', errMsg, errCode ? `(${errCode})` : '');
           }
         }
 
@@ -856,6 +980,22 @@ IMPORTANT:
           if (siteRecord?.theme_color) themeColor = siteRecord.theme_color;
         }
 
+        // Resolve form/assistant flags (default: form=true, assistant=false)
+        const shouldIncludeForm = includeForm !== false;
+        const shouldIncludeAssistant = includeAssistant === true && !!clientId;
+
+        // Store form_config and flags on the site record
+        if (targetSiteId) {
+          const updates: Record<string, any> = {
+            includeForm: shouldIncludeForm ? 1 : 0,
+            includeAssistant: shouldIncludeAssistant ? 1 : 0,
+          };
+          if (formConfig && shouldIncludeForm) {
+            updates.formConfig = JSON.stringify(formConfig);
+          }
+          await siteBuilderService.updateSite(targetSiteId, updates);
+        }
+
         const html = generateSiteHtml({
           businessName,
           tagline: enhancedTagline,
@@ -866,8 +1006,12 @@ IMPORTANT:
           serviceDescriptions,
           logoUrl: logoUrl || '',
           heroImageUrl: heroImageUrl || '',
-          clientId,
+          clientId: clientId || '',
           themeColor,
+          includeForm: shouldIncludeForm,
+          includeAssistant: shouldIncludeAssistant,
+          formConfig: shouldIncludeForm ? formConfig : undefined,
+          siteId: targetSiteId || '',
         });
 
         console.log(`[ai-generation] HTML generated (${resolvedTier} tier), size: ${html.length} bytes`);
@@ -1008,6 +1152,9 @@ IMPORTANT:
                 serviceDescriptions = parsed.serviceDescs;
                 paidEnriched = true;
                 console.log('[ai-generation] Skip-queue enriched via GLM');
+                logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                  source: 'sitebuilder', model: env.SITE_BUILDER_GLM_MODEL || 'claude-sonnet-4-20250514', provider: 'glm',
+                });
               }
             }
           }
@@ -1053,6 +1200,9 @@ IMPORTANT:
                   serviceDescriptions = parsed.serviceDescs;
                   paidEnriched = true;
                   console.log('[ai-generation] Skip-queue enriched via OpenRouter');
+                  logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                    source: 'sitebuilder', model: orModel, provider: 'openrouter',
+                  });
                 }
               }
             }
@@ -1066,6 +1216,8 @@ IMPORTANT:
           try {
             const ollamaUrl = `${env.OLLAMA_BASE_URL.replace(/\/$/, '')}/api/chat`;
             const model = env.SITE_BUILDER_OLLAMA_MODEL;
+            const ollamaStart = Date.now();
+            console.log('[ai-generation] Skip-queue trying Ollama:', model);
             const aiRes = await axios.post(ollamaUrl, {
               model,
               messages: [
@@ -1073,9 +1225,11 @@ IMPORTANT:
                 { role: 'user', content: enrichPrompt }
               ],
               stream: false,
-              options: { temperature: 0.6, num_predict: 1024 }
-            }, { timeout: 120000 });
+              options: { temperature: 0.6, num_predict: 512 }
+            }, { timeout: 300000 });
+            const ollamaMs = Date.now() - ollamaStart;
             const raw = (aiRes.data.message?.content || '').trim();
+            console.log(`[ai-generation] Skip-queue Ollama responded in ${ollamaMs}ms, raw length: ${raw.length}`);
             const parsed = parseEnrichmentJson(raw);
             if (parsed) {
               enhancedTagline = parsed.tagline || enhancedTagline;
@@ -1083,15 +1237,31 @@ IMPORTANT:
               enhancedCtaText = parsed.ctaText || enhancedCtaText;
               enhancedAbout = parsed.about || enhancedAbout;
               serviceDescriptions = parsed.serviceDescs;
-              console.log('[ai-generation] Skip-queue enriched via Ollama fallback');
+              console.log('[ai-generation] Skip-queue enriched via Ollama fallback ✓');
+              logAnonymizedChat('sitebuilder', enrichPrompt.slice(0, 200), raw.slice(0, 200), {
+                source: 'sitebuilder', model, provider: 'ollama', durationMs: ollamaMs,
+              });
+            } else {
+              console.warn('[ai-generation] Skip-queue Ollama returned non-parseable JSON:', raw.slice(0, 300));
             }
           } catch (e) {
-            console.log('[ai-generation] Skip-queue Ollama fallback also failed:', (e as Error).message);
+            const errMsg = (e as Error).message;
+            const errCode = axios.isAxiosError(e) ? e.code : undefined;
+            console.error('[ai-generation] Skip-queue Ollama FAILED:', errMsg, errCode ? `(${errCode})` : '');
           }
         }
 
         const { generateSiteHtml } = await import('../services/siteBuilderTemplate.js');
         let themeColor = site.theme_color || '#0044cc';
+
+        // Read form/assistant flags from the site record
+        const siteRow = await db.queryOne<any>(`SELECT include_form, include_assistant, form_config FROM generated_sites WHERE id = ?`, [siteId]);
+        const skipIncludeForm = siteRow?.include_form !== 0;
+        const skipIncludeAssistant = siteRow?.include_assistant === 1;
+        let skipFormConfig: any = undefined;
+        if (siteRow?.form_config) {
+          try { skipFormConfig = typeof siteRow.form_config === 'string' ? JSON.parse(siteRow.form_config) : siteRow.form_config; } catch {}
+        }
 
         const html = generateSiteHtml({
           businessName,
@@ -1105,6 +1275,10 @@ IMPORTANT:
           heroImageUrl,
           clientId: clientId as string,
           themeColor,
+          includeForm: skipIncludeForm,
+          includeAssistant: skipIncludeAssistant,
+          formConfig: skipIncludeForm ? skipFormConfig : undefined,
+          siteId,
         });
 
         console.log(`[ai-generation] Skip-queue HTML generated, size: ${html.length} bytes`);
@@ -1168,6 +1342,11 @@ router.post('/:siteId/polish', requireAuth, async (req: AuthRequest, res) => {
 
     console.log(`[ai-polish] Starting polish for "${site.business_name}" — prompt: "${prompt.trim().substring(0, 80)}…"`);
 
+    // Resolve tier for provider routing
+    const userTier = await resolveUserTier(userId);
+    const polishTier = userTier.tier; // 'free' | 'paid'
+    console.log(`[ai-polish] Tier: ${polishTier}`);
+
     // Return immediately
     res.json({
       success: true,
@@ -1205,95 +1384,104 @@ ${currentHtml}`;
 
         let modifiedHtml = '';
 
-        // ── Try providers in order: GLM → OpenRouter → Ollama ──
+        // ── Try providers in order: paid → GLM → OpenRouter → Ollama; free → Ollama only ──
         let polished = false;
 
-        // 1. GLM
-        try {
-          const glmKey = await getSecret('GLM');
-          if (glmKey) {
-            console.log('[ai-polish] Trying GLM');
-            const glmRes = await fetch('https://api.z.ai/api/anthropic/v1/messages', {
-              method: 'POST',
-              headers: {
-                'x-api-key': glmKey,
-                'Content-Type': 'application/json',
-                'anthropic-version': '2023-06-01',
-              },
-              body: JSON.stringify({
-                model: env.SITE_BUILDER_GLM_MODEL || 'claude-sonnet-4-20250514',
-                max_tokens: 16000,
-                messages: [{ role: 'user', content: polishPrompt }],
-              }),
-              signal: AbortSignal.timeout(60000),
-            });
-            if (glmRes.ok) {
-              const glmData = await glmRes.json() as any;
-              const raw = (glmData.content || [])
-                .filter((b: any) => b.type === 'text')
-                .map((b: any) => b.text)
-                .join('');
-              const extracted = extractHtml(raw);
-              if (extracted) {
-                modifiedHtml = extracted;
-                polished = true;
-                console.log('[ai-polish] Polished via GLM');
-              }
-            } else {
-              console.warn(`[ai-polish] GLM ${glmRes.status}`);
-            }
-          }
-        } catch (e) {
-          console.warn('[ai-polish] GLM failed:', (e as Error).message);
-        }
-
-        // 2. OpenRouter
-        if (!polished) {
+        if (polishTier === 'paid') {
+          // 1. GLM (paid only)
           try {
-            const orApiKey = await getSecret('OPENROUTER');
-            if (orApiKey) {
-              const orModel = env.SITE_BUILDER_OPENROUTER_MODEL || 'openai/gpt-4o-mini';
-              console.log('[ai-polish] Trying OpenRouter:', orModel);
-              const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            const glmKey = await getSecret('GLM');
+            if (glmKey) {
+              console.log('[ai-polish] Trying GLM');
+              const glmRes = await fetch('https://api.z.ai/api/anthropic/v1/messages', {
                 method: 'POST',
                 headers: {
-                  'Authorization': `Bearer ${orApiKey}`,
+                  'x-api-key': glmKey,
                   'Content-Type': 'application/json',
-                  'HTTP-Referer': 'https://softaware.net.za',
-                  'X-Title': 'SoftAware Site Builder',
+                  'anthropic-version': '2023-06-01',
                 },
                 body: JSON.stringify({
-                  model: orModel,
-                  messages: [
-                    { role: 'system', content: 'You are a web designer. Return only the complete modified HTML. No markdown fences, no explanation.' },
-                    { role: 'user', content: polishPrompt }
-                  ],
+                  model: env.SITE_BUILDER_GLM_MODEL || 'claude-sonnet-4-20250514',
                   max_tokens: 16000,
-                  temperature: 0.3,
+                  messages: [{ role: 'user', content: polishPrompt }],
                 }),
                 signal: AbortSignal.timeout(60000),
               });
-              if (orRes.ok) {
-                const orData = await orRes.json() as any;
-                const raw = (orData.choices?.[0]?.message?.content || '').trim();
+              if (glmRes.ok) {
+                const glmData = await glmRes.json() as any;
+                const raw = (glmData.content || [])
+                  .filter((b: any) => b.type === 'text')
+                  .map((b: any) => b.text)
+                  .join('');
                 const extracted = extractHtml(raw);
                 if (extracted) {
                   modifiedHtml = extracted;
                   polished = true;
-                  console.log('[ai-polish] Polished via OpenRouter');
+                  console.log('[ai-polish] Polished via GLM');
+                  logAnonymizedChat('sitebuilder', 'polish-request', raw.slice(0, 200), {
+                    source: 'sitebuilder', model: env.SITE_BUILDER_GLM_MODEL || 'claude-sonnet-4-20250514', provider: 'glm',
+                  });
                 }
+              } else {
+                console.warn(`[ai-polish] GLM ${glmRes.status}`);
               }
             }
           } catch (e) {
-            console.warn('[ai-polish] OpenRouter failed:', (e as Error).message);
+            console.warn('[ai-polish] GLM failed:', (e as Error).message);
+          }
+
+          // 2. OpenRouter (paid only)
+          if (!polished) {
+            try {
+              const orApiKey = await getSecret('OPENROUTER');
+              if (orApiKey) {
+                const orModel = env.SITE_BUILDER_OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+                console.log('[ai-polish] Trying OpenRouter:', orModel);
+                const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${orApiKey}`,
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://softaware.net.za',
+                    'X-Title': 'SoftAware Site Builder',
+                  },
+                  body: JSON.stringify({
+                    model: orModel,
+                    messages: [
+                      { role: 'system', content: 'You are a web designer. Return only the complete modified HTML. No markdown fences, no explanation.' },
+                      { role: 'user', content: polishPrompt }
+                    ],
+                    max_tokens: 16000,
+                    temperature: 0.3,
+                  }),
+                  signal: AbortSignal.timeout(60000),
+                });
+                if (orRes.ok) {
+                  const orData = await orRes.json() as any;
+                  const raw = (orData.choices?.[0]?.message?.content || '').trim();
+                  const extracted = extractHtml(raw);
+                  if (extracted) {
+                    modifiedHtml = extracted;
+                    polished = true;
+                    console.log('[ai-polish] Polished via OpenRouter');
+                    logAnonymizedChat('sitebuilder', 'polish-request', raw.slice(0, 200), {
+                      source: 'sitebuilder', model: orModel, provider: 'openrouter',
+                    });
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('[ai-polish] OpenRouter failed:', (e as Error).message);
+            }
           }
         }
 
-        // 3. Ollama fallback
+        // 3. Ollama fallback (all tiers) / sole provider (free tier)
         if (!polished) {
           try {
             const ollamaUrl = `${env.OLLAMA_BASE_URL.replace(/\/$/, '')}/api/chat`;
             const model = env.SITE_BUILDER_OLLAMA_MODEL;
+            const ollamaStart = Date.now();
             console.log('[ai-polish] Trying Ollama:', model);
             const aiRes = await axios.post(ollamaUrl, {
               model,
@@ -1304,15 +1492,24 @@ ${currentHtml}`;
               stream: false,
               options: { temperature: 0.3, num_predict: 16384 }
             }, { timeout: 180000 });
+            const ollamaMs = Date.now() - ollamaStart;
             const raw = (aiRes.data.message?.content || '').trim();
+            console.log(`[ai-polish] Ollama responded in ${ollamaMs}ms, raw length: ${raw.length}`);
             const extracted = extractHtml(raw);
             if (extracted) {
               modifiedHtml = extracted;
               polished = true;
-              console.log('[ai-polish] Polished via Ollama');
+              console.log('[ai-polish] Polished via Ollama ✓');
+              logAnonymizedChat('sitebuilder', 'polish-request', raw.slice(0, 200), {
+                source: 'sitebuilder', model, provider: 'ollama', durationMs: ollamaMs,
+              });
+            } else {
+              console.warn('[ai-polish] Ollama returned no valid HTML, raw length:', raw.length);
             }
           } catch (e) {
-            console.warn('[ai-polish] Ollama failed:', (e as Error).message);
+            const errMsg = (e as Error).message;
+            const errCode = axios.isAxiosError(e) ? (e as any).code : undefined;
+            console.error('[ai-polish] Ollama FAILED:', errMsg, errCode ? `(${errCode})` : '');
           }
         }
 
@@ -1343,6 +1540,614 @@ ${currentHtml}`;
       error: 'Failed to start polish',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-page routes (paid tiers only)
+// ═══════════════════════════════════════════════════════════════════════
+
+const VALID_PAGE_TYPES = ['home', 'about', 'services', 'contact', 'gallery', 'faq', 'pricing', 'custom'] as const;
+
+/**
+ * GET /api/v1/sites/:siteId/pages
+ * List all pages for a site
+ */
+router.get('/:siteId/pages', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const pages = await siteBuilderService.getPagesBySiteId(siteId);
+    const maxPages = await siteBuilderService.getMaxPages(siteId);
+
+    // Strip bulky generated_html from list — fetch via individual page endpoint
+    const safePagesArr = pages.map(p => ({
+      ...p,
+      generated_html: undefined,
+      content_data: typeof p.content_data === 'string' ? JSON.parse(p.content_data || '{}') : p.content_data
+    }));
+
+    return res.json({
+      success: true,
+      pages: safePagesArr,
+      maxPages,
+      currentCount: pages.length
+    });
+  } catch (error) {
+    console.error('List pages error:', error);
+    return res.status(500).json({ error: 'Failed to list pages' });
+  }
+});
+
+/**
+ * POST /api/v1/sites/:siteId/pages
+ * Create a new page (paid tiers only — enforced via max_pages)
+ */
+router.post('/:siteId/pages', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    // Tier check: enforce max_pages limit
+    const maxPages = await siteBuilderService.getMaxPages(siteId);
+    if (maxPages <= 1) {
+      return res.status(403).json({
+        error: 'Multi-page sites are available on paid plans only. Upgrade to add more pages.',
+        code: 'UPGRADE_REQUIRED'
+      });
+    }
+
+    const currentCount = await siteBuilderService.getPageCount(siteId);
+    if (currentCount >= maxPages) {
+      return res.status(400).json({
+        error: `Page limit reached (${maxPages}). Upgrade your plan for more pages.`,
+        code: 'PAGE_LIMIT_REACHED',
+        maxPages,
+        currentCount
+      });
+    }
+
+    const { pageType, pageSlug, pageTitle, contentData, sortOrder } = req.body;
+
+    if (!pageType || !pageSlug || !pageTitle) {
+      return res.status(400).json({ error: 'pageType, pageSlug, and pageTitle are required' });
+    }
+
+    if (!VALID_PAGE_TYPES.includes(pageType)) {
+      return res.status(400).json({ error: `Invalid pageType. Must be one of: ${VALID_PAGE_TYPES.join(', ')}` });
+    }
+
+    // Sanitize slug
+    const slug = pageSlug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    if (!slug) {
+      return res.status(400).json({ error: 'pageSlug must contain at least one alphanumeric character' });
+    }
+
+    const page = await siteBuilderService.createPage({
+      siteId,
+      pageType,
+      pageSlug: slug,
+      pageTitle,
+      contentData: contentData || {},
+      sortOrder
+    });
+
+    return res.status(201).json({
+      success: true,
+      page: {
+        ...page,
+        content_data: typeof page.content_data === 'string' ? JSON.parse(page.content_data || '{}') : page.content_data
+      }
+    });
+  } catch (error: any) {
+    if (error?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'A page with that slug already exists for this site' });
+    }
+    console.error('Create page error:', error);
+    return res.status(500).json({ error: 'Failed to create page' });
+  }
+});
+
+/**
+ * GET /api/v1/sites/:siteId/pages/:pageId
+ * Get a single page (with full generated_html)
+ */
+router.get('/:siteId/pages/:pageId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId, pageId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const page = await siteBuilderService.getPageById(pageId);
+    if (!page || page.site_id !== siteId) return res.status(404).json({ error: 'Page not found' });
+
+    return res.json({
+      success: true,
+      page: {
+        ...page,
+        content_data: typeof page.content_data === 'string' ? JSON.parse(page.content_data || '{}') : page.content_data
+      }
+    });
+  } catch (error) {
+    console.error('Get page error:', error);
+    return res.status(500).json({ error: 'Failed to fetch page' });
+  }
+});
+
+/**
+ * PUT /api/v1/sites/:siteId/pages/:pageId
+ * Update a page
+ */
+router.put('/:siteId/pages/:pageId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId, pageId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const page = await siteBuilderService.getPageById(pageId);
+    if (!page || page.site_id !== siteId) return res.status(404).json({ error: 'Page not found' });
+
+    const { pageTitle, pageSlug, pageType, contentData, generatedHtml, sortOrder, isPublished } = req.body;
+
+    // Sanitize slug if provided
+    let slug: string | undefined;
+    if (pageSlug !== undefined) {
+      slug = pageSlug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (!slug) {
+        return res.status(400).json({ error: 'pageSlug must contain at least one alphanumeric character' });
+      }
+    }
+
+    if (pageType !== undefined && !VALID_PAGE_TYPES.includes(pageType)) {
+      return res.status(400).json({ error: `Invalid pageType. Must be one of: ${VALID_PAGE_TYPES.join(', ')}` });
+    }
+
+    await siteBuilderService.updatePage(pageId, {
+      pageTitle,
+      pageSlug: slug,
+      pageType,
+      contentData,
+      generatedHtml,
+      sortOrder,
+      isPublished
+    });
+
+    const updatedPage = await siteBuilderService.getPageById(pageId);
+
+    return res.json({
+      success: true,
+      page: {
+        ...updatedPage,
+        content_data: typeof updatedPage!.content_data === 'string'
+          ? JSON.parse(updatedPage!.content_data || '{}')
+          : updatedPage!.content_data
+      }
+    });
+  } catch (error: any) {
+    if (error?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'A page with that slug already exists for this site' });
+    }
+    console.error('Update page error:', error);
+    return res.status(500).json({ error: 'Failed to update page' });
+  }
+});
+
+/**
+ * DELETE /api/v1/sites/:siteId/pages/:pageId
+ * Delete a page
+ */
+router.delete('/:siteId/pages/:pageId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId, pageId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const page = await siteBuilderService.getPageById(pageId);
+    if (!page || page.site_id !== siteId) return res.status(404).json({ error: 'Page not found' });
+
+    await siteBuilderService.deletePage(pageId);
+
+    return res.json({ success: true, message: 'Page deleted successfully' });
+  } catch (error) {
+    console.error('Delete page error:', error);
+    return res.status(500).json({ error: 'Failed to delete page' });
+  }
+});
+
+/**
+ * POST /api/v1/sites/:siteId/pages/:pageId/generate
+ * Generate HTML for a single page using the template engine + AI enrichment.
+ * Uses the page's content_data to feed into the template.
+ */
+router.post('/:siteId/pages/:pageId/generate', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { siteId, pageId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    // Tier check
+    const maxPages = await siteBuilderService.getMaxPages(siteId);
+    if (maxPages <= 1) {
+      return res.status(403).json({ error: 'Multi-page generation requires a paid plan.', code: 'UPGRADE_REQUIRED' });
+    }
+
+    const page = await siteBuilderService.getPageById(pageId);
+    if (!page || page.site_id !== siteId) return res.status(404).json({ error: 'Page not found' });
+
+    // Parse content_data
+    let contentData: Record<string, any> = {};
+    try {
+      contentData = typeof page.content_data === 'string'
+        ? JSON.parse(page.content_data || '{}')
+        : page.content_data;
+    } catch { /* empty */ }
+
+    // Generate a standalone page HTML using the template engine
+    const { generateSiteHtml } = await import('../services/siteBuilderTemplate.js');
+
+    const themeColor = site.theme_color || '#0044cc';
+    const businessName = contentData.businessName || site.business_name;
+    const tagline = contentData.tagline || page.page_title;
+    const aboutText = contentData.aboutText || contentData.description || page.page_title;
+    const services = contentData.services || [];
+    const logoUrl = contentData.logoUrl || site.logo_url || '';
+    const heroImageUrl = contentData.heroImageUrl || site.hero_image_url || '';
+    const clientId = site.widget_client_id || siteId;
+
+    // Read form/assistant flags from the site record
+    const siteRow = await db.queryOne<any>(`SELECT include_form, include_assistant, form_config FROM generated_sites WHERE id = ?`, [siteId]);
+    const pageIncludeForm = siteRow?.include_form !== 0;
+    const pageIncludeAssistant = siteRow?.include_assistant === 1;
+    let pageFormConfig: any = undefined;
+    if (siteRow?.form_config) {
+      try { pageFormConfig = typeof siteRow.form_config === 'string' ? JSON.parse(siteRow.form_config) : siteRow.form_config; } catch {}
+    }
+
+    const html = generateSiteHtml({
+      businessName,
+      tagline,
+      heroSubtitle: contentData.heroSubtitle || '',
+      ctaText: contentData.ctaText || 'Contact Us',
+      aboutText,
+      services: Array.isArray(services) ? services : [services],
+      serviceDescriptions: contentData.serviceDescriptions || [],
+      logoUrl,
+      heroImageUrl,
+      clientId,
+      themeColor,
+      includeForm: pageIncludeForm,
+      includeAssistant: pageIncludeAssistant,
+      formConfig: pageIncludeForm ? pageFormConfig : undefined,
+      siteId,
+    });
+
+    // Store the generated HTML on the page
+    await siteBuilderService.updatePage(pageId, { generatedHtml: html });
+
+    return res.json({
+      success: true,
+      message: 'Page HTML generated successfully',
+      page: {
+        id: page.id,
+        page_slug: page.page_slug,
+        page_title: page.page_title,
+        html_length: html.length
+      }
+    });
+  } catch (error) {
+    console.error('Generate page HTML error:', error);
+    return res.status(500).json({ error: 'Failed to generate page HTML' });
+  }
+});
+
+/**
+ * PATCH /api/v1/sites/:siteId/max-pages
+ * Update the max_pages limit for a site (admin or system use)
+ */
+router.patch('/:siteId/max-pages', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId } = req.params;
+    const { maxPages } = req.body;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    if (typeof maxPages !== 'number' || maxPages < 1 || maxPages > 50) {
+      return res.status(400).json({ error: 'maxPages must be a number between 1 and 50' });
+    }
+
+    await siteBuilderService.setMaxPages(siteId, maxPages);
+
+    return res.json({ success: true, maxPages });
+  } catch (error) {
+    console.error('Update max-pages error:', error);
+    return res.status(500).json({ error: 'Failed to update page limit' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Form Submissions
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/v1/sites/forms/submit
+ * Public endpoint (no auth) — receives form submissions from generated sites.
+ * Stores in DB, sends notification email to site owner, sends auto-reply if configured.
+ * Rate-limited by IP to prevent abuse.
+ */
+const formSubmitLimiter = new Map<string, { count: number; resetAt: number }>();
+
+router.post('/forms/submit', async (req: Request, res) => {
+  try {
+    const { site_id, bot_check_url, ...formFields } = req.body;
+
+    // Honeypot check
+    if (bot_check_url) {
+      return res.status(200).json({ success: true, message: 'Thank you!' }); // silent fail for bots
+    }
+
+    if (!site_id) {
+      return res.status(400).json({ error: 'Missing site_id' });
+    }
+
+    // Rate limit: max 10 submissions per IP per 10 minutes
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || 'unknown';
+    const now = Date.now();
+    const limiterKey = `${ip}:${site_id}`;
+    const limiter = formSubmitLimiter.get(limiterKey);
+    if (limiter) {
+      if (now < limiter.resetAt) {
+        if (limiter.count >= 10) {
+          return res.status(429).json({ error: 'Too many submissions. Please try again later.' });
+        }
+        limiter.count++;
+      } else {
+        formSubmitLimiter.set(limiterKey, { count: 1, resetAt: now + 600000 });
+      }
+    } else {
+      formSubmitLimiter.set(limiterKey, { count: 1, resetAt: now + 600000 });
+    }
+
+    // Verify site exists
+    const site = await siteBuilderService.getSiteById(site_id);
+    if (!site) {
+      return res.status(404).json({ error: 'Site not found' });
+    }
+
+    // Check free tier submission limit: max 50 submissions per site
+    const userTier = await resolveUserTier(site.user_id);
+    if (userTier.tier === 'free') {
+      const countRow = await db.queryOne<{ cnt: number }>(
+        'SELECT COUNT(*) AS cnt FROM site_form_submissions WHERE site_id = ?',
+        [site_id]
+      );
+      if ((countRow?.cnt || 0) >= 50) {
+        return res.status(429).json({ error: 'This site has reached its submission limit.' });
+      }
+    }
+
+    // Store submission
+    const submissionId = (await import('crypto')).randomUUID();
+    await db.execute(
+      `INSERT INTO site_form_submissions (id, site_id, form_data, ip_address)
+       VALUES (?, ?, ?, ?)`,
+      [submissionId, site_id, JSON.stringify(formFields), ip]
+    );
+
+    console.log(`[form-submit] New submission for site ${site_id} from ${ip}`);
+
+    // Parse form_config for destination email
+    let formConfig: any = null;
+    if (site.form_config) {
+      try {
+        formConfig = typeof site.form_config === 'string' ? JSON.parse(site.form_config) : site.form_config;
+      } catch {}
+    }
+
+    const destinationEmail = formConfig?.destinationEmail;
+    const autoReplyMessage = formConfig?.autoReplyMessage;
+    const submitterEmail = formFields.email;
+
+    // Send notification email to site owner (background, don't block response)
+    if (destinationEmail) {
+      (async () => {
+        try {
+          const { sendEmail } = await import('../services/emailService.js');
+          const fieldsSummary = Object.entries(formFields)
+            .map(([key, val]) => `<strong>${key}:</strong> ${val}`)
+            .join('<br>');
+
+          await sendEmail({
+            to: destinationEmail,
+            subject: `New form submission — ${site.business_name}`,
+            html: `<h2>New Contact Form Submission</h2>
+<p>You received a new form submission from your website <strong>${site.business_name}</strong>.</p>
+<hr>
+${fieldsSummary}
+<hr>
+<p style="color:#888;font-size:12px;">Submitted at ${new Date().toISOString()} from IP ${ip}</p>
+<p style="color:#888;font-size:12px;">View all submissions in your <a href="https://softaware.net.za/portal/sites/${site_id}/submissions">dashboard</a>.</p>`,
+          });
+
+          await db.execute(
+            'UPDATE site_form_submissions SET notification_sent = 1 WHERE id = ?',
+            [submissionId]
+          );
+          console.log(`[form-submit] Notification sent to ${destinationEmail}`);
+        } catch (emailErr) {
+          console.error('[form-submit] Failed to send notification:', (emailErr as Error).message);
+        }
+      })();
+    }
+
+    // Send auto-reply to submitter (background)
+    if (autoReplyMessage && submitterEmail) {
+      (async () => {
+        try {
+          const { sendEmail } = await import('../services/emailService.js');
+          await sendEmail({
+            to: submitterEmail,
+            subject: `Thank you for contacting ${site.business_name}`,
+            html: `<p>${autoReplyMessage.replace(/\n/g, '<br>')}</p>
+<p style="color:#888;font-size:12px;">This is an automated message from ${site.business_name}.</p>`,
+          });
+          console.log(`[form-submit] Auto-reply sent to ${submitterEmail}`);
+        } catch (emailErr) {
+          console.error('[form-submit] Failed to send auto-reply:', (emailErr as Error).message);
+        }
+      })();
+    }
+
+    return res.json({
+      success: true,
+      message: autoReplyMessage
+        ? 'Thank you! We\'ll be in touch soon.'
+        : 'Thank you for your submission!',
+    });
+  } catch (error) {
+    console.error('[form-submit] Error:', error);
+    return res.status(500).json({ error: 'Failed to process submission' });
+  }
+});
+
+/**
+ * GET /api/v1/sites/:siteId/submissions
+ * List form submissions for a site (authenticated, owner only).
+ * Supports pagination via ?page=1&limit=20 and filtering via ?unread=1
+ */
+router.get('/:siteId/submissions', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+    const offset = (page - 1) * limit;
+    const unreadOnly = req.query.unread === '1';
+
+    const whereClause = unreadOnly
+      ? 'WHERE site_id = ? AND is_read = 0'
+      : 'WHERE site_id = ?';
+
+    const totalRow = await db.queryOne<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM site_form_submissions ${whereClause}`,
+      [siteId]
+    );
+    const total = totalRow?.cnt || 0;
+
+    const submissions = await db.query<any>(
+      `SELECT id, form_data, submitted_at, ip_address, is_read, notification_sent
+       FROM site_form_submissions ${whereClause}
+       ORDER BY submitted_at DESC
+       LIMIT ? OFFSET ?`,
+      [siteId, limit, offset]
+    );
+
+    // Parse form_data JSON
+    const parsed = (submissions || []).map((s: any) => ({
+      ...s,
+      form_data: typeof s.form_data === 'string' ? JSON.parse(s.form_data) : s.form_data,
+    }));
+
+    // Count unread
+    const unreadRow = await db.queryOne<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM site_form_submissions WHERE site_id = ? AND is_read = 0',
+      [siteId]
+    );
+
+    return res.json({
+      success: true,
+      submissions: parsed,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+      unreadCount: unreadRow?.cnt || 0,
+    });
+  } catch (error) {
+    console.error('List submissions error:', error);
+    return res.status(500).json({ error: 'Failed to fetch submissions' });
+  }
+});
+
+/**
+ * PATCH /api/v1/sites/:siteId/submissions/:submissionId/read
+ * Mark a submission as read
+ */
+router.patch('/:siteId/submissions/:submissionId/read', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId, submissionId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    await db.execute(
+      'UPDATE site_form_submissions SET is_read = 1 WHERE id = ? AND site_id = ?',
+      [submissionId, siteId]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Mark read error:', error);
+    return res.status(500).json({ error: 'Failed to mark submission as read' });
+  }
+});
+
+/**
+ * DELETE /api/v1/sites/:siteId/submissions/:submissionId
+ * Delete a submission
+ */
+router.delete('/:siteId/submissions/:submissionId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.userId;
+    const { siteId, submissionId } = req.params;
+
+    const site = await siteBuilderService.getSiteById(siteId);
+    if (!site) return res.status(404).json({ error: 'Site not found' });
+    if (site.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    await db.execute(
+      'DELETE FROM site_form_submissions WHERE id = ? AND site_id = ?',
+      [submissionId, siteId]
+    );
+
+    return res.json({ success: true, message: 'Submission deleted' });
+  } catch (error) {
+    console.error('Delete submission error:', error);
+    return res.status(500).json({ error: 'Failed to delete submission' });
   }
 });
 

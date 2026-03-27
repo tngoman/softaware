@@ -52,6 +52,7 @@ function getDb(): Database.Database {
       id                TEXT PRIMARY KEY,
       client_id         TEXT NOT NULL UNIQUE,
       client_name       TEXT NOT NULL,
+      contact_id        INTEGER,
       endpoint_id       TEXT,
       status            TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'disabled')),
       
@@ -116,6 +117,7 @@ export interface ClientApiConfig {
   id: string;
   client_id: string;
   client_name: string;
+  contact_id: number | null;
   endpoint_id: string | null;
   status: 'active' | 'paused' | 'disabled';
   target_base_url: string;
@@ -134,6 +136,7 @@ export interface ClientApiConfig {
 export interface ClientApiConfigInput {
   client_id: string;
   client_name: string;
+  contact_id?: number;
   endpoint_id?: string;
   target_base_url: string;
   auth_type?: string;
@@ -173,6 +176,7 @@ export function createConfig(input: ClientApiConfigInput): ClientApiConfig {
     id,
     client_id: input.client_id,
     client_name: input.client_name,
+    contact_id: input.contact_id || null,
     endpoint_id: input.endpoint_id || null,
     status: 'active',
     target_base_url: input.target_base_url,
@@ -190,15 +194,16 @@ export function createConfig(input: ClientApiConfigInput): ClientApiConfig {
 
   db.prepare(`
     INSERT INTO client_api_configs (
-      id, client_id, client_name, endpoint_id, status,
+      id, client_id, client_name, contact_id, endpoint_id, status,
       target_base_url, auth_type, auth_secret, auth_header,
       allowed_actions, rate_limit_rpm, timeout_ms,
       created_at, updated_at, total_requests
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     config.id,
     config.client_id,
     config.client_name,
+    config.contact_id,
     config.endpoint_id,
     config.status,
     config.target_base_url,
@@ -231,6 +236,11 @@ export function getConfigById(id: string): ClientApiConfig | null {
 export function getAllConfigs(): ClientApiConfig[] {
   const db = getDb();
   return db.prepare('SELECT * FROM client_api_configs ORDER BY created_at DESC').all() as ClientApiConfig[];
+}
+
+export function getConfigsByContactId(contactId: number): ClientApiConfig[] {
+  const db = getDb();
+  return db.prepare('SELECT * FROM client_api_configs WHERE contact_id = ? ORDER BY created_at DESC').all(contactId) as ClientApiConfig[];
 }
 
 export function updateConfig(id: string, updates: Partial<ClientApiConfig>): boolean {
@@ -289,6 +299,219 @@ export function getRequestLogs(configId: string, limit = 50, offset = 0): any[] 
   return db.prepare(`
     SELECT * FROM client_api_logs WHERE config_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
   `).all(configId, limit, offset);
+}
+
+// ---------------------------------------------------------------------------
+// Client-Facing Usage Stats (authenticated via shared secret)
+// ---------------------------------------------------------------------------
+
+export interface UsageSummary {
+  client_id: string;
+  client_name: string;
+  status: string;
+  total_requests: number;
+  last_request_at: string | null;
+  period: { from: string; to: string };
+  period_total: number;
+  period_success: number;
+  period_errors: number;
+  avg_response_ms: number;
+  daily_breakdown: Array<{
+    date: string;
+    requests: number;
+    success: number;
+    errors: number;
+    avg_ms: number;
+  }>;
+  action_breakdown: Array<{
+    action: string;
+    requests: number;
+    success: number;
+    errors: number;
+    avg_ms: number;
+    last_called: string;
+  }>;
+  recent_requests: Array<{
+    action: string;
+    status_code: number;
+    duration_ms: number;
+    error_message: string | null;
+    created_at: string;
+  }>;
+}
+
+/**
+ * Validate a client's auth token against the stored shared secret.
+ * Accepts either:
+ *   1. The raw shared secret (direct match)
+ *   2. Today's rolling token: SHA256(secret + YYYY-MM-DD)
+ *   3. Yesterday's rolling token (grace period for timezone edge cases)
+ */
+export function validateClientSecret(config: ClientApiConfig, token: string): boolean {
+  if (!config.auth_secret || !token) return false;
+
+  // Direct secret match (constant-time comparison)
+  const secretBuf = Buffer.from(config.auth_secret);
+  const tokenBuf = Buffer.from(token);
+  if (secretBuf.length === tokenBuf.length) {
+    try {
+      if (crypto.timingSafeEqual(secretBuf, tokenBuf)) return true;
+    } catch { /* length mismatch safety net */ }
+  }
+
+  // Rolling token — today
+  const todayToken = generateRollingToken(config.auth_secret);
+  if (token === todayToken) return true;
+
+  // Rolling token — yesterday (grace window for timezone edge cases)
+  const yesterday = new Date();
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yesterdayStr = yesterday.toISOString().split('T')[0];
+  const yesterdayToken = crypto.createHash('sha256').update(config.auth_secret + yesterdayStr).digest('hex');
+  if (token === yesterdayToken) return true;
+
+  return false;
+}
+
+/**
+ * Get usage stats for a client gateway. Aggregates from client_api_logs.
+ * @param configId  The gateway config ID
+ * @param days      Number of days to look back (default 30)
+ * @param recentLimit  Max recent requests to return (default 25)
+ */
+export function getUsageStats(config: ClientApiConfig, days = 30, recentLimit = 25): UsageSummary {
+  const db = getDb();
+  const now = new Date();
+  const from = new Date(now);
+  from.setUTCDate(from.getUTCDate() - days);
+  const fromStr = from.toISOString();
+  const toStr = now.toISOString();
+
+  // Period totals
+  const periodStats = db.prepare(`
+    SELECT 
+      COUNT(*) as total,
+      SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) as success,
+      SUM(CASE WHEN status_code >= 400 OR status_code IS NULL THEN 1 ELSE 0 END) as errors,
+      COALESCE(AVG(duration_ms), 0) as avg_ms
+    FROM client_api_logs 
+    WHERE config_id = ? AND created_at >= ?
+  `).get(config.id, fromStr) as any;
+
+  // Daily breakdown
+  const dailyRows = db.prepare(`
+    SELECT 
+      DATE(created_at) as date,
+      COUNT(*) as requests,
+      SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) as success,
+      SUM(CASE WHEN status_code >= 400 OR status_code IS NULL THEN 1 ELSE 0 END) as errors,
+      COALESCE(AVG(duration_ms), 0) as avg_ms
+    FROM client_api_logs 
+    WHERE config_id = ? AND created_at >= ?
+    GROUP BY DATE(created_at)
+    ORDER BY date DESC
+  `).all(config.id, fromStr) as any[];
+
+  // Action breakdown
+  const actionRows = db.prepare(`
+    SELECT 
+      action,
+      COUNT(*) as requests,
+      SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) as success,
+      SUM(CASE WHEN status_code >= 400 OR status_code IS NULL THEN 1 ELSE 0 END) as errors,
+      COALESCE(AVG(duration_ms), 0) as avg_ms,
+      MAX(created_at) as last_called
+    FROM client_api_logs 
+    WHERE config_id = ? AND created_at >= ?
+    GROUP BY action
+    ORDER BY requests DESC
+  `).all(config.id, fromStr) as any[];
+
+  // Recent requests
+  const recentRows = db.prepare(`
+    SELECT action, status_code, duration_ms, error_message, created_at
+    FROM client_api_logs 
+    WHERE config_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(config.id, recentLimit) as any[];
+
+  return {
+    client_id: config.client_id,
+    client_name: config.client_name,
+    status: config.status,
+    total_requests: config.total_requests,
+    last_request_at: config.last_request_at,
+    period: { from: fromStr.split('T')[0], to: toStr.split('T')[0] },
+    period_total: periodStats?.total || 0,
+    period_success: periodStats?.success || 0,
+    period_errors: periodStats?.errors || 0,
+    avg_response_ms: Math.round(periodStats?.avg_ms || 0),
+    daily_breakdown: dailyRows.map(r => ({
+      date: r.date,
+      requests: r.requests,
+      success: r.success,
+      errors: r.errors,
+      avg_ms: Math.round(r.avg_ms),
+    })),
+    action_breakdown: actionRows.map(r => ({
+      action: r.action,
+      requests: r.requests,
+      success: r.success,
+      errors: r.errors,
+      avg_ms: Math.round(r.avg_ms),
+      last_called: r.last_called,
+    })),
+    recent_requests: recentRows.map(r => ({
+      action: r.action,
+      status_code: r.status_code,
+      duration_ms: r.duration_ms,
+      error_message: r.error_message,
+      created_at: r.created_at,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Client-Facing Self-Service Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Rotate the shared secret for a client gateway.
+ * Generates a new random 64-char hex secret and returns it (shown once).
+ */
+export function rotateSecret(configId: string): string {
+  const db = getDb();
+  const newSecret = crypto.randomBytes(32).toString('hex');
+  const now = new Date().toISOString();
+  db.prepare('UPDATE client_api_configs SET auth_secret = ?, updated_at = ? WHERE id = ?')
+    .run(newSecret, now, configId);
+  return newSecret;
+}
+
+/**
+ * Set a custom secret for a client gateway.
+ * Returns the secret on success.
+ */
+export function setCustomSecret(configId: string, secret: string): string {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.prepare('UPDATE client_api_configs SET auth_secret = ?, updated_at = ? WHERE id = ?')
+    .run(secret, now, configId);
+  return secret;
+}
+
+/**
+ * Get request logs by client_id (not config_id).
+ * Used by the client-facing logs endpoint.
+ */
+export function getRequestLogsByClientId(clientId: string, limit = 50, offset = 0): { logs: any[]; total: number } {
+  const db = getDb();
+  const total = (db.prepare('SELECT COUNT(*) as cnt FROM client_api_logs WHERE client_id = ?').get(clientId) as any)?.cnt || 0;
+  const logs = db.prepare(
+    'SELECT id, action, status_code, duration_ms, error_message, created_at FROM client_api_logs WHERE client_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  ).all(clientId, limit, offset);
+  return { logs, total };
 }
 
 /**

@@ -1,7 +1,7 @@
 # Authentication Module - Changelog & Known Issues
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -9,6 +9,7 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-14 | 2.0.0 | Google OAuth2 SSO — Sign in/register with Google, dual flow (redirect + token), auto-link existing accounts, `oauth_provider`/`oauth_provider_id` columns, OAuthCallback.tsx, Google Sign-In buttons on AuthPage + Login |
 | 2026-03-13 | 1.9.0 | PIN Quick Login — 4-digit PIN as alternative credential, `user_pins` table, 5 new endpoints, returning user detection, PinSetup.tsx component |
 | 2026-03-13 | 1.8.0 | Alternative auth methods (`send-alt-otp` endpoint), universal TOTP validation, push-to-approve in AuthPage.tsx, human-friendly short codes for mobile QR, MobileAuthQR always-visible component |
 | 2026-03-12 | 1.7.0 | Push-to-approve 2FA for mobile app (FCM push notifications), 3 new endpoints, `mobile_auth_challenges` table extended with `source` and `denied` status |
@@ -19,6 +20,139 @@
 | 2026-03-02 | 1.2.0 | Admin masquerade (login-as-user) feature |
 | 2026-03-02 | 1.1.0 | Migrated role detection from team_members to user_roles |
 | 2026-03-02 | 1.0.0 | Initial documentation of existing authentication system |
+
+---
+
+## 2.0 v2.0.0 — Google OAuth2 SSO
+
+**Date:** 2026-03-14  
+**Scope:** Backend (auth.ts), Frontend (AuthPage.tsx, Login.tsx, AuthModel.ts, OAuthCallback.tsx, App.tsx), Database (users: oauth_provider, oauth_provider_id)
+
+### Summary
+
+Added **Google OAuth2 Single Sign-On** as a third login method alongside email/password and PIN. Users can sign in or register with their Google account via a "Continue with Google" button on both AuthPage.tsx and Login.tsx. The feature supports two flows: a server-side redirect flow for web browsers and an ID token verification flow for mobile/SPA clients. Existing accounts with matching email addresses are automatically linked to Google on first OAuth sign-in. New accounts created via Google get an empty passwordHash (OAuth-only — they cannot use password or PIN login).
+
+### Motivation
+
+Users increasingly expect social login options. Google OAuth reduces registration friction (no password to create), improves conversion for new users, and provides an additional secure login path that leverages Google's own authentication infrastructure. The backend endpoints were already implemented but had no frontend integration — this release adds the complete frontend flow.
+
+### New Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/auth/google` | None | Returns Google OAuth2 consent URL with CSRF state cookie |
+| GET | `/auth/google/callback` | None | Exchanges authorization code for tokens, creates/links user, redirects to frontend with JWT |
+| POST | `/auth/google/token` | None | Verifies a Google ID token (for mobile/SPA), creates/links user, returns JWT |
+
+### New Database Columns
+
+| Table | Column | Type | Description |
+|-------|--------|------|-------------|
+| users | oauth_provider | VARCHAR(20) NULL | OAuth provider name (e.g., `'google'`). NULL for password-only accounts. |
+| users | oauth_provider_id | VARCHAR(255) NULL | Provider-specific user ID (Google `sub` claim). NULL for password-only accounts. |
+
+**Index:** `idx_oauth (oauth_provider, oauth_provider_id)` — composite index for fast OAuth user lookup.
+
+**Auto-migration:** Columns added automatically via `ensureOAuthColumns()` called on module load. Checks `SHOW COLUMNS FROM users LIKE 'oauth_provider'` — if missing, runs 3 ALTER TABLE statements (add column, add column, add index).
+
+### New Frontend Files
+
+| File | LOC | Description |
+|------|-----|-------------|
+| `src/pages/public/OAuthCallback.tsx` | 107 | Handles redirect from Google OAuth callback. Reads `?token=` from URL, stores JWT in localStorage, fetches user profile via `/auth/me`, fetches permissions, sets Zustand store state, navigates to `/dashboard`. Shows loading spinner during processing and error screen with "Back to Sign In" button on failure. |
+
+### New Backend Functions
+
+| Function | File | Description |
+|----------|------|-------------|
+| `ensureOAuthColumns()` | `auth.ts` | Auto-migration: adds `oauth_provider VARCHAR(20)` + `oauth_provider_id VARCHAR(255)` columns and composite index to `users` table if missing. Called on module load. |
+
+### Updated Backend Files
+
+| File | Change |
+|------|--------|
+| `src/routes/auth.ts` | **1253 → 1563 LOC (+310).** Added `ensureOAuthColumns()` auto-migration. Google OAuth2 client instantiation (`OAuth2Client` from `google-auth-library`). 3 new endpoints: `GET /auth/google` (generates consent URL with CSRF state cookie), `GET /auth/google/callback` (code exchange → user lookup/create → JWT redirect), `POST /auth/google/token` (ID token verification → user lookup/create → JWT response). OAuth user creation includes full transaction with contact, team, team_member, user_roles, activation_key records. |
+
+### Updated Frontend Files
+
+| File | Change |
+|------|--------|
+| `src/pages/public/AuthPage.tsx` | **1047 → 1130 LOC (+83).** Added `googleLoading` state, `handleGoogleLogin()` handler, Google Sign-In button with official Google "G" SVG logo below both login and register forms with "or continue with" / "or sign up with" dividers. |
+| `src/pages/auth/Login.tsx` | **570 → 613 LOC (+43).** Added `googleLoading` state, Google Sign-In button with divider below the Sign In button. |
+| `src/models/AuthModel.ts` | **464 → 490 LOC (+26).** Added 2 new methods: `getGoogleAuthUrl()` (GET /auth/google → returns consent URL) and `loginWithGoogleToken(idToken)` (POST /auth/google/token → returns JWT + user). |
+| `src/App.tsx` | **+2 lines.** Added `import OAuthCallback` and `<Route path="/auth/oauth-callback" element={<OAuthCallback />} />` between /register and /activate routes. |
+
+### Google OAuth Web Flow
+
+```
+User              AuthPage.tsx            Backend                  Google
+  │                    │                     │                       │
+  │── click "Continue  │                     │                       │
+  │   with Google" ───▶│                     │                       │
+  │                    │── GET /auth/google ─▶│                       │
+  │                    │                     │── generate state ─────│
+  │                    │                     │── set state cookie ───│
+  │                    │◀── { url } ─────────│                       │
+  │                    │                     │                       │
+  │◀── redirect to ───│                     │                       │
+  │   Google consent   │                     │                       │
+  │                    │                     │                       │
+  │── authorize ──────────────────────────────────────────────────▶│
+  │◀── redirect to callback ──────────────────────────────────────│
+  │                    │                     │                       │
+  │─────── GET /auth/google/callback ───────▶│                       │
+  │                    │                     │── verify state cookie │
+  │                    │                     │── exchange code ──────▶│
+  │                    │                     │◀── tokens ────────────│
+  │                    │                     │── verify ID token ────│
+  │                    │                     │── lookup user by      │
+  │                    │                     │   oauth_provider_id   │
+  │                    │                     │── OR link by email    │
+  │                    │                     │── OR create new user  │
+  │                    │                     │── signAccessToken()   │
+  │                    │                     │                       │
+  │◀── redirect to /auth/oauth-callback ────│                       │
+  │    ?token=<jwt>    │                     │                       │
+  │                    │                     │                       │
+  │── OAuthCallback.tsx processes token ────▶│                       │
+  │   stores JWT       │── GET /auth/me ────▶│                       │
+  │                    │◀── user profile ────│                       │
+  │                    │── GET /permissions ─▶│                       │
+  │                    │◀── permissions ─────│                       │
+  │◀── /dashboard ────│                     │                       │
+```
+
+### Security Notes
+
+- CSRF protection via random `state` parameter — backend generates state, sets it as an httpOnly cookie, includes in Google URL; callback verifies cookie matches returned state
+- Google ID tokens are verified using `google-auth-library` (`verifyIdToken`) which checks signature, audience (client ID), issuer (`accounts.google.com`), and token expiry
+- OAuth-only accounts have empty `passwordHash` (`''`) — `bcrypt.compare` will always fail, so password and PIN login are effectively disabled for these users
+- Existing email accounts are auto-linked to Google on first OAuth sign-in — `oauth_provider` and `oauth_provider_id` are set on the existing user record
+- The `oauth_provider_id` is the Google `sub` claim — a stable, unique identifier for the Google account
+- Frontend redirects use `window.location.href` (not React Router) to perform a full browser navigation to Google's consent page
+- The `frontendOrigin` for the callback redirect defaults to `https://mcp.softaware.net.za` — configurable via `FRONTEND_ORIGIN` env var
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GOOGLE_CLIENT_ID` | `''` | Google OAuth2 client ID from Google Cloud Console |
+| `GOOGLE_CLIENT_SECRET` | `''` | Google OAuth2 client secret |
+| `GOOGLE_CALLBACK_URL` | `/api/v1/auth/google/callback` | OAuth callback URL (relative or absolute) |
+
+### Verification Status
+
+- ✅ `ensureOAuthColumns()` adds columns and index on module load
+- ✅ `GET /auth/google` returns consent URL with state cookie
+- ✅ `GET /auth/google/callback` exchanges code, verifies state, creates/links user, redirects with JWT
+- ✅ `POST /auth/google/token` verifies ID token, creates/links user, returns JWT
+- ✅ OAuth user creation transaction includes contact, team, team_member, user_roles, activation_key
+- ✅ Existing email accounts auto-linked on first Google sign-in
+- ✅ OAuthCallback.tsx processes token, fetches profile, sets store state, navigates to dashboard
+- ✅ Google Sign-In button renders on both AuthPage.tsx login and register forms
+- ✅ Google Sign-In button renders on Login.tsx (legacy)
+- ✅ Backend redirect URL (`/auth/oauth-callback`) matches frontend route in App.tsx
+- ✅ `google-auth-library` already installed in package.json (v10.6.1)
 
 ---
 
@@ -1022,7 +1156,7 @@ If implementing the recommended fixes, follow this migration order:
 
 | Enhancement | Priority | Effort | Description |
 |------------|----------|--------|-------------|
-| OAuth2/SSO | 🟡 MEDIUM | HIGH | Support Google, Microsoft, SAML login |
+| ~~OAuth2/SSO~~ | ~~🟡 MEDIUM~~ | ~~HIGH~~ | ~~Support Google, Microsoft, SAML login~~ — **Google OAuth2 implemented in v2.0.0** (Microsoft + SAML remain future work) |
 | Passkey/WebAuthn | 🟢 LOW | HIGH | FIDO2 passwordless authentication |
 | Session Management UI | 🟡 MEDIUM | MEDIUM | Show active sessions, allow remote logout |
 | Login Audit Log | 🟡 MEDIUM | LOW | Log all login attempts with IP, user agent, result |

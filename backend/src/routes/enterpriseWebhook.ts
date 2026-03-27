@@ -15,9 +15,10 @@ import { normalizeInboundPayload, formatOutboundPayload, type VisitorLocation } 
 import axios from 'axios';
 import { env } from '../config/env.js';
 import { getSecret } from '../services/credentialVault.js';
-import * as packageService from '../services/packages.js';
+
 import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 import { chatCompletion, chatCompletionWithVision, glmChat, type ChatMessage as RouterChatMessage, type VisionChatMessage } from '../services/assistantAIRouter.js';
+import { checkVisionAccess } from '../middleware/packageEnforcement.js';
 
 const router = express.Router();
 
@@ -320,33 +321,10 @@ router.post('/:endpointId', async (req, res) => {
       }
     }
 
-    // 2b. Package enforcement — if endpoint is linked to a contact, check their package
+    // 2b. Package enforcement removed — pricing is now static via config/tiers.ts
     let contactPackageId: number | null = null;
     if (config.contact_id) {
-      // Check contact is active
-      const contactRows = await packageService.getContactPackages(config.contact_id);
-      // getContactPackages JOINs contacts — if no rows, contact may not exist or no package
-      const activeSub = contactRows.find((s: any) => s.status === 'ACTIVE' || s.status === 'TRIAL');
-
-      if (!activeSub) {
-        console.log(`[Webhook] Contact ${config.contact_id} has no active package — blocking`);
-        return res.status(403).json({
-          error: 'NO_ACTIVE_PACKAGE',
-          message: 'This endpoint is linked to a contact with no active package subscription.'
-        });
-      }
-
-      if (activeSub.credits_balance <= 0) {
-        console.log(`[Webhook] Contact ${config.contact_id} has no credits — blocking`);
-        return res.status(402).json({
-          error: 'INSUFFICIENT_CREDITS',
-          message: 'This endpoint has exhausted its credit allocation. Please top up or upgrade.',
-          balance: 0
-        });
-      }
-
-      contactPackageId = activeSub.id;
-      console.log(`[Webhook] Contact ${config.contact_id} package OK (${activeSub.package_name}) — balance: ${activeSub.credits_balance}`);
+      contactPackageId = config.contact_id;
     }
 
     // 3. Normalize the inbound payload (extract message from WhatsApp/Slack/etc.)
@@ -359,12 +337,28 @@ router.post('/:endpointId', async (req, res) => {
       });
     }
 
-    // ── Kone Solutions: detect vision request (files/images in payload) ──
-    const isKone = config.client_id === 'kone_solutions';
+    // ── Detect vision request (files/images in payload) ──
+    // Vision is only available for Advanced+ packages (hard gate).
+    // Previously hardcoded to kone_solutions — now package-driven.
+    const isKone = config.client_id === 'kone_solutions'; // Legacy: Kone-specific cost tracking + off-peak routing
     const inboundFiles: Array<{ mimeType: string; dataBase64: string }> = incomingPayload.files || [];
-    const isVisionRequest = inboundFiles.length > 0
+    let isVisionRequest = inboundFiles.length > 0
       && inboundFiles.some((f: any) => f.dataBase64 && f.mimeType?.startsWith('image'));
     const fileCount = inboundFiles.length;
+
+    // ── Vision hard gate: check package tier before processing any files ──
+    if (isVisionRequest && config.contact_id) {
+      const visionCheck = await checkVisionAccess(config.contact_id);
+      if (!visionCheck.allowed) {
+        console.log(`[Webhook] Vision blocked for endpoint ${endpointId} (${visionCheck.packageSlug}): ${visionCheck.reason}`);
+        // Don't reject the request — just strip files and proceed as text-only
+        isVisionRequest = false;
+      }
+    } else if (isVisionRequest && !config.contact_id) {
+      // No contact linked — fall back to checking the endpoint's client_id for legacy support
+      console.log(`[Webhook] Vision request on endpoint ${endpointId} with no contact_id — blocking files (no package to check)`);
+      isVisionRequest = false;
+    }
 
     // 4. Build conversation messages for the LLM
     //    Priority: client-sent history → server-side memory → empty
@@ -425,8 +419,8 @@ router.post('/:endpointId', async (req, res) => {
       && config.llm_tools_config.trim() !== ''
       && config.llm_tools_config.trim() !== '[]';
 
-    // ── Kone Solutions: vision requests use the vision router directly ──
-    if (isKone && isVisionRequest) {
+    // ── Vision requests use the vision router directly (package-gated above) ──
+    if (isVisionRequest) {
       // Build vision messages with image attachments
       const visionMessages: VisionChatMessage[] = [
         { role: 'system', content: config.llm_system_prompt },
@@ -444,7 +438,7 @@ router.post('/:endpointId', async (req, res) => {
       const offPeak = isOffPeak();
       const visionTier = offPeak ? 'free' : 'paid';
       routingReason = offPeak ? 'off-peak-ollama-vision' : 'paid-vision-cascade';
-      console.log(`[Webhook:Kone] Vision request (${fileCount} file(s)), tier=${visionTier}, SAST hour=${getSASTHour()}`);
+      console.log(`[Webhook:Vision] Vision request (${fileCount} file(s)), tier=${visionTier}, SAST hour=${getSASTHour()}`);
 
       try {
         const visionResult = await chatCompletionWithVision(visionTier, visionMessages, {
@@ -455,7 +449,7 @@ router.post('/:endpointId', async (req, res) => {
         actualProvider = visionResult.provider;
         actualModel = visionResult.model;
       } catch (err: any) {
-        console.error(`[Webhook:Kone] Vision failed: ${err.message}`);
+        console.error(`[Webhook:Vision] Vision failed: ${err.message}`);
         throw new Error('Vision processing failed for all providers');
       }
     }
@@ -632,23 +626,7 @@ router.post('/:endpointId', async (req, res) => {
 
       // Deduct Kone-specific credits (ZAR-based)
       if (config.contact_id && contactPackageId) {
-        packageService.deductCredits(
-          config.contact_id,
-          costCredits,
-          null,
-          isVisionRequest ? 'KONE_VISION_CV' : 'KONE_TEXT_CV',
-          {
-            endpoint_id: endpointId,
-            provider: actualProvider,
-            model: actualModel,
-            cost_zar: costZAR,
-            file_count: fileCount,
-            routing: routingReason,
-          },
-          `Kone CV ${isVisionRequest ? 'vision' : 'text'}: R${costZAR.toFixed(2)} (${actualProvider}/${actualModel})`
-        ).catch(err => {
-          console.error(`[Webhook:Kone] Credit deduction failed:`, err.message);
-        });
+        // packageService.deductCredits removed
       }
 
       logAnonymizedChat(endpointId, normalized.text, aiResponse, {
@@ -679,16 +657,7 @@ router.post('/:endpointId', async (req, res) => {
 
     // 8b. Deduct credits (async, non-blocking — don't hold up the response)
     if (config.contact_id && contactPackageId) {
-      packageService.deductCredits(
-        config.contact_id,
-        10, // TEXT_CHAT base cost
-        null,
-        'ENTERPRISE_WEBHOOK',
-        { endpoint_id: endpointId, provider: actualProvider, model: actualModel },
-        `Enterprise webhook: ${config.client_name}`
-      ).catch(err => {
-        console.error(`[Webhook ${endpointId}] Credit deduction failed:`, err.message);
-      });
+      // packageService.deductCredits removed
     }
 
     // 9. Anonymized telemetry (fire-and-forget)

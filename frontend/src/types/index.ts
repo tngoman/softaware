@@ -202,6 +202,8 @@ export interface Quotation {
   quotation_total?: number;
   quotation_discount?: number;
   quotation_notes?: string;
+  terms_type?: 'ppe' | 'web';
+  qty_label?: 'qty' | 'hours';
   quotation_status?: number;
   quotation_user_id?: number;
   quotation_time?: number;
@@ -252,6 +254,40 @@ export interface Invoice {
   items?: InvoiceItem[];
 }
 
+export interface PurchaseOrderItem {
+  item_id?: number;
+  item_po_id?: number;
+  item_product: string;
+  item_qty: number;
+  item_cost: number;
+  item_price: number;
+  item_subtotal: number;
+  item_discount?: number;
+  item_vat?: number;
+}
+
+export interface PurchaseOrder {
+  po_id?: number;
+  po_number?: string;
+  po_contact_id: number;
+  po_invoice_id?: number;
+  po_amount?: number;
+  po_subtotal?: number;
+  po_vat?: number;
+  po_total?: number;
+  po_date?: string;
+  po_due_date?: string;
+  po_status?: number; // 0=draft, 1=sent, 2=received, 3=cancelled
+  po_user_id?: number;
+  po_notes?: string;
+  contact_name?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  contact_vat?: string;
+  contact_address?: string;
+  items?: PurchaseOrderItem[];
+}
+
 export interface User {
   id: number;
   username: string;
@@ -262,6 +298,7 @@ export interface User {
   is_admin: boolean;
   is_staff?: boolean;
   is_active: boolean;
+  ai_developer_tools_granted?: boolean | number;
   created_at?: string;
   updated_at?: string;
   // Role and permission data
@@ -338,6 +375,7 @@ export interface Software {
   external_live_url?: string;
   external_test_url?: string;
   external_mode?: 'live' | 'development' | 'test';
+  linked_codebase?: string;
   order_number?: number;
   created_by?: string;
   created_by_name?: string;

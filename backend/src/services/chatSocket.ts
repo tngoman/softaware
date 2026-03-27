@@ -50,6 +50,19 @@ export function initChatSocket(httpServer: HTTPServer, existingIO?: IOServer): I
 
   chatNs = io.of('/chat');
 
+  // ── Reset stale presence on startup ───────────────────
+  // After a server restart all sockets are gone, but user_presence rows may
+  // still say 'online'. Mark everyone offline so pushToOfflineMembers
+  // correctly sends FCM push to disconnected mobile users.
+  db.execute(
+    `UPDATE user_presence SET status = 'offline', last_seen_at = NOW(), socket_ids = '[]'
+     WHERE status != 'offline'`,
+  ).then((affected) => {
+    if (affected > 0) console.log(`[ChatSocket] Startup: reset ${affected} stale presence row(s) to offline`);
+  }).catch((err) => {
+    console.error('[ChatSocket] Startup: failed to reset stale presence:', err);
+  });
+
   // ── Auth middleware — verify JWT ──────────────────────
   chatNs.use(async (socket, next) => {
     try {

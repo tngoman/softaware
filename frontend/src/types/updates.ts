@@ -24,9 +24,7 @@ export interface UpdateClient {
   is_blocked: number;
   blocked_at: string | null;
   blocked_reason: string | null;
-  user_name: string | null;
-  user_id: string | null;
-  active_page: string | null;
+  // v4: user_name, user_id, active_page have been REMOVED (replaced by anonymous metadata.usage)
   ai_sessions_active: number | null;
   ai_model: string | null;
   force_logout: number;
@@ -35,11 +33,24 @@ export interface UpdateClient {
   cpu_usage: number | null;
   memory_usage: number | null;
 
+  // v4: Privacy / retention columns
+  retention_hint: string | null;     // "24h"|"7d"|"30d"|"90d"
+  ip_masked: number;                 // 1 = masked_ip is canonical, ip_address is NULL
+  masked_ip: string | null;          // last-octet-zeroed IP stored here when masking active
+
   // Computed fields from backend JOIN
   software_name: string | null;
   last_update_version: string | null;
   seconds_since_heartbeat: number | null;
   status: ClientStatus;
+  error_count: number;
+}
+
+/* ── v4 Anonymous Usage Metadata ─────────────────────────── */
+export interface UsageMetadata {
+  session_duration?: number;       // seconds since session start
+  active_module?: string;          // generic module slug, NO entity IDs
+  feature_usage?: Record<string, number>; // aggregate click/view counters
 }
 
 /* ── Error Report (from error_reports table) ──────────────── */
@@ -63,6 +74,10 @@ export interface ErrorReport {
   source: string | null;
   ip_address: string | null;
   created_at: string;
+
+  // v4: retention / expiry
+  retention_hint: string | null;   // "24h"|"7d"|"30d"|"90d"
+  expires_at: string | null;       // computed datetime when this record should be purged
 
   // Joined fields
   software_name?: string;
@@ -116,4 +131,20 @@ export interface ClientActionPayload {
   action: ClientAction;
   blocked_reason?: string;
   server_message?: string;
+}
+
+/* ── Client Error (from client_errors table) ──────────────── */
+export interface ClientError {
+  id: number;
+  error_type: string;
+  error_level: 'error' | 'warning' | 'notice';
+  error_message: string;
+  error_file: string | null;
+  error_line: number | null;
+  error_trace: string | null;
+  occurrences: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  is_cleared: number;
+  error_hash: string;
 }

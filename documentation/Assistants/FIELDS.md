@@ -1,7 +1,7 @@
 # Assistants Module — Database Schema
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -48,6 +48,9 @@
 | personality_flare | TEXT | NULLABLE | User-editable personality & tone text — shown in staff assistant GUI |
 | is_staff_agent | TINYINT(1) | NOT NULL, DEFAULT 0 | 1 = internal staff sandbox assistant |
 | custom_greeting | TEXT | NULLABLE | Custom greeting message for the assistant |
+| proactive_greeting | TEXT | NULLABLE | **NEW (v2.4.0):** Tooltip text shown near chat button to invite visitors |
+| proactive_delay | INT | NOT NULL, DEFAULT 5 | **NEW (v2.4.0):** Seconds before proactive tooltip appears (1–30) |
+| theme_color | VARCHAR(7) | NULLABLE | **NEW (v2.4.0):** Hex color for widget theme (e.g., `#667eea`) |
 | voice_style | VARCHAR(50) | NULLABLE | Preferred TTS voice style hint for mobile |
 | preferred_model | VARCHAR(100) | NULLABLE | Override Ollama model for this assistant |
 | is_primary | TINYINT(1) | NOT NULL, DEFAULT 0 | 1 = default mobile assistant for this user |
@@ -71,6 +74,7 @@
 - ID generated as `"assistant-" + Date.now()` for client assistants, `"staff-assistant-" + Date.now()` for staff agents
 - On creation, `knowledge_categories` populated with persona-based checklist from `personaTemplates.ts`
 - `data` JSON column mirrors the individual columns in camelCase — `parseAssistantRow()` reads JSON first, falls back to columns
+- **Widget config columns (v2.4.0):** `custom_greeting`, `proactive_greeting`, `proactive_delay`, `theme_color` are stored both in the JSON `data` column (camelCase) and as dedicated columns. `parseAssistantRow()` checks `parsed.themeColor || row.theme_color || undefined` etc.
 - `pages_indexed` synced from `COUNT(*) FROM ingestion_jobs WHERE status='completed'` during ingestion
 - On DELETE: `ingestion_jobs` for this assistant are also deleted; sqlite-vec vectors optionally cleared via `clearKnowledge` query param
 - **Staff agents** (`is_staff_agent = 1`): Max 1 per user. `core_instructions` hidden from GUI (superadmin-only). `personality_flare` editable by staff. Tier forced to `paid`. Tools injected dynamically by role at runtime.

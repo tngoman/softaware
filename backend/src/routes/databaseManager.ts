@@ -16,6 +16,10 @@ const router = Router();
 router.use(requireAuth, requireDeveloper);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYS_DIR = path.resolve(__dirname, '..', '..', 'keys');
+const EXPORTS_DIR = path.resolve(__dirname, '..', '..', 'db-exports');
+
+// Ensure exports directory exists
+if (!fs.existsSync(EXPORTS_DIR)) fs.mkdirSync(EXPORTS_DIR, { recursive: true });
 
 /* ═══════════════════════════════════════════════════════════════
    Database Manager Routes — admin-only, execute SQL queries
@@ -54,6 +58,14 @@ interface ConnectionBody {
   row?: Record<string, any>;
   where?: Record<string, any>;
   primaryKeys?: string[];
+}
+
+// ── Allowed SQL filter operators (prevents operator injection) ──
+const ALLOWED_OPERATORS = new Set(['=', '!=', '<>', '<', '>', '<=', '>=', 'LIKE', 'NOT LIKE', 'REGEXP', 'IS NULL', 'IS NOT NULL', 'IN']);
+
+/** Validate an identifier (table/column name) contains only safe chars */
+function isSafeIdentifier(name: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_ .\-]*$/.test(name);
 }
 
 // ── SSH Tunnel ──────────────────────────────────────────────
@@ -180,14 +192,53 @@ async function withMSSQL<T>(body: ConnectionBody, fn: (pool: any) => Promise<T>)
 // ROUTES
 // ═══════════════════════════════════════════════════════════════
 
+// ── Helper: check if current user is admin ──────────────────
+async function isAdminUser(req: Request): Promise<boolean> {
+  const userId = (req as AuthRequest).userId;
+  if (!userId) return false;
+  const row = await db.queryOne<{ is_admin: number }>('SELECT is_admin FROM users WHERE id = ?', [userId]);
+  return !!row?.is_admin;
+}
+
 // ── Shared Connections CRUD ─────────────────────────────────
 
-/** GET /connections — list all saved connections (shared across all users) */
-router.get('/connections', async (_req: Request, res: Response) => {
+/** GET /connections — list connections visible to current user (admins see all, others see granted) */
+router.get('/connections', async (req: Request, res: Response) => {
   try {
-    const rows = await db.query(
-      'SELECT * FROM db_connections ORDER BY name ASC'
-    );
+    const userId = (req as AuthRequest).userId;
+    const admin = await isAdminUser(req);
+
+    let rows: any[];
+    if (admin) {
+      rows = await db.query('SELECT * FROM db_connections ORDER BY name ASC');
+    } else {
+      rows = await db.query(
+        `SELECT dc.* FROM db_connections dc
+         INNER JOIN db_connection_access dca ON dca.connection_id = dc.id
+         WHERE dca.user_id = ?
+         ORDER BY dc.name ASC`,
+        [userId]
+      );
+    }
+
+    // Fetch access lists for all returned connections
+    const connIds = rows.map((r: any) => r.id);
+    let accessMap: Record<string, any[]> = {};
+    if (connIds.length > 0) {
+      const placeholders = connIds.map(() => '?').join(',');
+      const accessRows = await db.query(
+        `SELECT dca.connection_id, dca.user_id, u.name AS user_name, u.email AS user_email
+         FROM db_connection_access dca
+         JOIN users u ON u.id = dca.user_id
+         WHERE dca.connection_id IN (${placeholders})`,
+        connIds
+      );
+      for (const a of accessRows) {
+        if (!accessMap[a.connection_id]) accessMap[a.connection_id] = [];
+        accessMap[a.connection_id].push({ userId: a.user_id, name: a.user_name, email: a.user_email });
+      }
+    }
+
     const connections = rows.map((r: any) => ({
       id: r.id,
       name: r.name,
@@ -207,6 +258,7 @@ router.get('/connections', async (_req: Request, res: Response) => {
       createdBy: r.created_by,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      accessUsers: accessMap[r.id] || [],
     }));
     res.json({ success: true, connections });
   } catch (err: any) {
@@ -214,14 +266,21 @@ router.get('/connections', async (_req: Request, res: Response) => {
   }
 });
 
-/** POST /connections — create or update a connection */
+/** POST /connections — create or update a connection (admin only for creation, access user management) */
 router.post('/connections', async (req: Request, res: Response) => {
   try {
-    const { id, name, host, port, user, password, database: dbName, type, tunnel } = req.body;
+    const { id, name, host, port, user, password, database: dbName, type, tunnel, accessUserIds } = req.body;
     if (!name || !host || !type) {
       return res.status(400).json({ success: false, error: 'name, host, and type are required' });
     }
     const userId = (req as AuthRequest).userId || null;
+    const admin = await isAdminUser(req);
+
+    // Only admins can create/edit connections
+    if (!admin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can create or edit connections' });
+    }
+
     const connId = id || crypto.randomUUID();
     const t = tunnel || {};
 
@@ -240,15 +299,34 @@ router.post('/connections', async (req: Request, res: Response) => {
         t.sshUser || '', t.sshPassword || null, t.sshKeyFile || null, userId,
       ]
     );
+
+    // Sync access user list if provided
+    if (Array.isArray(accessUserIds)) {
+      await db.query('DELETE FROM db_connection_access WHERE connection_id = ?', [connId]);
+      for (const uid of accessUserIds) {
+        if (uid) {
+          await db.query(
+            'INSERT IGNORE INTO db_connection_access (id, connection_id, user_id, granted_by) VALUES (?, ?, ?, ?)',
+            [crypto.randomUUID(), connId, uid, userId]
+          );
+        }
+      }
+    }
+
     res.json({ success: true, id: connId });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/** DELETE /connections/:id — remove a connection */
+/** DELETE /connections/:id — remove a connection (admin only) */
 router.delete('/connections/:id', async (req: Request, res: Response) => {
   try {
+    const admin = await isAdminUser(req);
+    if (!admin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can delete connections' });
+    }
+    await db.query('DELETE FROM db_connection_access WHERE connection_id = ?', [req.params.id]);
     await db.query('DELETE FROM db_connections WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err: any) {
@@ -417,11 +495,13 @@ router.post('/table-data', async (req: Request, res: Response) => {
     if (body.type === 'mssql') {
       await withMSSQL(body, async (pool) => {
         const safe = table.replace(/'/g, "''").replace(/\[|\]/g, '');
+        if (!isSafeIdentifier(safe)) return res.status(400).json({ success: false, error: 'Invalid table name' });
         let where = '';
         if (filters.length > 0) {
           const clauses = filters.map(f => {
             const col = `[${f.column.replace(/\]/g, ']]')}]`;
-            const op = f.operator || 'LIKE';
+            const op = (f.operator || 'LIKE').toUpperCase();
+            if (!ALLOWED_OPERATORS.has(op)) throw new Error(`Unsupported filter operator: ${f.operator}`);
             if (op === 'IS NULL') return `${col} IS NULL`;
             if (op === 'IS NOT NULL') return `${col} IS NOT NULL`;
             if (op === 'LIKE') return `CAST(${col} AS NVARCHAR(MAX)) LIKE '%${f.value.replace(/'/g, "''")}%'`;
@@ -439,12 +519,14 @@ router.post('/table-data', async (req: Request, res: Response) => {
     } else {
       await withMySQL(body, async (conn) => {
         const safe = table.replace(/`/g, '');
+        if (!isSafeIdentifier(safe)) return res.status(400).json({ success: false, error: 'Invalid table name' });
         let where = '';
         const whereParams: any[] = [];
         if (filters.length > 0) {
           const clauses = filters.map(f => {
             const col = `\`${f.column.replace(/`/g, '')}\``;
-            const op = f.operator || 'LIKE';
+            const op = (f.operator || 'LIKE').toUpperCase();
+            if (!ALLOWED_OPERATORS.has(op)) throw new Error(`Unsupported filter operator: ${f.operator}`);
             if (op === 'IS NULL') return `${col} IS NULL`;
             if (op === 'IS NOT NULL') return `${col} IS NOT NULL`;
             if (op === 'LIKE') { whereParams.push(`%${f.value}%`); return `${col} LIKE ?`; }
@@ -860,6 +942,213 @@ router.post('/export-csv', async (req: Request, res: Response) => {
     res.send(csv);
   } catch (err: any) {
     res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── GET /developer-users — list users with developer role (for access control UI) ──
+router.get('/developer-users', async (req: Request, res: Response) => {
+  try {
+    const admin = await isAdminUser(req);
+    if (!admin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can manage database access' });
+    }
+    const users = await db.query(
+      `SELECT DISTINCT u.id, u.name, u.email
+       FROM users u
+       INNER JOIN user_roles ur ON ur.user_id = u.id
+       INNER JOIN roles r ON r.id = ur.role_id
+       WHERE r.slug = 'developer' AND u.isActive = 1
+       ORDER BY u.name ASC, u.email ASC`
+    );
+    res.json({ success: true, users });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /export-database — write SQL dump to server filesystem ──────
+router.post('/export-database', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as ConnectionBody & {
+      exportType?: 'structure' | 'data' | 'structure_and_data';
+      selectedTables?: string[];
+      addDropTable?: boolean;
+      addCreateDatabase?: boolean;
+    };
+    const dbName = body.database;
+    if (!dbName) return res.status(400).json({ success: false, error: 'Database name required' });
+
+    const exportType = body.exportType || 'structure_and_data';
+    const addDropTable = body.addDropTable !== false;
+    const addCreateDatabase = body.addCreateDatabase || false;
+
+    if (body.type === 'mssql') {
+      return res.status(400).json({ success: false, error: 'Database export is currently supported for MySQL only' });
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    const safeDbName = dbName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `${safeDbName}_${exportType}_${timestamp}.sql`;
+    const filepath = path.join(EXPORTS_DIR, filename);
+
+    // Respond immediately with the filename — export runs in background
+    res.json({ success: true, filename, message: 'Export started' });
+
+    // Write to disk incrementally via stream
+    const stream = fs.createWriteStream(filepath, { encoding: 'utf8' });
+
+    const write = (line: string) => new Promise<void>((resolve, reject) => {
+      const ok = stream.write(line + '\n');
+      if (ok) resolve();
+      else stream.once('drain', resolve);
+      stream.once('error', reject);
+    });
+
+    const closeStream = () => new Promise<void>((resolve) => stream.end(resolve));
+
+    try {
+      await withMySQL(body, async (conn) => {
+        await write(`-- Database Export: ${dbName}`);
+        await write(`-- Generated: ${new Date().toISOString()}`);
+        await write(`-- Export type: ${exportType}`);
+        await write('-- --------------------------------------------------------');
+        await write('');
+        await write('SET NAMES utf8mb4;');
+        await write('SET FOREIGN_KEY_CHECKS = 0;');
+        await write('SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";');
+        await write('SET time_zone = "+00:00";');
+        await write('');
+
+        if (addCreateDatabase) {
+          await write(`CREATE DATABASE IF NOT EXISTS \`${dbName.replace(/`/g, '')}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
+          await write(`USE \`${dbName.replace(/`/g, '')}\`;`);
+          await write('');
+        }
+
+        // Get tables
+        let selectedTables = body.selectedTables;
+        if (!selectedTables || selectedTables.length === 0) {
+          const [tableRows] = await conn.query(
+            `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`,
+            [dbName]
+          );
+          selectedTables = (tableRows as any[]).map((r: any) => r.TABLE_NAME);
+        }
+
+        for (const table of selectedTables) {
+          const safeTable = table.replace(/`/g, '');
+          if (!isSafeIdentifier(safeTable)) continue;
+
+          await write('-- --------------------------------------------------------');
+          await write(`-- Table: \`${safeTable}\``);
+          await write('-- --------------------------------------------------------');
+          await write('');
+
+          if (exportType === 'structure' || exportType === 'structure_and_data') {
+            if (addDropTable) {
+              await write(`DROP TABLE IF EXISTS \`${safeTable}\`;`);
+            }
+            const [createRows] = await conn.query(`SHOW CREATE TABLE \`${safeTable}\``);
+            const createSql = (createRows as any[])[0]?.['Create Table'];
+            if (createSql) {
+              await write(createSql + ';');
+              await write('');
+            }
+          }
+
+          if (exportType === 'data' || exportType === 'structure_and_data') {
+            const [rows, fields] = await conn.query(`SELECT * FROM \`${safeTable}\``);
+            const dataRows = rows as any[];
+            if (dataRows.length > 0 && fields && Array.isArray(fields)) {
+              const colNames = fields.map((f: any) => `\`${f.name}\``).join(', ');
+              const batchSize = 100;
+              for (let i = 0; i < dataRows.length; i += batchSize) {
+                const batch = dataRows.slice(i, i + batchSize);
+                const valueRows = batch.map((row: any) => {
+                  const vals = fields.map((f: any) => {
+                    const v = row[f.name];
+                    if (v === null) return 'NULL';
+                    if (typeof v === 'number') return String(v);
+                    if (v instanceof Date) return `'${v.toISOString().slice(0, 19).replace('T', ' ')}'`;
+                    if (Buffer.isBuffer(v)) return `X'${v.toString('hex')}'`;
+                    return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\0/g, '\\0')}'`;
+                  });
+                  return `(${vals.join(', ')})`;
+                });
+                await write(`INSERT INTO \`${safeTable}\` (${colNames}) VALUES`);
+                await write(valueRows.join(',\n') + ';');
+              }
+              await write('');
+            }
+          }
+        }
+
+        await write('SET FOREIGN_KEY_CHECKS = 1;');
+        await write('');
+      });
+    } catch (exportErr: any) {
+      // Write error marker to file so UI can detect failure
+      stream.write(`-- EXPORT FAILED: ${exportErr.message}\n`);
+      console.error('[export-database] Export error:', exportErr);
+    } finally {
+      await closeStream();
+    }
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// ── GET /export-files — list export files on disk ────────────────────
+router.get('/export-files', (_req: Request, res: Response) => {
+  try {
+    if (!fs.existsSync(EXPORTS_DIR)) return res.json({ success: true, files: [] });
+    const files = fs.readdirSync(EXPORTS_DIR)
+      .filter(f => f.endsWith('.sql') && !f.startsWith('.'))
+      .map(f => {
+        const stat = fs.statSync(path.join(EXPORTS_DIR, f));
+        return { name: f, size: stat.size, createdAt: stat.birthtime, modifiedAt: stat.mtime };
+      })
+      .sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+    res.json({ success: true, files });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── GET /export-files/:filename/download — download an export file ────
+router.get('/export-files/:filename/download', (req: Request, res: Response) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    if (!filename.endsWith('.sql')) {
+      return res.status(400).json({ success: false, error: 'Only .sql files can be downloaded' });
+    }
+    const filepath = path.join(EXPORTS_DIR, filename);
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ success: false, error: 'File not found' });
+    }
+    res.setHeader('Content-Type', 'application/sql');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    fs.createReadStream(filepath).pipe(res);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── DELETE /export-files/:filename — delete an export file ───────────
+router.delete('/export-files/:filename', (req: Request, res: Response) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    if (!filename.endsWith('.sql')) {
+      return res.status(400).json({ success: false, error: 'Only .sql files can be deleted' });
+    }
+    const filepath = path.join(EXPORTS_DIR, filename);
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ success: false, error: 'File not found' });
+    }
+    fs.unlinkSync(filepath);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

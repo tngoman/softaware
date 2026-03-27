@@ -21,6 +21,7 @@ export interface CompanySettings {
   site_address: string;
   site_logo: string;
   site_quote_terms: string;
+  site_quote_terms_web: string;
   bank_account_name: string;
   bank_name: string;
   bank_account_no: string;
@@ -31,12 +32,14 @@ export interface CompanySettings {
 }
 
 export interface PDFDocData {
-  type: 'invoice' | 'quotation';
+  type: 'invoice' | 'quotation' | 'proforma' | 'credit_note' | 'purchase_order';
   number: string;           // e.g. "QT-2026-001" or "INV-2026-001"
   date: string;
   validUntil?: string;      // quotation valid-until or invoice due-date
   paymentStatus?: number;   // 0=pending, 1=overdue, 2=paid (invoice only)
   notes?: string;
+  termsType?: 'ppe' | 'web';  // PPE or Web Services terms
+  qtyLabel?: 'qty' | 'hours'; // QTY or Hours column header
   subtotal: number;
   discount: number;
   vat: number;
@@ -72,6 +75,7 @@ export async function loadCompanySettings(): Promise<CompanySettings> {
     site_address:      map.site_address      || '',
     site_logo:         map.site_logo         || '',
     site_quote_terms:  map.site_quote_terms  || '',
+    site_quote_terms_web: map.site_quote_terms_web || '',
     bank_account_name: map.bank_account_name || '',
     bank_name:         map.bank_name         || '',
     bank_account_no:   map.bank_account_no   || '',
@@ -84,7 +88,7 @@ export async function loadCompanySettings(): Promise<CompanySettings> {
 
 /* ───────────────────── logo to base64 ──────────────────────── */
 
-async function logoToBase64(filename: string): Promise<string> {
+export async function logoToBase64(filename: string): Promise<string> {
   if (!filename) return '';
   const logoPath = path.join(PUBLIC_DIR, 'assets', 'images', filename);
   try {
@@ -100,6 +104,17 @@ async function logoToBase64(filename: string): Promise<string> {
 /* ───────────────── format helpers ──────────────────────────── */
 
 const R = (n: number): string => `R ${n.toFixed(2)}`;
+
+function formatPdfDate(d: string | Date | undefined): string {
+  if (!d) return 'N/A';
+  const date = typeof d === 'string' ? new Date(d) : d;
+  if (isNaN(date.getTime())) return String(d);
+  const day = String(date.getDate()).padStart(2, '0');
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const month = months[date.getMonth()];
+  const year = date.getFullYear();
+  return `${day} ${month} ${year}`;
+}
 
 function parseNotes(notes?: string): Array<{ key: string; value: string }> {
   if (!notes) return [];
@@ -129,11 +144,16 @@ function statusBadge(status?: number): string {
 /* ──────────────────── build HTML template ──────────────────── */
 
 export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: string): string {
-  const isInvoice = doc.type === 'invoice';
-  const title = isInvoice ? 'INVOICE' : 'QUOTATION';
+  const isInvoice = doc.type === 'invoice' || doc.type === 'proforma';
+  const isCreditNote = doc.type === 'credit_note';
+  const isPurchaseOrder = doc.type === 'purchase_order';
+  const title = doc.type === 'proforma' ? 'PROFORMA INVOICE'
+    : doc.type === 'credit_note' ? 'CREDIT NOTE'
+    : doc.type === 'purchase_order' ? 'PURCHASE ORDER'
+    : doc.type === 'invoice' ? 'TAX INVOICE' : 'QUOTATION';
   const numberLabel = `#${doc.number.includes('-') ? doc.number : padId(doc.number)}`;
-  const dateLabel2 = isInvoice ? 'DUE DATE:' : 'VALID UNTIL:';
-  const clientLabel = isInvoice ? 'Invoice To' : 'Quotation For';
+  const dateLabel2 = isInvoice ? 'DUE DATE:' : isCreditNote ? 'INVOICE REF:' : isPurchaseOrder ? 'DELIVERY DATE:' : 'VALID UNTIL:';
+  const clientLabel = isCreditNote ? 'Credit To' : isPurchaseOrder ? 'Supplier' : isInvoice ? 'Invoice To' : 'Quotation For';
   const vatPct = parseFloat(co.vat_percentage) || 15;
 
   const notesParsed = parseNotes(doc.notes);
@@ -144,10 +164,19 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
   ).join('');
 
   // Build item rows
+  const isHours = (doc.qtyLabel || 'qty') === 'hours';
   const itemRows = doc.items.map(it => {
     const lineVat = it.vatFlag === 1 ? (it.qty * it.price * vatPct / 100) : 0;
     const lineTotal = it.qty * it.price;
-    return `<tr>
+    return isHours
+      ? `<tr>
+      <td style="padding:10px 8px">${it.product}</td>
+      <td style="text-align:right;padding:10px 8px">${R(it.price)}</td>
+      <td style="text-align:center;padding:10px 8px">${it.qty}</td>
+      <td style="text-align:right;padding:10px 8px">${R(lineVat)}</td>
+      <td style="text-align:right;padding:10px 8px">${R(lineTotal)}</td>
+    </tr>`
+      : `<tr>
       <td style="text-align:center;padding:10px 8px">${it.qty}</td>
       <td style="padding:10px 8px">${it.product}</td>
       <td style="text-align:right;padding:10px 8px">${R(it.price)}</td>
@@ -159,10 +188,11 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
   // VAT summary row (invoice only, when there is VAT)
   const vatRow = isInvoice && doc.vat > 0
     ? `<tr style="background:#f0f9ff">
-        <td style="text-align:center;padding:10px 8px"></td>
+        ${isHours ? '' : '<td style="text-align:center;padding:10px 8px"></td>'}
         <td style="padding:10px 8px;font-weight:600">VAT (${vatPct}%)</td>
         <td style="text-align:right;padding:10px 8px"></td>
         <td style="text-align:right;padding:10px 8px"></td>
+        ${isHours ? '<td style="text-align:right;padding:10px 8px"></td>' : ''}
         <td style="text-align:right;padding:10px 8px">${R(doc.vat)}</td>
       </tr>`
     : '';
@@ -188,11 +218,13 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
       </table>
     </div>` : '';
 
-  // Quotation terms section
-  const termsHtml = !isInvoice && (doc.notes || co.site_quote_terms) ? `
+  // Quotation terms section — pick terms based on termsType
+  const selectedTerms = doc.termsType === 'web' ? co.site_quote_terms_web : co.site_quote_terms;
+  const termsContent = selectedTerms || co.site_quote_terms;
+  const termsHtml = !isInvoice && termsContent ? `
     <div style="margin-top:20px;padding:14px 16px;background:#F9FAFB;border-left:4px solid #6B7280;border-radius:4px">
       <div style="font-weight:700;font-size:12px;color:#374151;margin-bottom:8px">TERMS & CONDITIONS</div>
-      <div style="font-size:10px;color:#6B7280;line-height:1.6;white-space:pre-line">${doc.notes || co.site_quote_terms}</div>
+      <div style="font-size:10px;color:#6B7280;line-height:1.6;white-space:pre-line">${termsContent}</div>
     </div>` : '';
 
   return `<!DOCTYPE html>
@@ -252,8 +284,8 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
     ${co.site_vat_no ? `<div class="detail">VAT: ${co.site_vat_no}</div>` : ''}
   </div>
   <div class="dates">
-    <div><span class="label">DATE:</span> <span class="value">${doc.date}</span></div>
-    <div><span class="label">${dateLabel2}</span> <span class="value">${doc.validUntil || 'N/A'}</span></div>
+    <div><span class="label">DATE:</span> <span class="value">${formatPdfDate(doc.date)}</span></div>
+    <div><span class="label">${dateLabel2}</span> <span class="value">${formatPdfDate(doc.validUntil)}</span></div>
   </div>
 </div>
 
@@ -268,17 +300,21 @@ export function buildPdfHtml(doc: PDFDocData, co: CompanySettings, logoDataUri: 
     ${doc.contact.vat ? `<div>VAT: ${doc.contact.vat}</div>` : ''}
     ${doc.contact.address ? `<div>${doc.contact.address}</div>` : ''}
     ${doc.contact.phone ? `<div>${doc.contact.phone}</div>` : ''}
-    ${notesHtml}
   </div>
+  ${notesHtml ? `<div style="margin-top:8px;font-size:10px;color:#374151;line-height:1.6">${notesHtml}</div>` : ''}
 </div>
 
 <!-- ITEMS TABLE -->
 <table class="items">
   <thead>
     <tr>
-      <th style="width:50px">QTY</th>
-      <th>DESCRIPTION</th>
+      ${isHours
+        ? `<th>DESCRIPTION</th>
       <th style="width:100px;text-align:right">UNIT PRICE</th>
+      <th style="width:50px">HOURS</th>`
+        : `<th style="width:50px">QTY</th>
+      <th>DESCRIPTION</th>
+      <th style="width:100px;text-align:right">UNIT PRICE</th>`}
       <th style="width:80px;text-align:right">VAT</th>
       <th style="width:100px;text-align:right">TOTAL</th>
     </tr>

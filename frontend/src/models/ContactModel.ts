@@ -78,4 +78,21 @@ export class ContactModel {
     const response = await api.get<{ success: boolean; filename: string; path: string }>(`/contacts/${id}/statement`);
     return response.data;
   }
+
+  /**
+   * Get expense transactions for a supplier contact
+   */
+  static async getExpenses(id: number) {
+    const response = await api.get<{
+      success: boolean;
+      data: any[];
+      summary: {
+        total_expenses: number;
+        total_vat: number;
+        total_exclusive: number;
+        count: number;
+      };
+    }>(`/contacts/${id}/expenses`);
+    return response.data;
+  }
 }

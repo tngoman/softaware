@@ -39,13 +39,16 @@ import {
   ArrowDownIcon,
   ArrowsUpDownIcon,
   DocumentArrowUpIcon,
+  DocumentArrowDownIcon,
   StopIcon,
   NoSymbolIcon,
   ClipboardDocumentIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
-import api from '../../services/api';
+import api, { API_BASE_URL } from '../../services/api';
+import { useAppStore } from '../../store';
 
 /* ═══════════════════════════════════════════════════════════════
    Database Manager — rich admin UI for MySQL & MSSQL
@@ -71,6 +74,13 @@ interface Connection {
   database: string;
   type: 'mysql' | 'mssql';
   tunnel: TunnelConfig;
+  accessUsers?: { userId: string; name: string; email: string }[];
+}
+
+interface DeveloperUser {
+  id: string;
+  name: string;
+  email: string;
 }
 
 interface QueryResult {
@@ -95,7 +105,7 @@ interface SSHKeyInfo {
   size: number;
 }
 
-type MainTab = 'query' | 'browse' | 'structure' | 'info' | 'processes' | 'status' | 'import';
+type MainTab = 'query' | 'browse' | 'structure' | 'info' | 'processes' | 'status' | 'import' | 'export';
 
 const connPayload = (c: Connection, extra?: Record<string, any>) => ({
   host: c.host, port: c.port, user: c.user, password: c.password,
@@ -109,9 +119,11 @@ const ConnectionDialog: React.FC<{
   open: boolean;
   onClose: () => void;
   connection: Connection | null;
-  onSave: (conn: Connection) => void;
+  onSave: (conn: Connection, accessUserIds: string[]) => void;
   sshKeys: SSHKeyInfo[];
-}> = ({ open, onClose, connection, onSave, sshKeys }) => {
+  isAdmin: boolean;
+  developerUsers: DeveloperUser[];
+}> = ({ open, onClose, connection, onSave, sshKeys, isAdmin, developerUsers }) => {
   const emptyTunnel: TunnelConfig = { sshHost: '', sshPort: 22, sshUser: '', sshPassword: '', sshKeyFile: '' };
   const [form, setForm] = useState<Connection>({
     id: '', name: '', host: '', port: 3306,
@@ -119,11 +131,14 @@ const ConnectionDialog: React.FC<{
     tunnel: { ...emptyTunnel },
   });
   const [testingConnection, setTestingConnection] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
+  const [userSearch, setUserSearch] = useState('');
 
   useEffect(() => {
     if (open) {
       if (connection) {
         setForm({ ...connection, tunnel: connection.tunnel || { ...emptyTunnel } });
+        setSelectedUserIds(new Set((connection.accessUsers || []).map(u => u.userId)));
       } else {
         setForm({
           id: crypto.randomUUID?.() || String(Date.now()),
@@ -131,7 +146,9 @@ const ConnectionDialog: React.FC<{
           user: '', password: '', database: '', type: 'mysql',
           tunnel: { ...emptyTunnel, sshKeyFile: sshKeys[0]?.name || '' },
         });
+        setSelectedUserIds(new Set());
       }
+      setUserSearch('');
     }
   }, [open, connection]);
 
@@ -157,14 +174,14 @@ const ConnectionDialog: React.FC<{
     if (!form.name.trim()) { notify.error('Connection name is required'); return; }
     if (!form.tunnel.sshHost.trim()) { notify.error('SSH host is required — all connections must tunnel'); return; }
     if (!form.tunnel.sshKeyFile && !form.tunnel.sshPassword) { notify.error('Select an SSH key file or enter an SSH password'); return; }
-    onSave(form);
+    onSave(form, Array.from(selectedUserIds));
     onClose();
   };
 
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between p-5 border-b bg-gradient-to-r from-picton-blue/5 to-transparent">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-picton-blue/10">
@@ -278,6 +295,69 @@ const ConnectionDialog: React.FC<{
                 className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-picton-blue/30" placeholder="my_database" />
             </div>
           </div>
+
+          {/* User Access Section (admin only) */}
+          {isAdmin && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+              <div className="flex items-center gap-2 mb-1">
+                <UsersIcon className="h-4 w-4 text-blue-600" />
+                <h4 className="text-xs font-bold text-blue-800 uppercase tracking-wider">User Access</h4>
+                <span className="text-[10px] text-blue-500 ml-auto">{selectedUserIds.size} user(s) selected</span>
+              </div>
+              <p className="text-[10px] text-blue-600">
+                Select which developers can access this connection. Only users with the "developer" role are shown.
+                Admin users always have access.
+              </p>
+              {developerUsers.length > 0 && (
+                <input
+                  value={userSearch}
+                  onChange={e => setUserSearch(e.target.value)}
+                  placeholder="Search developers…"
+                  className="w-full px-3 py-1.5 border rounded-lg text-xs bg-white focus:ring-2 focus:ring-blue-300/50"
+                />
+              )}
+              <div className="max-h-40 overflow-y-auto space-y-1">
+                {developerUsers.length === 0 ? (
+                  <p className="text-[10px] text-gray-400 text-center py-2">No developer users found</p>
+                ) : (
+                  developerUsers
+                    .filter(u => {
+                      if (!userSearch.trim()) return true;
+                      const q = userSearch.toLowerCase();
+                      return (u.name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
+                    })
+                    .map(u => (
+                      <label key={u.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-blue-100/50 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedUserIds.has(u.id)}
+                          onChange={() => {
+                            setSelectedUserIds(prev => {
+                              const next = new Set(prev);
+                              if (next.has(u.id)) next.delete(u.id); else next.add(u.id);
+                              return next;
+                            });
+                          }}
+                          className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <span className="text-xs font-medium text-gray-700 block truncate">{u.name || u.email}</span>
+                          {u.name && <span className="text-[10px] text-gray-400 block truncate">{u.email}</span>}
+                        </div>
+                      </label>
+                    ))
+                )}
+              </div>
+              {developerUsers.length > 0 && (
+                <div className="flex items-center gap-2 pt-1 border-t border-blue-100">
+                  <button type="button" onClick={() => setSelectedUserIds(new Set(developerUsers.map(u => u.id)))}
+                    className="text-[10px] text-blue-600 hover:underline">Select all</button>
+                  <button type="button" onClick={() => setSelectedUserIds(new Set())}
+                    className="text-[10px] text-blue-600 hover:underline">Clear all</button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex items-center justify-between pt-2 border-t">
@@ -826,6 +906,9 @@ const TableBrowser: React.FC<{
    Main Database Manager Page
    ═════════════════════════════════════════════════════════════ */
 const DatabaseManager: React.FC = () => {
+  const { user } = useAppStore();
+  const isAdmin = !!user?.is_admin;
+
   // Connections (shared via backend API)
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loadingConnections, setLoadingConnections] = useState(true);
@@ -835,6 +918,9 @@ const DatabaseManager: React.FC = () => {
 
   // SSH keys
   const [sshKeys, setSshKeys] = useState<SSHKeyInfo[]>([]);
+
+  // Developer users (for access control)
+  const [developerUsers, setDeveloperUsers] = useState<DeveloperUser[]>([]);
 
   // Query editor
   const [sql, setSql] = useState('SELECT 1;');
@@ -875,13 +961,18 @@ const DatabaseManager: React.FC = () => {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load SSH keys and shared connections on mount
+  // Load SSH keys, shared connections, and developer users on mount
   useEffect(() => {
     api.get('/database/keys').then(r => setSshKeys(r.data?.keys || [])).catch(() => {});
     api.get('/database/connections')
       .then(r => setConnections(r.data?.connections || []))
       .catch(() => {})
       .finally(() => setLoadingConnections(false));
+    if (isAdmin) {
+      api.get('/database/developer-users')
+        .then(r => setDeveloperUsers(r.data?.users || []))
+        .catch(() => {});
+    }
   }, []);
 
   // Save query history/saved queries to localStorage (per-user preference)
@@ -889,16 +980,14 @@ const DatabaseManager: React.FC = () => {
   useEffect(() => { localStorage.setItem('db_saved_queries', JSON.stringify(savedQueries)); }, [savedQueries]);
 
   // ── Connection ops ────────────────────────────────────────
-  const saveConnection = async (conn: Connection) => {
+  const saveConnection = async (conn: Connection, accessUserIds?: string[]) => {
     try {
-      const res = await api.post('/database/connections', conn);
+      const res = await api.post('/database/connections', { ...conn, accessUserIds });
       const savedId = res.data?.id || conn.id;
       const saved = { ...conn, id: savedId };
-      setConnections(prev => {
-        const idx = prev.findIndex(c => c.id === saved.id);
-        if (idx >= 0) { const u = [...prev]; u[idx] = saved; return u; }
-        return [...prev, saved];
-      });
+      // Refresh connections list to get updated accessUsers from server
+      const refreshRes = await api.get('/database/connections');
+      setConnections(refreshRes.data?.connections || []);
       notify.success('Connection saved');
     } catch (err: any) {
       notify.error(err.response?.data?.error || 'Failed to save connection');
@@ -1136,6 +1225,15 @@ const DatabaseManager: React.FC = () => {
   const [importResult, setImportResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
 
+  // Export database state
+  const [exportType, setExportType] = useState<'structure' | 'data' | 'structure_and_data'>('structure_and_data');
+  const [exportAddDropTable, setExportAddDropTable] = useState(true);
+  const [exportAddCreateDb, setExportAddCreateDb] = useState(false);
+  const [exportSelectedTables, setExportSelectedTables] = useState<Set<string>>(new Set());
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportFiles, setExportFiles] = useState<{ name: string; size: number; createdAt: string; modifiedAt: string }[]>([]);
+  const [exportFilesLoading, setExportFilesLoading] = useState(false);
+
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1166,6 +1264,76 @@ const DatabaseManager: React.FC = () => {
       setImportLoading(false);
     }
   };
+
+  // ── Export database ───────────────────────────────────────
+  const fetchExportFiles = async () => {
+    setExportFilesLoading(true);
+    try {
+      const res = await api.get('/database/export-files');
+      setExportFiles(res.data?.files || []);
+    } catch {
+      // silently ignore
+    } finally {
+      setExportFilesLoading(false);
+    }
+  };
+
+  const handleExportDatabase = async () => {
+    if (!activeConnection || !activeConnection.database) {
+      notify.error('Connect to a database first');
+      return;
+    }
+    setExportLoading(true);
+    try {
+      await api.post('/database/export-database', {
+        ...connPayload(activeConnection),
+        exportType,
+        selectedTables: exportSelectedTables.size > 0 ? Array.from(exportSelectedTables) : undefined,
+        addDropTable: exportAddDropTable,
+        addCreateDatabase: exportAddCreateDb,
+      });
+      notify.success('Export started — file will appear in the list below shortly');
+      // Poll for the new file a few times
+      setTimeout(() => fetchExportFiles(), 3000);
+      setTimeout(() => fetchExportFiles(), 8000);
+      setTimeout(() => fetchExportFiles(), 20000);
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Export failed');
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
+  const handleDeleteExportFile = async (filename: string) => {
+    const r = await Swal.fire({
+      title: 'Delete export file?',
+      text: filename,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      confirmButtonText: 'Delete',
+    });
+    if (!r.isConfirmed) return;
+    try {
+      await api.delete(`/database/export-files/${encodeURIComponent(filename)}`);
+      notify.success('File deleted');
+      fetchExportFiles();
+    } catch (err: any) {
+      notify.error(err.response?.data?.error || 'Delete failed');
+    }
+  };
+
+  // Initialize export table selection when tables change
+  useEffect(() => {
+    if (tables.length > 0) {
+      setExportSelectedTables(new Set(tables.map(t => t.name)));
+    }
+  }, [tables]);
+
+  // Fetch export files when export tab becomes active
+  useEffect(() => {
+    if (mainTab === 'export') fetchExportFiles();
+  }, [mainTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Truncate / Drop table ─────────────────────────────────
   const truncateTable = async (table: string) => {
@@ -1221,10 +1389,12 @@ const DatabaseManager: React.FC = () => {
           {!sidebarCollapsed && (
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <h3 className="text-xs font-bold text-gray-600 uppercase tracking-wider">Connections</h3>
-              <button onClick={() => { setEditingConn(null); setDialogOpen(true); }}
-                className="p-1 rounded hover:bg-gray-200 text-gray-500" title="New Connection">
-                <PlusIcon className="h-3.5 w-3.5" />
-              </button>
+              {isAdmin && (
+                <button onClick={() => { setEditingConn(null); setDialogOpen(true); }}
+                  className="p-1 rounded hover:bg-gray-200 text-gray-500" title="New Connection">
+                  <PlusIcon className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
           )}
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -1235,10 +1405,12 @@ const DatabaseManager: React.FC = () => {
 
         {sidebarCollapsed ? (
           <div className="flex flex-col items-center gap-2 py-3">
-            <button onClick={() => { setSidebarCollapsed(false); setEditingConn(null); setDialogOpen(true); }}
-              className="p-2 rounded-lg hover:bg-gray-200 text-gray-500" title="New Connection">
-              <PlusIcon className="h-4 w-4" />
-            </button>
+            {isAdmin && (
+              <button onClick={() => { setSidebarCollapsed(false); setEditingConn(null); setDialogOpen(true); }}
+                className="p-2 rounded-lg hover:bg-gray-200 text-gray-500" title="New Connection">
+                <PlusIcon className="h-4 w-4" />
+              </button>
+            )}
             {connections.map(conn => (
               <button key={conn.id} onClick={() => handleConnect(conn)}
                 className={`p-2 rounded-lg ${activeConnection?.id === conn.id && connected ? 'bg-emerald-100 text-emerald-600' : 'hover:bg-gray-200 text-gray-400'}`}
@@ -1256,9 +1428,14 @@ const DatabaseManager: React.FC = () => {
             ) : connections.length === 0 ? (
               <div className="text-center py-8 px-4">
                 <ServerStackIcon className="h-8 w-8 text-gray-200 mx-auto mb-2" />
-                <p className="text-xs text-gray-400 mb-2">No connections</p>
-                <button onClick={() => { setEditingConn(null); setDialogOpen(true); }}
-                  className="text-xs text-picton-blue hover:underline">Add connection</button>
+                <p className="text-xs text-gray-400 mb-2">{isAdmin ? 'No connections' : 'No connections available'}</p>
+                {isAdmin && (
+                  <button onClick={() => { setEditingConn(null); setDialogOpen(true); }}
+                    className="text-xs text-picton-blue hover:underline">Add connection</button>
+                )}
+                {!isAdmin && (
+                  <p className="text-[10px] text-gray-300">Ask an admin to grant you access</p>
+                )}
               </div>
             ) : (
               <div className="p-2 space-y-1">
@@ -1277,18 +1454,25 @@ const DatabaseManager: React.FC = () => {
                           <span className="truncate font-medium block">{conn.name}</span>
                           <span className="text-[10px] text-gray-400 truncate block">
                             {conn.type.toUpperCase()} · {conn.tunnel?.sshHost ? '🔒 tunneled' : 'direct'}
+                            {isAdmin && conn.accessUsers && conn.accessUsers.length > 0 && (
+                              <> · <UsersIcon className="h-2.5 w-2.5 inline" /> {conn.accessUsers.length}</>
+                            )}
                           </span>
                         </div>
                       </div>
                       <div className="flex items-center gap-0.5">
-                        <button onClick={(e) => { e.stopPropagation(); setEditingConn(conn); setDialogOpen(true); }}
-                          className="p-1 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600 transition-colors" title="Edit connection">
-                          <PencilSquareIcon className="h-3.5 w-3.5" />
-                        </button>
-                        <button onClick={(e) => { e.stopPropagation(); deleteConnection(conn); }}
-                          className="p-1 rounded hover:bg-red-100 text-gray-400 hover:text-red-500 transition-colors" title="Delete connection">
-                          <TrashIcon className="h-3.5 w-3.5" />
-                        </button>
+                        {isAdmin && (
+                          <>
+                            <button onClick={(e) => { e.stopPropagation(); setEditingConn(conn); setDialogOpen(true); }}
+                              className="p-1 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600 transition-colors" title="Edit connection">
+                              <PencilSquareIcon className="h-3.5 w-3.5" />
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); deleteConnection(conn); }}
+                              className="p-1 rounded hover:bg-red-100 text-gray-400 hover:text-red-500 transition-colors" title="Delete connection">
+                              <TrashIcon className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1503,6 +1687,7 @@ const DatabaseManager: React.FC = () => {
             { key: 'query' as MainTab, label: 'Results', icon: DocumentTextIcon },
             { key: 'browse' as MainTab, label: 'Browse', icon: ListBulletIcon },
             { key: 'info' as MainTab, label: 'Info', icon: InformationCircleIcon },
+            { key: 'export' as MainTab, label: 'Export', icon: DocumentArrowDownIcon },
             { key: 'import' as MainTab, label: 'Import', icon: DocumentArrowUpIcon },
             { key: 'processes' as MainTab, label: 'Processes', icon: CommandLineIcon },
             { key: 'status' as MainTab, label: 'Server', icon: Cog6ToothIcon },
@@ -1641,6 +1826,199 @@ const DatabaseManager: React.FC = () => {
                 </div>
               </div>
             )
+          )}
+
+          {/* ── EXPORT DATABASE TAB ── */}
+          {mainTab === 'export' && (
+            <div className="p-4 max-w-3xl space-y-4">
+              <div className="flex items-center gap-3">
+                <DocumentArrowDownIcon className="h-6 w-6 text-indigo-500" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">Export Database</h3>
+                  <p className="text-xs text-gray-400">Export your database structure and/or data as SQL</p>
+                </div>
+              </div>
+
+              {!connected ? (
+                <div className="flex items-center gap-2 p-4 bg-amber-50 rounded-xl border border-amber-200">
+                  <ExclamationTriangleIcon className="h-5 w-5 text-amber-500" />
+                  <span className="text-sm text-amber-700">Connect to a database first</span>
+                </div>
+              ) : activeConnection?.type === 'mssql' ? (
+                <div className="flex items-center gap-2 p-4 bg-amber-50 rounded-xl border border-amber-200">
+                  <ExclamationTriangleIcon className="h-5 w-5 text-amber-500" />
+                  <span className="text-sm text-amber-700">Database export is currently supported for MySQL only</span>
+                </div>
+              ) : (
+                <>
+                  {/* Export Type */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600 block mb-2">Export Type</label>
+                    <div className="flex gap-2">
+                      {[
+                        { value: 'structure_and_data' as const, label: 'Structure + Data', desc: 'Full database dump' },
+                        { value: 'structure' as const, label: 'Structure Only', desc: 'CREATE TABLE statements' },
+                        { value: 'data' as const, label: 'Data Only', desc: 'INSERT statements' },
+                      ].map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setExportType(opt.value)}
+                          className={`flex-1 p-3 rounded-xl border-2 text-left transition-all ${
+                            exportType === opt.value
+                              ? 'border-indigo-400 bg-indigo-50'
+                              : 'border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <span className="text-xs font-semibold block">{opt.label}</span>
+                          <span className="text-[10px] text-gray-400">{opt.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Options */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600 block mb-2">Options</label>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={exportAddDropTable}
+                          onChange={e => setExportAddDropTable(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="text-xs text-gray-700">Add DROP TABLE IF EXISTS</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={exportAddCreateDb}
+                          onChange={e => setExportAddCreateDb(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="text-xs text-gray-700">Add CREATE DATABASE + USE statement</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Table Selection */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-semibold text-gray-600">Tables to Export</label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400">{exportSelectedTables.size}/{tables.length} selected</span>
+                        <button type="button" onClick={() => setExportSelectedTables(new Set(tables.map(t => t.name)))}
+                          className="text-[10px] text-indigo-600 hover:underline">Select all</button>
+                        <button type="button" onClick={() => setExportSelectedTables(new Set())}
+                          className="text-[10px] text-indigo-600 hover:underline">Clear all</button>
+                      </div>
+                    </div>
+                    <div className="border rounded-xl max-h-60 overflow-y-auto">
+                      {tables.length === 0 ? (
+                        <p className="text-[10px] text-gray-400 text-center py-4">No tables found</p>
+                      ) : (
+                        <div className="p-2 space-y-0.5">
+                          {tables.map(t => (
+                            <label key={t.name} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={exportSelectedTables.has(t.name)}
+                                onChange={() => {
+                                  setExportSelectedTables(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(t.name)) next.delete(t.name); else next.add(t.name);
+                                    return next;
+                                  });
+                                }}
+                                className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <TableCellsIcon className="h-3.5 w-3.5 text-gray-400" />
+                              <span className="text-xs text-gray-700">{t.name}</span>
+                              {t.rows !== undefined && (
+                                <span className="text-[10px] text-gray-400 ml-auto">{Number(t.rows).toLocaleString()} rows</span>
+                              )}
+                              {t.type === 'VIEW' && <span className="text-[8px] px-1 rounded bg-blue-50 text-blue-500">VIEW</span>}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Export Button */}
+                  <div className="flex items-center gap-3 pt-2">
+                    <button
+                      onClick={handleExportDatabase}
+                      disabled={exportLoading || exportSelectedTables.size === 0}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-500 text-white text-sm font-medium rounded-lg hover:bg-indigo-600 disabled:opacity-50 transition-colors shadow-sm"
+                    >
+                      {exportLoading ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <ArrowDownTrayIcon className="h-4 w-4" />}
+                      {exportLoading ? 'Starting Export…' : 'Start Export'}
+                    </button>
+                    {exportSelectedTables.size === 0 && (
+                      <span className="text-xs text-amber-600">Select at least one table</span>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* ── Export Files List ── */}
+              <div className="border-t pt-4 mt-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-gray-600">Export Files on Server</span>
+                  <button
+                    type="button"
+                    onClick={fetchExportFiles}
+                    disabled={exportFilesLoading}
+                    className="inline-flex items-center gap-1 text-[10px] text-indigo-600 hover:underline"
+                  >
+                    <ArrowPathIcon className={`h-3 w-3 ${exportFilesLoading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+                {exportFilesLoading ? (
+                  <div className="flex items-center justify-center py-6">
+                    <ArrowPathIcon className="h-5 w-5 text-gray-400 animate-spin" />
+                  </div>
+                ) : exportFiles.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-gray-200 py-6 text-center">
+                    <p className="text-xs text-gray-400">No export files yet</p>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border overflow-hidden divide-y">
+                    {exportFiles.map(f => (
+                      <div key={f.name} className="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50">
+                        <DocumentArrowDownIcon className="h-4 w-4 text-gray-400 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-gray-700 truncate">{f.name}</p>
+                          <p className="text-[10px] text-gray-400">
+                            {(f.size / 1024).toFixed(1)} KB &middot; {new Date(f.modifiedAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <a
+                          href={`${API_BASE_URL.replace(/\/$/, '')}/database/export-files/${encodeURIComponent(f.name)}/download`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-medium text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors"
+                        >
+                          <ArrowDownTrayIcon className="h-3 w-3" />
+                          Download
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteExportFile(f.name)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
+                        >
+                          <TrashIcon className="h-3 w-3" />
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
           {/* ── IMPORT SQL TAB ── */}
@@ -1930,6 +2308,8 @@ const DatabaseManager: React.FC = () => {
         connection={editingConn}
         onSave={saveConnection}
         sshKeys={sshKeys}
+        isAdmin={isAdmin}
+        developerUsers={developerUsers}
       />
     </div>
   );

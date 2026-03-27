@@ -15,7 +15,6 @@ import { Case } from '../../types/cases';
 import { DataTable } from '../../components/UI';
 import { formatDate } from '../../utils/formatters';
 import Can from '../../components/Can';
-import { useAppStore } from '../../store';
 import Swal from 'sweetalert2';
 import { notify } from '../../utils/notify';
 
@@ -46,7 +45,6 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
 
 const CasesList: React.FC = () => {
   const navigate = useNavigate();
-  const { user } = useAppStore();
   const [cases, setCases] = useState<Case[]>([]);
   const [loading, setLoading] = useState(false);
   const [pagination, setPagination] = useState({ page: 0, limit: 10, total: 0 });
@@ -66,7 +64,7 @@ const CasesList: React.FC = () => {
     });
     if (result.isConfirmed) {
       try {
-        await CaseModel.adminDelete(caseId);
+        await CaseModel.delete(caseId);
         setCases(prev => prev.filter(c => c.id !== caseId));
         notify.success('Case deleted');
       } catch { notify.error('Failed to delete case'); }
@@ -86,7 +84,7 @@ const CasesList: React.FC = () => {
     });
     if (result.isConfirmed) {
       try {
-        await CaseModel.bulkDelete(cases.map(c => c.id));
+        await Promise.all(cases.map(c => CaseModel.delete(c.id)));
         setCases([]);
         notify.success('All cases deleted');
       } catch { notify.error('Failed to delete cases'); }
@@ -164,15 +162,13 @@ const CasesList: React.FC = () => {
             <EyeIcon className="h-3.5 w-3.5 mr-1" />
             View
           </button>
-          {user?.is_admin && (
-            <button
-              onClick={() => handleDeleteCase(row.original.id, row.original.case_number)}
-              className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
-            >
-              <TrashIcon className="h-3.5 w-3.5 mr-1" />
-              Delete
-            </button>
-          )}
+          <button
+            onClick={() => handleDeleteCase(row.original.id, row.original.case_number)}
+            className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors"
+          >
+            <TrashIcon className="h-3.5 w-3.5 mr-1" />
+            Delete
+          </button>
         </div>
       )
     }
@@ -216,7 +212,7 @@ const CasesList: React.FC = () => {
             <p className="text-white/90">Track and manage your reported issues</p>
           </div>
           <div className="flex items-center gap-3">
-            {user?.is_admin && cases.length > 0 && (
+            {cases.length > 0 && (
               <button
                 onClick={handleDeleteAll}
                 className="inline-flex items-center px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 font-semibold shadow-lg transition-all"

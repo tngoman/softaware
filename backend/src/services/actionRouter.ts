@@ -198,25 +198,83 @@ IMPORTANT: If the customer hasn't provided required information, ask for it firs
 }
 
 /**
- * Parse assistant response to detect tool calls
+ * Parse assistant response to detect tool calls.
+ * Uses brace-counting to extract the first valid {"tool_call": ...} JSON
+ * object, even when the LLM outputs multiple tool calls or mixes text
+ * with JSON in a single response.
  */
 export function parseToolCall(response: string): ToolCall | null {
   try {
-    // Look for JSON in the response
-    const jsonMatch = response.match(/\{[\s\S]*"tool_call"[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (parsed.tool_call && parsed.tool_call.name && parsed.tool_call.arguments) {
-      return {
-        name: parsed.tool_call.name,
-        arguments: parsed.tool_call.arguments
-      };
+    const marker = '"tool_call"';
+    let searchFrom = 0;
+
+    while (searchFrom < response.length) {
+      const markerIdx = response.indexOf(marker, searchFrom);
+      if (markerIdx === -1) break;
+
+      // Walk backwards to find the opening brace before this marker
+      let braceStart = markerIdx - 1;
+      while (braceStart >= 0 && response[braceStart] !== '{') braceStart--;
+      if (braceStart < 0) { searchFrom = markerIdx + 1; continue; }
+
+      // Walk forward counting braces to find the matching close
+      let depth = 0;
+      let braceEnd = -1;
+      for (let i = braceStart; i < response.length; i++) {
+        if (response[i] === '{') depth++;
+        else if (response[i] === '}') depth--;
+        if (depth === 0) { braceEnd = i; break; }
+      }
+      if (braceEnd === -1) { searchFrom = markerIdx + 1; continue; }
+
+      const candidate = response.substring(braceStart, braceEnd + 1);
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed.tool_call?.name && parsed.tool_call?.arguments) {
+          return {
+            name: parsed.tool_call.name,
+            arguments: parsed.tool_call.arguments,
+          };
+        }
+      } catch { /* this candidate wasn't valid JSON, try next */ }
+
+      searchFrom = braceEnd + 1;
     }
+
     return null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Strip all {"tool_call": ...} JSON blocks from a response string,
+ * returning only the conversational text portion.
+ */
+export function stripToolCallJson(response: string): string {
+  const marker = '"tool_call"';
+  let result = response;
+  let safety = 0;
+
+  while (result.indexOf(marker) !== -1 && safety++ < 20) {
+    const markerIdx = result.indexOf(marker);
+    let braceStart = markerIdx - 1;
+    while (braceStart >= 0 && result[braceStart] !== '{') braceStart--;
+    if (braceStart < 0) break;
+
+    let depth = 0;
+    let braceEnd = -1;
+    for (let i = braceStart; i < result.length; i++) {
+      if (result[i] === '{') depth++;
+      else if (result[i] === '}') depth--;
+      if (depth === 0) { braceEnd = i; break; }
+    }
+    if (braceEnd === -1) break;
+
+    result = result.substring(0, braceStart) + result.substring(braceEnd + 1);
+  }
+
+  return result.trim();
 }
 
 /**

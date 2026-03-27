@@ -16,6 +16,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { db } from '../db/mysql.js';
+import { getActivePackageForUser } from '../services/packageResolver.js';
 
 type ResourceStatus = 'active' | 'suspended' | 'demo_expired';
 
@@ -67,6 +68,16 @@ export async function checkAccountStatus(
 
     if (!user) return next(); // User not found — auth middleware will catch this
 
+    const pkg = await getActivePackageForUser(userId);
+    if (!pkg) {
+      res.status(403).json({
+        success: false,
+        error: 'PACKAGE_LINK_REQUIRED',
+        message: 'Your user is not linked to a contact/company with an active package. Please assign a package on /admin/packages.',
+      });
+      return;
+    }
+
     if (user.account_status !== 'active') {
       blockResponse(res, user.account_status);
       return;
@@ -98,8 +109,8 @@ export async function checkAssistantStatus(
     if (!assistantId) return next();
 
     // Single query: join assistants → users to check both levels
-    const row = await db.queryOne<{ assistant_status: ResourceStatus; account_status: ResourceStatus | null }>(
-      `SELECT a.status AS assistant_status, u.account_status
+    const row = await db.queryOne<{ assistant_status: ResourceStatus; account_status: ResourceStatus | null; owner_user_id: string | null }>(
+      `SELECT a.status AS assistant_status, u.account_status, u.id AS owner_user_id
        FROM assistants a
        LEFT JOIN users u ON u.id = a.userId
        WHERE a.id = ?`,
@@ -107,6 +118,18 @@ export async function checkAssistantStatus(
     );
 
     if (!row) return next(); // Assistant not found — route handler will 404
+
+    if (row.owner_user_id) {
+      const pkg = await getActivePackageForUser(row.owner_user_id);
+      if (!pkg) {
+        res.status(403).json({
+          success: false,
+          error: 'PACKAGE_LINK_REQUIRED',
+          message: 'This assistant owner is not linked to a contact/company with an active package.',
+        });
+        return;
+      }
+    }
 
     // Global override: if account is suspended, block regardless
     if (row.account_status && row.account_status !== 'active') {
@@ -145,8 +168,8 @@ export async function checkWidgetStatus(
 
     if (!clientId) return next();
 
-    const row = await db.queryOne<{ widget_status: ResourceStatus; account_status: ResourceStatus | null }>(
-      `SELECT wc.status AS widget_status, u.account_status
+    const row = await db.queryOne<{ widget_status: ResourceStatus; account_status: ResourceStatus | null; owner_user_id: string | null }>(
+      `SELECT wc.status AS widget_status, u.account_status, u.id AS owner_user_id
        FROM widget_clients wc
        LEFT JOIN users u ON u.id = wc.user_id
        WHERE wc.id = ?`,
@@ -154,6 +177,18 @@ export async function checkWidgetStatus(
     );
 
     if (!row) return next(); // Widget not found — route handler will 404
+
+    if (row.owner_user_id) {
+      const pkg = await getActivePackageForUser(row.owner_user_id);
+      if (!pkg) {
+        res.status(403).json({
+          success: false,
+          error: 'PACKAGE_LINK_REQUIRED',
+          message: 'This widget owner is not linked to a contact/company with an active package.',
+        });
+        return;
+      }
+    }
 
     // Global override
     if (row.account_status && row.account_status !== 'active') {

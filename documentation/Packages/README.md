@@ -4,14 +4,14 @@
 Unified package and billing system that replaces the legacy team-scoped credit/subscription model. Everything — consumer plans, enterprise tiers, staff usage, and add-ons — is managed as **packages** tied to **contacts** (companies/clients). The module provides product definitions, contact-level subscriptions with integrated credit balances, per-request credit tracking, a public pricing API for the landing page, and full admin CRUD.
 
 ## Module Scope
-- **Package Definitions**: Product catalog with 4 types — CONSUMER, ENTERPRISE, STAFF, ADDON
+- **Package Definitions**: Product catalog with 4 types — CONSUMER, ENTERPRISE, STAFF, ADDON. Canonical pricing tiers defined in `config/tiers.ts`: Free (R0), Starter (R349), Pro (R699), Advanced (R1,499), Enterprise (Custom)
 - **Contact Subscriptions**: Each contact subscribes to one or more packages via `contact_packages` (combines subscription status + credit balance in a single record)
 - **Credit Operations**: Deduction, allocation, adjustment, and transaction logging — all scoped to contacts, not teams
 - **User ↔ Contact Linking**: `user_contact_link` maps users to their company/contact with roles (OWNER, ADMIN, MEMBER, STAFF)
 - **Public Pricing API**: Unauthenticated endpoint serving landing page pricing from the database
 - **Admin Panel**: Full CRUD for packages, subscription management, credit adjustments, transaction auditing, and user-contact linking
 - **Middleware**: `packageCreditMiddleware` enforces package ownership, credit checks, and post-response deduction on AI endpoints
-- **Seed Data**: 7 packages (Free, Starter, Professional, BYOE, Managed, Architecture & Build, Staff) + Soft Aware as contact ID 1 with Staff package
+- **Seed Data**: 5 canonical tiers (Free, Starter, Pro, Advanced, Enterprise) defined in `config/tiers.ts` + Soft Aware as contact ID 1 with Staff package
 
 ## Key Files (summary)
 
@@ -53,9 +53,10 @@ Unified package and billing system that replaces the legacy team-scoped credit/s
 5. **Middleware Chain**: `packageCreditMiddleware` = `requirePackage` → `requireCredits` → `deductCreditsAfterResponse`. Placed after `requireAuth` on AI endpoints.
 6. **Request Pricing**: Credit costs per request type are defined in `config/credits.ts` (e.g., TEXT_CHAT = 10 base + 0.01/token). The middleware maps URL paths to request types and calculates costs.
 7. **Staff Package**: The internal Staff package is assigned to Soft Aware (contact ID 1, `contact_type=3`). All staff users are linked to this contact via `user_contact_link` with `role=STAFF`.
-8. **Seed-on-Migrate**: Migration 023 creates tables, seeds 7 packages, ensures Soft Aware exists at contact ID 1, and assigns the Staff package with 100,000 credits.
+8. **Seed-on-Migrate**: Migration 023 creates tables, seeds packages, ensures Soft Aware exists at contact ID 1, and assigns the Staff package with 100,000 credits. Canonical consumer tiers (Free/Starter/Pro/Advanced/Enterprise) are defined in `config/tiers.ts`.
 9. **Admin Protection**: `adminPackagesRouter` uses `requireAuth` + `requireAdmin` middleware on all routes.
-10. **Payment Providers**: `contact_packages.payment_provider` supports PAYFAST, YOCO, and MANUAL. Current implementation is MANUAL-only; PayFast/Yoco integration is planned.
+10. **Payment Providers**: `contact_packages.payment_provider` supports PAYFAST, YOCO, and MANUAL. **Yoco is the active payment gateway** (checkout, webhooks, refunds via `routes/yoco.ts` + Svix webhook verification). Stripe has been removed (returns 410 Gone). PayFast is retained for legacy compatibility only.
+11. **Canonical Tier Config**: `config/tiers.ts` is the single source of truth for tier names, ZAR prices, gateway plan IDs, and all per-tier limits (sites, widgets, storage, AI messages, knowledge pages, site types). All pricing displayed on the frontend and enforced in middleware reads from this file.
 
 ## Relationship to Legacy Modules
 

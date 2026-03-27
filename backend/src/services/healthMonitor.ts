@@ -19,8 +19,11 @@ import { db, pool, generateId, toMySQLDate } from '../db/mysql.js';
 import { getAllEndpoints } from './enterpriseEndpoints.js';
 import { Ollama } from 'ollama';
 import { createNotification } from './notificationService.js';
-import { execSync } from 'child_process';
+import { exec as execCb } from 'child_process';
+import { promisify } from 'util';
 import { totalmem, freemem } from 'os';
+
+const exec = promisify(execCb);
 
 // ── Config ──────────────────────────────────────────────────────
 const CHECK_INTERVAL = 60_000;
@@ -202,28 +205,29 @@ function checkMemoryUsage(): HealthCheckResult {
   };
 }
 
-function checkDiskSpace(): HealthCheckResult {
+async function checkDiskSpace(): Promise<HealthCheckResult> {
   try {
-    const output = execSync("df -h / | tail -1 | awk '{print $5}'", { encoding: 'utf-8' }).trim();
-    const usedPct = parseInt(output.replace('%', ''), 10);
+    const { stdout: pctOut } = await exec("df -h / | tail -1 | awk '{print $5}'", { timeout: 5000 });
+    const usedPct = parseInt(pctOut.trim().replace('%', ''), 10);
 
     let status: 'healthy' | 'warning' | 'error' = 'healthy';
     let msg: string | undefined;
     if (usedPct >= DISK_CRIT_PCT) { status = 'error'; msg = `Disk space critical: ${usedPct}% used`; }
     else if (usedPct >= DISK_WARN_PCT) { status = 'warning'; msg = `Disk space elevated: ${usedPct}% used`; }
 
-    const dfDetail = execSync("df -h / | tail -1 | awk '{print $2, $3, $4}'", { encoding: 'utf-8' }).trim().split(/\s+/);
+    const { stdout: detailOut } = await exec("df -h / | tail -1 | awk '{print $2, $3, $4}'", { timeout: 5000 });
+    const dfDetail = detailOut.trim().split(/\s+/);
     return { status, error_message: msg, details: { used_pct: usedPct, total: dfDetail[0], used: dfDetail[1], available: dfDetail[2] } };
   } catch (err: any) {
     return { status: 'unknown', error_message: `Disk check failed: ${err.message}` };
   }
 }
 
-function checkProcessHealth(): HealthCheckResult {
+async function checkProcessHealth(): Promise<HealthCheckResult> {
   try {
     let pm2Restarts = 0;
     try {
-      const pm2Output = execSync('pm2 jlist 2>/dev/null', { encoding: 'utf-8', timeout: 5000 });
+      const { stdout: pm2Output } = await exec('pm2 jlist 2>/dev/null', { timeout: 5000 });
       const pm2Data = JSON.parse(pm2Output);
       const backend = pm2Data.find((p: any) => p.name === 'softaware-backend');
       if (backend) pm2Restarts = backend.pm2_env?.restart_time || 0;
@@ -231,7 +235,7 @@ function checkProcessHealth(): HealthCheckResult {
 
     let orphanedWorkers = 0;
     try {
-      const psOutput = execSync("ps aux | grep 'ingestionWorkerProcess' | grep -v grep | wc -l", { encoding: 'utf-8', timeout: 5000 });
+      const { stdout: psOutput } = await exec("ps aux | grep 'ingestionWorkerProcess' | grep -v grep | wc -l", { timeout: 5000 });
       orphanedWorkers = Math.max(0, parseInt(psOutput.trim(), 10) - 1); // -1 for the legitimate one
     } catch { /* non-fatal */ }
 
@@ -305,7 +309,7 @@ async function checkWorkerProcess(): Promise<HealthCheckResult> {
   try {
     let workerRunning = false;
     try {
-      const psOutput = execSync("ps aux | grep 'ingestionWorkerProcess' | grep -v grep | head -1", { encoding: 'utf-8', timeout: 5000 });
+      const { stdout: psOutput } = await exec("ps aux | grep 'ingestionWorkerProcess' | grep -v grep | head -1", { timeout: 5000 });
       workerRunning = psOutput.trim().length > 0;
     } catch { /* grep returns 1 when no match */ }
 
@@ -535,7 +539,7 @@ export async function runHealthChecks(): Promise<void> {
   await recordHealthCheck('api_errors', 'API Error Rate', apiResult);
 
   // 3. Process health
-  const processResult = checkProcessHealth();
+  const processResult = await checkProcessHealth();
   await recordHealthCheck('process', 'Backend Process', processResult);
 
   // 4. Memory
@@ -543,7 +547,7 @@ export async function runHealthChecks(): Promise<void> {
   await recordHealthCheck('memory', 'Memory Usage', memResult);
 
   // 5. Disk
-  const diskResult = checkDiskSpace();
+  const diskResult = await checkDiskSpace();
   await recordHealthCheck('disk', 'Disk Space', diskResult);
 
   // 6. Authentication

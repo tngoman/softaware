@@ -1,7 +1,7 @@
 # Authentication Module - Overview
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### Purpose
 
-The Authentication module handles user registration, login, JWT token management, multi-method two-factor authentication (TOTP / Email / SMS / Push-to-Approve), alternative auth method fallback, PIN-based quick login (v1.9.0), centralized email service, password reset via OTP, permission resolution, and admin masquerade (login-as-user). It is the entry point for every user session.
+The Authentication module handles user registration, login, JWT token management, multi-method two-factor authentication (TOTP / Email / SMS / Push-to-Approve), alternative auth method fallback, PIN-based quick login (v1.9.0), Google OAuth2 SSO (v2.0.0), centralized email service, password reset via OTP, permission resolution, and admin masquerade (login-as-user). It is the entry point for every user session.
 
 ### Business Value
 
@@ -20,6 +20,7 @@ The Authentication module handles user registration, login, JWT token management
 - **Universal TOTP validation** — Verify endpoint always tries TOTP codes regardless of preferred method (v1.8.0)
 - **6-digit numeric short codes** — Mobile QR challenges include a 6-digit code (e.g., `482916`) for manual entry when scanning fails (v1.8.0)
 - **PIN Quick Login** — Returning users can set a 4-digit PIN for faster re-authentication instead of typing a full password. Bcrypt-hashed, rate-limited (5 attempts → 15-minute lockout), does NOT bypass 2FA (v1.9.0)
+- **Google OAuth2 SSO** — Users can sign in or register with their Google account. Existing accounts with matching email are auto-linked. OAuth-only accounts get an empty password hash (Google-only login). Dual flow: server-side redirect for web + ID token verification for mobile/SPA (v2.0.0)
 - Centralized email service reading SMTP credentials from the `credentials` table (AES-256-GCM encrypted)
 - Self-service password reset via email OTP
 - Role-based permissions resolved at login and available throughout the session
@@ -31,11 +32,11 @@ The Authentication module handles user registration, login, JWT token management
 | Metric | Value |
 |--------|-------|
 | Backend source files | 6 (auth.ts, twoFactor.ts, email.ts, emailService.ts, requireAdmin.ts, adminClientManager.ts) |
-| Backend LOC | ~2,300 (1253 + 1304 + 178 + 256) |
-| Frontend source files | 16 (Login.tsx, LoginPage.tsx, AuthPage.tsx, ForgotPassword.tsx, useAuth.ts, AuthModel.ts, TwoFactorSetup.tsx, PinSetup.tsx, MobileAuthQR.tsx, totp.ts, AccountSettings.tsx, PortalSettings.tsx, SystemSettings.tsx SMTP tab, ClientManager.tsx, Layout.tsx, PortalLayout.tsx) |
-| Frontend LOC | ~4,070 |
-| Total LOC | ~6,370 |
-| API endpoints | 31 (11 core auth + 5 PIN + 11 2FA + 5 email + 2 masquerade — some share base counts) |
+| Backend LOC | ~2,600 (1563 + 1304 + 178 + 256) |
+| Frontend source files | 17 (Login.tsx, LoginPage.tsx, AuthPage.tsx, OAuthCallback.tsx, ForgotPassword.tsx, useAuth.ts, AuthModel.ts, TwoFactorSetup.tsx, PinSetup.tsx, MobileAuthQR.tsx, totp.ts, AccountSettings.tsx, PortalSettings.tsx, SystemSettings.tsx SMTP tab, ClientManager.tsx, Layout.tsx, PortalLayout.tsx) |
+| Frontend LOC | ~4,290 |
+| Total LOC | ~6,890 |
+| API endpoints | 34 (11 core auth + 3 Google OAuth + 5 PIN + 11 2FA + 5 email + 2 masquerade — some share base counts) |
 | Database tables | 7 (users, user_two_factor, user_pins, user_roles, sys_password_resets, email_log, mobile_auth_challenges) |
 
 ---
@@ -50,9 +51,16 @@ The Authentication module handles user registration, login, JWT token management
 │  │ AuthPage.tsx│  │ Login.tsx     │  │ ForgotPassword.tsx│  │ useAuth.ts ││
 │  │ login/reg   │  │ legacy login  │  │ email→OTP→reset  │  │ token check││
 │  │ 2FA verify  │  │ 2FA verify    │  │ → AuthModel      │  │ → /auth/me ││
+│  │ Google SSO  │  │ Google SSO    │  │                  │  │            ││
 │  │ → AuthModel │  │ → AuthModel   │  │                  │  │            ││
 │  └──────┬─────┘  └──────┬───────┘  └────────┬─────────┘  └──────┬─────┘│
 │         │                │                    │                    │      │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │  OAuthCallback.tsx — Google OAuth redirect handler (v2.0.0)     │   │
+│  │  Reads ?token= from URL | Stores JWT | Fetches profile         │   │
+│  │  Sets user/permissions in Zustand | Navigates to /dashboard     │   │
+│  └──────┬───────────────────────────────────────────────────────────┘   │
+│         │                                                                │
 │  ┌──────────────────────────────────────────────────────────────┐       │
 │  │  TwoFactorSetup.tsx — Reusable 2FA management component     │       │
 │  │  Method selection (TOTP/email/SMS) | QR code | OTP verify   │       │
@@ -83,6 +91,7 @@ The Authentication module handles user registration, login, JWT token management
 │  │  resend2FAOtp() | disable2FA() | change2FAMethod()             │    │
 │  │  regenerateBackupCodes() | sendAltOtp() | pollPushStatus()     │    │
 │  │  getMobileAuthQR() | getMobileAuthStatus()                     │    │
+│  │  getGoogleAuthUrl() | loginWithGoogleToken()                   │    │
 │  └──────────────────────────┬──────────────────────────────────────┘    │
 │                              │ Axios (api.ts)                            │
 └──────────────────────────────┼───────────────────────────────────────────┘
@@ -107,6 +116,10 @@ The Authentication module handles user registration, login, JWT token management
 │  │  DELETE /pin         — requireAuth → remove PIN                │    │
 │  │  POST /pin/verify    — public → email+PIN login → JWT/2FA     │    │
 │  │  GET  /pin/check/:e  — public → check if email has PIN        │    │
+│  │  ── Google OAuth2 SSO (v2.0.0) ─────────────────────────────── │    │
+│  │  GET  /google        — public → Google consent URL             │    │
+│  │  GET  /google/callback — public → exchange code → JWT redirect │    │
+│  │  POST /google/token  — public → verify ID token → JWT         │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
@@ -210,6 +223,30 @@ The Authentication module handles user registration, login, JWT token management
 9. "Not you?" link clears stored email and shows standard email+password form
 
 > **Note:** PIN login does NOT bypass 2FA. If 2FA is enabled, the full 2FA flow still runs after PIN verification. The PIN is bcrypt-hashed on the server (never stored in plaintext). Rate limiting is per-user (not per-IP).
+
+### Login with Google OAuth (v2.0.0)
+
+**Web Flow (Redirect):**
+1. User clicks "Continue with Google" button on AuthPage.tsx or Login.tsx
+2. Frontend calls `AuthModel.getGoogleAuthUrl()` → `GET /auth/google` → returns Google consent URL
+3. Browser redirects to Google consent screen (`window.location.href = url`)
+4. User authorizes the application on Google
+5. Google redirects to `GET /auth/google/callback` with authorization code
+6. Backend exchanges code for tokens, verifies ID token, extracts email + name + Google ID
+7. Backend looks up user by `oauth_provider='google'` + `oauth_provider_id`
+8. If not found, checks by email — if existing user, links Google to their account (`UPDATE oauth_provider`)
+9. If no user exists, creates a new user account in a transaction (user, contact, team, team_member, user_roles, activation_key) with empty `passwordHash` (OAuth-only)
+10. Backend issues JWT, redirects to `${frontendOrigin}/auth/oauth-callback?token=<jwt>`
+11. `OAuthCallback.tsx` reads the token from URL, stores in localStorage, fetches user profile via `/auth/me`, fetches permissions, sets Zustand state, navigates to `/dashboard`
+
+**Mobile/SPA Flow (Token):**
+1. Mobile app obtains a Google ID token from Google Sign-In SDK
+2. App calls `POST /auth/google/token` with `{ id_token: '...' }`
+3. Backend verifies the ID token using `google-auth-library`, extracts email + name + Google ID
+4. Same user lookup/creation logic as redirect flow (steps 7-9)
+5. Returns `{ token: '<jwt>', user: {...} }` — mobile app stores and uses directly
+
+> **Note:** OAuth-only accounts (created via Google login) have an empty `passwordHash` and cannot use password login or PIN login. Existing accounts with matching email are automatically linked to Google on first Google sign-in. The `google-auth-library` package handles all token verification.
 
 ### Login (With 2FA)
 
@@ -433,6 +470,7 @@ Admin            Frontend               Backend                Database
 | **Universal TOTP Validation** | (v1.8.0) Verify endpoint always attempts TOTP code validation regardless of `preferred_method`. Users can enter TOTP codes even when email/SMS is their preferred method. |
 | **Mobile QR Short Codes** | (v1.8.0) Mobile auth challenges include 6-digit numeric codes (`482916` format) for manual entry when QR scanning fails. Compatible with mobile app's numeric input field. Stored in `short_code` column of `mobile_auth_challenges`. |
 | **PIN Quick Login** | (v1.9.0) Returning users can set a 4-digit numeric PIN for faster re-authentication. Bcrypt-hashed (10 rounds). Rate-limited: 5 failed attempts → 15-minute lockout. Does NOT bypass 2FA. Issues 30-day JWT. Frontend detects returning user via `last_login_email` in localStorage, auto-shows PIN pad. 5 new endpoints + `user_pins` table. |
+| **Google OAuth2 SSO** | (v2.0.0) Sign in or register with Google account. Dual flow: server-side redirect (web) + ID token verification (mobile/SPA). Auto-links existing accounts by email. OAuth-only accounts get empty passwordHash. 3 new endpoints (`GET /auth/google`, `GET /auth/google/callback`, `POST /auth/google/token`). Uses `google-auth-library` for token verification. CSRF protection via state cookie on redirect flow. New `oauth_provider` + `oauth_provider_id` columns on `users` table (auto-migrated by `ensureOAuthColumns()`). Frontend: Google Sign-In button on AuthPage.tsx + Login.tsx, OAuthCallback.tsx redirect handler. |
 | **2FA Role Enforcement** | Staff/admin cannot disable 2FA. Clients can enable/disable freely. Frontend TwoFactorSetup component adapts UI based on `isStaffOrAdmin` prop |
 | **2FA Backup Codes** | 10 random 8-char hex codes, SHA-256 hashed storage, single-use; password required to regenerate |
 | **Centralized Email Service** | `emailService.ts` — reads SMTP from `credentials` table (AES-256-GCM encrypted); fallback to env vars; caches nodemailer transporter; logs to `email_log` table |
@@ -458,6 +496,7 @@ Admin            Frontend               Backend                Database
 | **qrcode** | QR code generation for TOTP 2FA setup |
 | **jsonwebtoken** | JWT signing/verification |
 | **nodemailer** | SMTP email transport (used by emailService.ts) |
+| **google-auth-library** | (v2.0.0) Google OAuth2 client — generates consent URLs, exchanges authorization codes, verifies ID tokens. Used by 3 OAuth endpoints in auth.ts |
 | **smsService.ts** | SMS sending via SMSPortal REST API (used by 2FA and auth login) |
 | **firebaseService.ts** | FCM push notifications via `sendPushToUser()` (used by push-to-approve 2FA, v1.7.0) |
 | **fcm_tokens table** | FCM device tokens registered by mobile app — used to send push notifications |
@@ -505,6 +544,10 @@ Admin            Frontend               Backend                Database
 | PIN does not bypass 2FA (v1.9.0) | PIN login with 2FA enabled still requires full 2FA verification (same flow as password login) |
 | PIN check does not reveal email existence (v1.9.0) | `GET /pin/check/:email` returns `has_pin: false` for non-existent emails |
 | PIN vague error messages (v1.9.0) | "Invalid email or PIN" — same generic message for wrong email or wrong PIN (no user enumeration) |
+| Google OAuth CSRF protection (v2.0.0) | Redirect flow uses a random state parameter set as an httpOnly cookie — verified on callback to prevent CSRF attacks |
+| Google ID token verification (v2.0.0) | `google-auth-library` verifies token signature, audience (client ID), issuer, and expiry — prevents forged tokens |
+| OAuth account auto-linking (v2.0.0) | Existing accounts with matching email are automatically linked to Google — no duplicate accounts created |
+| OAuth-only accounts secured (v2.0.0) | OAuth-only users get empty `passwordHash` (`''`), preventing password/PIN login — they can only authenticate via Google |
 
 ### 🔴 Security Considerations
 
@@ -557,6 +600,11 @@ Admin            Frontend               Backend                Database
 | PIN setup returns "Incorrect password" | Wrong password entered during PIN setup | Password confirmation failed — re-enter current account password |
 | `user_pins` table not created | Collation mismatch between `users.id` and FK | Run `ensurePinTable()` — table uses `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` on `user_id` column to match `users.id` collation |
 | PIN pad not showing on login page | No `last_login_email` stored, or user has no PIN | PIN pad only appears for returning users with a stored email + active PIN |
+| "Google OAuth not configured" from `/auth/google` | `GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` not set in environment | Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env` file |
+| Google Sign-In button redirects but callback fails | `GOOGLE_CALLBACK_URL` mismatch or not registered in Google Cloud Console | Ensure callback URL in `.env` matches the Authorized Redirect URI in Google Console (default: `/api/v1/auth/google/callback`) |
+| Google login creates duplicate account | User signed up with password first, then Google with different email | Auto-linking only works when Google email matches existing account email |
+| "Sign-in Failed" on OAuthCallback page | Backend error during code exchange or user creation | Check backend logs; verify Google credentials are valid and not expired |
+| Google button not appearing on login page | Frontend not updated to v2.0.0 | Update frontend files: AuthPage.tsx, Login.tsx must include Google Sign-In button |
 
 ---
 

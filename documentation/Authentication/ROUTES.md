@@ -1,7 +1,7 @@
 # Authentication Module - API Routes
 
-**Version:** 1.9.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.0.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -9,7 +9,7 @@
 
 | Metric | Value |
 |--------|-------|
-| **Total endpoints** | 31 |
+| **Total endpoints** | 34 |
 | **Base URL** | `https://api.softaware.net.za` |
 | **Auth router mount** | `/auth` |
 | **2FA router mount** | `/auth/2fa` |
@@ -35,7 +35,10 @@
 | 10 | GET | /auth/pin/status | JWT | **NEW v1.9.0** Check if current user has PIN |
 | 11 | POST | /auth/pin/set | JWT | **NEW v1.9.0** Set/update 4-digit PIN (requires password) |
 | 12 | DELETE | /auth/pin | JWT | **NEW v1.9.0** Remove user's PIN |
-| 13 | POST | /auth/2fa/setup | JWT | Setup 2FA (TOTP / email / SMS) |
+| 13 | GET | /auth/google | None | **NEW v2.0.0** Get Google OAuth consent URL |
+| 14 | GET | /auth/google/callback | None | **NEW v2.0.0** Exchange auth code → JWT redirect |
+| 15 | POST | /auth/google/token | None | **NEW v2.0.0** Verify Google ID token → JWT |
+| 16 | POST | /auth/2fa/setup | JWT | Setup 2FA (TOTP / email / SMS) |
 | 9 | POST | /auth/2fa/verify-setup | JWT | Verify code, enable 2FA, get backup codes |
 | 10 | POST | /auth/2fa/verify | None (temp_token) | Verify 2FA during login (always tries TOTP first, v1.8.0) |
 | 11 | POST | /auth/2fa/send-otp | None (temp_token) | Resend OTP for email/SMS 2FA |
@@ -544,7 +547,142 @@ curl -X DELETE https://api.softaware.net.za/auth/pin \
 
 ---
 
-### 3.13 POST /auth/2fa/setup
+### 3.13 GET /auth/google (v2.0.0)
+
+**Purpose:** Generate a Google OAuth2 consent URL for the web redirect flow. Sets a CSRF state cookie.
+
+**Auth:** None
+
+**Request Body:** None
+
+**curl Example:**
+
+```bash
+curl -X GET https://api.softaware.net.za/auth/google
+```
+
+**Success Response (200):**
+
+```json
+{
+  "success": true,
+  "url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&redirect_uri=...&response_type=code&scope=openid%20email%20profile&state=..."
+}
+```
+
+**Error Responses:**
+
+| Status | Error | When |
+|--------|-------|------|
+| 501 | `Google OAuth not configured` | `GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` not set |
+
+**Business Logic:**
+- Generates a random `state` parameter for CSRF protection
+- Sets state as an httpOnly cookie (`google_oauth_state`)
+- Constructs Google consent URL with scopes: `openid`, `email`, `profile`
+- Redirect URI uses `GOOGLE_CALLBACK_URL` env var (default: `/api/v1/auth/google/callback`)
+- Returns 501 if Google OAuth is not configured (empty client ID/secret)
+
+---
+
+### 3.14 GET /auth/google/callback (v2.0.0)
+
+**Purpose:** Exchange a Google authorization code for tokens, create or link a user account, and redirect to the frontend with a JWT.
+
+**Auth:** None (Google redirect — browser hit)
+
+**Query Parameters:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| code | string | ✅ | Google authorization code |
+| state | string | ✅ | CSRF state parameter (must match cookie) |
+
+**Success Response:** `302 Redirect` to `${frontendOrigin}/auth/oauth-callback?token=<jwt>`
+
+**Error Response:** `302 Redirect` to `${frontendOrigin}/login?error=google_auth_failed`
+
+**Business Logic:**
+1. Verifies `state` parameter matches `google_oauth_state` cookie (CSRF check)
+2. Clears the state cookie
+3. Exchanges authorization code for tokens via `OAuth2Client.getToken()`
+4. Verifies the ID token via `OAuth2Client.verifyIdToken()`
+5. Extracts `sub` (Google user ID), `email`, `name`, `picture` from payload
+6. Looks up user by `oauth_provider='google'` AND `oauth_provider_id=sub`
+7. If found → uses existing user
+8. If not found → looks up user by email
+   - If email exists → links Google to existing account (`UPDATE oauth_provider, oauth_provider_id, avatarUrl`)
+   - If no user → creates new user in a transaction:
+     - Creates contact record
+     - Creates user with empty `passwordHash` (`''`), `oauth_provider='google'`, `oauth_provider_id=sub`
+     - Creates legacy team + team_member for credit scoping
+     - Assigns `viewer` role via `user_roles`
+     - Creates activation key
+9. Signs a JWT via `signAccessToken(userId)`
+10. Redirects browser to `${frontendOrigin}/auth/oauth-callback?token=${jwt}`
+
+**Security Notes:**
+- CSRF protection via state cookie prevents redirect-based attacks
+- Empty `passwordHash` prevents password login for OAuth-only accounts
+- Auto-linking by email only links when the Google email matches exactly
+
+---
+
+### 3.15 POST /auth/google/token (v2.0.0)
+
+**Purpose:** Verify a Google ID token (for mobile/SPA clients) and return a JWT. This is the stateless alternative to the redirect flow.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| id_token | string | ✅ | Google ID token from client-side Google Sign-In |
+
+**curl Example:**
+
+```bash
+curl -X POST https://api.softaware.net.za/auth/google/token \
+  -H 'Content-Type: application/json' \
+  -d '{"id_token":"eyJhbGciOiJSUzI1NiIs..."}'
+```
+
+**Success Response (200):**
+
+```json
+{
+  "success": true,
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "user": {
+    "id": "a1b2c3d4-...",
+    "email": "user@gmail.com",
+    "name": "John Doe",
+    "is_admin": false,
+    "is_staff": false,
+    "role": { "id": 2, "name": "Viewer", "slug": "viewer" },
+    "permissions": [...]
+  }
+}
+```
+
+**Error Responses:**
+
+| Status | Error | When |
+|--------|-------|------|
+| 400 | `id_token is required` | Missing `id_token` in request body |
+| 400 | `Invalid Google token` | Token verification failed (expired, wrong audience, forged) |
+| 501 | `Google OAuth not configured` | `GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` not set |
+
+**Business Logic:**
+- Same user lookup/creation logic as the callback endpoint (steps 5-9)
+- Verifies ID token using `OAuth2Client.verifyIdToken({ idToken, audience: GOOGLE_CLIENT_ID })`
+- Returns JWT + full user object (via `buildFrontendUser()`) directly in the response body
+- No redirect — designed for mobile apps and SPAs that handle tokens programmatically
+
+---
+
+### 3.16 POST /auth/2fa/setup
 
 **Purpose:** Setup 2FA using a chosen method (TOTP, email, or SMS).
 

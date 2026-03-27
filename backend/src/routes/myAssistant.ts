@@ -20,6 +20,7 @@ import { requireAuth, type AuthRequest } from '../middleware/auth.js';
 import { db, toMySQLDate } from '../db/mysql.js';
 import { HttpError, unauthorized, badRequest, notFound, forbidden } from '../utils/httpErrors.js';
 import { resolveUserRole } from '../services/mobileAIProcessor.js';
+import { guardMaxAssistants, TierLimitError } from '../middleware/tierGuard.js';
 import { randomUUID } from 'crypto';
 
 const router = Router();
@@ -46,7 +47,7 @@ router.get('/', requireAuth, async (req: AuthRequest, res) => {
 
     const assistants = await db.query<Record<string, any>>(
       `SELECT id, name, description, personality, personality_flare,
-              primary_goal, custom_greeting, voice_style, preferred_model,
+              primary_goal, custom_greeting, voice_style, tts_voice, preferred_model,
               status, tier, pages_indexed, is_staff_agent, is_primary,
               business_type, website, knowledge_categories,
               created_at, updated_at
@@ -78,7 +79,7 @@ router.get('/:id', requireAuth, async (req: AuthRequest, res) => {
 
     const assistant = await db.queryOne<Record<string, any>>(
       `SELECT id, name, description, personality, personality_flare,
-              primary_goal, custom_greeting, voice_style, preferred_model,
+              primary_goal, custom_greeting, voice_style, tts_voice, preferred_model,
               status, tier, pages_indexed, is_staff_agent, is_primary,
               business_type, website, knowledge_categories,
               created_at, updated_at
@@ -124,6 +125,9 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
       }
     }
 
+    // ── Tier limit check (applies to both staff and clients) ──────────
+    await guardMaxAssistants(userId);
+
     const {
       name,
       description,
@@ -132,6 +136,7 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
       primary_goal,
       custom_greeting,
       voice_style,
+      tts_voice,
       preferred_model,
       business_type,
       website,
@@ -155,15 +160,15 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
     await db.execute(
       `INSERT INTO assistants
         (id, userId, name, description, personality, personality_flare,
-         primary_goal, custom_greeting, voice_style, preferred_model,
+         primary_goal, custom_greeting, voice_style, tts_voice, preferred_model,
          business_type, website, is_staff_agent, is_primary,
          tier, status, pages_indexed, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', 'active', 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', 'active', 0, ?, ?)`,
       [
         id, userId, name.trim(), description || null,
         personality || 'professional', personality_flare || null,
         primary_goal || null, custom_greeting || null,
-        voice_style || null, preferred_model || null,
+        voice_style || null, tts_voice || 'nova', preferred_model || null,
         business_type || (isStaff ? 'Internal' : null), website || null,
         isStaff ? 1 : 0,
         (isStaff || isFirstAssistant) ? 1 : 0,
@@ -173,7 +178,7 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
 
     const created = await db.queryOne<Record<string, any>>(
       `SELECT id, name, description, personality, personality_flare,
-              primary_goal, custom_greeting, voice_style, preferred_model,
+              primary_goal, custom_greeting, voice_style, tts_voice, preferred_model,
               status, tier, is_staff_agent, is_primary,
               business_type, website, created_at, updated_at
        FROM assistants WHERE id = ?`,
@@ -183,7 +188,12 @@ router.post('/', requireAuth, async (req: AuthRequest, res) => {
     console.log(`[MyAssistant] Created ${id} for ${role} user ${userId}`);
     res.status(201).json({ success: true, assistant: created });
   } catch (err) {
-    if (err instanceof HttpError) {
+    if (err instanceof TierLimitError) {
+      res.status(err.status).json({
+        success: false, error: err.message, code: err.code,
+        resource: err.resource, current: err.current, limit: err.limit, tier: err.tier,
+      });
+    } else if (err instanceof HttpError) {
       res.status(err.status).json({ success: false, error: err.message });
     } else {
       console.error('[MyAssistant] CREATE error:', err);
@@ -210,7 +220,7 @@ router.put('/:id', requireAuth, async (req: AuthRequest, res) => {
     // Users can edit these fields (NOT core_instructions — that's backend-only)
     const allowed = [
       'name', 'description', 'personality', 'personality_flare',
-      'primary_goal', 'custom_greeting', 'voice_style', 'preferred_model',
+      'primary_goal', 'custom_greeting', 'voice_style', 'tts_voice', 'preferred_model',
       'business_type', 'website',
     ];
 
@@ -239,7 +249,7 @@ router.put('/:id', requireAuth, async (req: AuthRequest, res) => {
 
     const updated = await db.queryOne<Record<string, any>>(
       `SELECT id, name, description, personality, personality_flare,
-              primary_goal, custom_greeting, voice_style, preferred_model,
+              primary_goal, custom_greeting, voice_style, tts_voice, preferred_model,
               status, tier, is_staff_agent, is_primary,
               business_type, website, created_at, updated_at
        FROM assistants WHERE id = ?`,

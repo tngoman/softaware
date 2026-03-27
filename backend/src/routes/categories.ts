@@ -144,7 +144,7 @@ categoriesRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Respo
     }
 
     // Check if category is in use by pricing items
-    const inUse = await db.queryOne<any>('SELECT COUNT(*) as count FROM pricing WHERE category_id = ?', [id]);
+    const inUse = await db.queryOne<any>('SELECT COUNT(*) as count FROM pricing WHERE category_id = ? AND is_deleted = 0', [id]);
     if (inUse && inUse.count > 0) {
       throw badRequest('Category is in use by pricing items and cannot be deleted');
     }

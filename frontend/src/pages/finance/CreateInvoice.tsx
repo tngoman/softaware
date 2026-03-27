@@ -159,8 +159,19 @@ const CreateInvoice: React.FC = () => {
 
     const item = watchItems[index];
     const qty = Number(item.item_qty) || 0;
-    const price = Number(item.item_price) || 0;
+    const cost = Number(item.item_cost) || 0;
+    let price = Number(item.item_price) || 0;
     const discount = Number(item.item_discount) || 0;
+
+    // Auto-calculate selling price from cost + markup if cost is set
+    if (cost > 0) {
+      const markupPercentage = useCustomMarkup ? customMarkupPercentage : defaultMarkupPercentage;
+      const sellingPrice = cost * (1 + markupPercentage / 100);
+      if (Math.abs(price - sellingPrice) > 0.001 || price === 0) {
+        price = Number(sellingPrice.toFixed(2));
+        setValue(`items.${index}.item_price`, price);
+      }
+    }
 
     let subtotal = qty * price;
 
@@ -170,7 +181,6 @@ const CreateInvoice: React.FC = () => {
     }
 
     // Calculate profit if cost is provided
-    const cost = Number(item.item_cost) || 0;
     const profit = subtotal - (cost * qty);
 
     setValue(`items.${index}.item_subtotal`, subtotal);
@@ -512,14 +522,6 @@ const CreateInvoice: React.FC = () => {
                     />
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => append({ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 })}
-                  className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-picton-blue hover:bg-picton-blue/90 rounded-lg transition-colors"
-                >
-                  <PlusIcon className="h-4 w-4 mr-1" />
-                  Add Item
-                </button>
               </div>
             </div>
           </div>
@@ -562,7 +564,7 @@ const CreateInvoice: React.FC = () => {
                       <input
                         type="number"
                         step="0.01"
-                        {...register(`items.${index}.item_cost`)}
+                        {...register(`items.${index}.item_cost`, { valueAsNumber: true })}
                         placeholder="0.00"
                         className="w-full px-2 py-1 text-sm text-right border border-gray-300 rounded focus:ring-1 focus:ring-picton-blue focus:border-transparent"
                       />
@@ -578,7 +580,7 @@ const CreateInvoice: React.FC = () => {
                       <input
                         type="number"
                         step="0.01"
-                        {...register(`items.${index}.item_price`, { required: true, min: 0 })}
+                        {...register(`items.${index}.item_price`, { valueAsNumber: true, required: true, min: 0 })}
                         placeholder="0.00"
                         className="w-full px-2 py-1 text-sm text-right border border-gray-300 rounded focus:ring-1 focus:ring-picton-blue focus:border-transparent"
                       />
@@ -586,7 +588,7 @@ const CreateInvoice: React.FC = () => {
                     <td className="px-4 py-3">
                       <input
                         type="number"
-                        {...register(`items.${index}.item_qty`, { required: true, min: 1 })}
+                        {...register(`items.${index}.item_qty`, { valueAsNumber: true, required: true, min: 1 })}
                         placeholder="1"
                         className="w-full px-2 py-1 text-sm text-right border border-gray-300 rounded focus:ring-1 focus:ring-picton-blue focus:border-transparent"
                       />
@@ -597,7 +599,7 @@ const CreateInvoice: React.FC = () => {
                         step="0.01"
                         min="0"
                         max="100"
-                        {...register(`items.${index}.item_discount`)}
+                        {...register(`items.${index}.item_discount`, { valueAsNumber: true })}
                         placeholder="0"
                         className="w-full px-2 py-1 text-sm text-right border border-gray-300 rounded focus:ring-1 focus:ring-picton-blue focus:border-transparent"
                       />
@@ -622,6 +624,18 @@ const CreateInvoice: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Add Item Button */}
+          <div className="px-6 py-3 border-t border-gray-200">
+            <button
+              type="button"
+              onClick={() => append({ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 })}
+              className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-picton-blue hover:bg-picton-blue/90 rounded-lg transition-colors"
+            >
+              <PlusIcon className="h-4 w-4 mr-1" />
+              Add Item
+            </button>
           </div>
 
           {/* Totals Section */}

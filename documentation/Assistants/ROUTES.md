@@ -1,7 +1,7 @@
 # Assistants Module — API Routes
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -174,6 +174,10 @@ curl https://api.softaware.net.za/api/assistants
 | personality | string | ✅ | One of: `professional`, `friendly`, `expert`, `casual` |
 | primaryGoal | string | ✅ | Min 1 char |
 | website | string | ❌ | Valid URL |
+| customGreeting | string | ❌ | Custom welcome message for widget chat |
+| proactiveGreeting | string | ❌ | Tooltip text near chat button to invite visitors |
+| proactiveDelay | integer | ❌ | Seconds before proactive tooltip (1–30, default 5) |
+| themeColor | string | ❌ | Hex color for widget theme (e.g., `#667eea`) |
 
 **curl Example:**
 
@@ -186,7 +190,11 @@ curl -X POST https://api.softaware.net.za/api/assistants/create \
     "businessType": "saas",
     "personality": "professional",
     "primaryGoal": "Help customers troubleshoot issues",
-    "website": "https://acme.com"
+    "website": "https://acme.com",
+    "themeColor": "#667eea",
+    "customGreeting": "Welcome to Acme! How can I help?",
+    "proactiveGreeting": "\ud83d\udc4b Need help? I\u0027m here!",
+    "proactiveDelay": 5
   }'
 ```
 
@@ -227,7 +235,7 @@ curl -X POST https://api.softaware.net.za/api/assistants/create \
 
 **Path Params:** `assistantId` — the assistant ID (e.g., `assistant-1709000000000`)
 
-**Request Body:** Same as create (all fields required — full replacement).
+**Request Body:** Same as create (all fields required — full replacement). Additional optional fields: `customGreeting`, `proactiveGreeting`, `proactiveDelay`, `themeColor` (regex-validated: `/^#[0-9a-fA-F]{6}$/`).
 
 **curl Example:**
 

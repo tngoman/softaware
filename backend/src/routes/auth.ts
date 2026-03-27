@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
 
 import { db, generateId, toMySQLDate, type User, type activation_keys } from '../db/mysql.js';
 import { signAccessToken, requireAuth, AuthRequest, getAuth, setAuthCookie, clearAuthCookie } from '../middleware/auth.js';
@@ -11,14 +12,32 @@ import { env } from '../config/env.js';
 import { sendTwoFactorOtp } from '../services/emailService.js';
 import { sendSms } from '../services/smsService.js';
 import { createPushChallenge } from './twoFactor.js';
+import { OAuth2Client } from 'google-auth-library';
 
 export const authRouter = Router();
 
+// ── Rate limiters for auth endpoints ────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                   // 10 attempts per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many login attempts, please try again after 15 minutes' },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,                    // 5 registrations per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many registration attempts, please try again later' },
+});
+
 // ─── Helper: Build frontend-compatible User shape ──────────────────
 export async function buildFrontendUser(userId: string) {
-  const user = await db.queryOne<User & { is_admin?: number; is_staff?: number }>(
-    'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, createdAt, updatedAt FROM users WHERE id = ?',
-    [userId]
+    const user = await db.queryOne<User & { is_admin?: number; is_staff?: number; ai_developer_tools_granted?: number }>(
+      'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, ai_developer_tools_granted, createdAt, updatedAt FROM users WHERE id = ?',
+      [userId]
   );
   if (!user) return null;
 
@@ -76,6 +95,7 @@ export async function buildFrontendUser(userId: string) {
     avatar: (user as any).avatarUrl || null,
     is_admin: isAdmin,
     is_staff: isStaff,
+    ai_developer_tools_granted: !!(user as any).ai_developer_tools_granted,
     is_active: true,
     created_at: user.createdAt,
     updated_at: user.updatedAt,
@@ -145,9 +165,11 @@ const RegisterSchema = z.object({
   company_name: z.string().min(1).max(255).optional(),
   phone: z.string().max(20).optional(),
   address: z.string().max(500).optional(),
+  // Trial activation on signup
+  trial: z.boolean().optional(),
 });
 
-authRouter.post('/register', async (req, res, next) => {
+authRouter.post('/register', registerLimiter, async (req, res, next) => {
   try {
     const input = RegisterSchema.parse(req.body);
 
@@ -181,6 +203,17 @@ authRouter.post('/register', async (req, res, next) => {
         [userId, input.email, userName, passwordHash, contactId, now, now]
       );
 
+      // If trial=true, activate 14-day Starter trial immediately
+      if (input.trial) {
+        const trialExpires = new Date();
+        trialExpires.setDate(trialExpires.getDate() + 14);
+        const trialExpiresStr = trialExpires.toISOString().slice(0, 19).replace('T', ' ');
+        await conn.execute(
+          `UPDATE users SET plan_type = 'starter', has_used_trial = TRUE, trial_expires_at = ? WHERE id = ?`,
+          [trialExpiresStr, userId]
+        );
+      }
+
       // Legacy: create team + membership for credit balance scoping (to be removed)
       await conn.execute(
         'INSERT INTO teams (id, name, createdByUserId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)',
@@ -206,7 +239,8 @@ authRouter.post('/register', async (req, res, next) => {
 
       return { 
         user: { id: userId, email: input.email }, 
-        activationKey: { code: keyCode }
+        activationKey: { code: keyCode },
+        trialActivated: !!input.trial,
       };
     });
 
@@ -215,6 +249,7 @@ authRouter.post('/register', async (req, res, next) => {
       accessToken: token,
       user: { id: result.user.id, email: result.user.email },
       activationKey: result.activationKey.code,
+      trialActivated: result.trialActivated,
     });
   } catch (err) {
     next(err);
@@ -227,7 +262,7 @@ const LoginSchema = z.object({
   rememberMe: z.boolean().optional().default(false),
 });
 
-authRouter.post('/login', async (req, res, next) => {
+authRouter.post('/login', loginLimiter, async (req, res, next) => {
   try {
     const input = LoginSchema.parse(req.body);
     const user = await db.queryOne<User>('SELECT * FROM users WHERE email = ?', [input.email]);
@@ -990,6 +1025,26 @@ authRouter.delete('/webauthn/credentials/:id', requireAuth, async (req: AuthRequ
 //   5. Rate-limited: 5 attempts → 15-minute lockout
 // ═══════════════════════════════════════════════════════════════════
 
+/** Ensure oauth columns exist on users table */
+async function ensureOAuthColumns() {
+  try {
+    const [cols] = await db.execute(`SHOW COLUMNS FROM users LIKE 'oauth_provider'`) as any;
+    const rows = Array.isArray(cols) ? cols : [];
+    if (rows.length === 0) {
+      await db.execute(`ALTER TABLE users ADD COLUMN oauth_provider VARCHAR(20) NULL AFTER is_staff`);
+      await db.execute(`ALTER TABLE users ADD COLUMN oauth_provider_id VARCHAR(255) NULL AFTER oauth_provider`);
+      await db.execute(`ALTER TABLE users ADD INDEX idx_oauth (oauth_provider, oauth_provider_id)`);
+      console.log('[OAuth] Added oauth_provider + oauth_provider_id columns to users table');
+    }
+  } catch (e: any) {
+    // Column may already exist — ignore duplicate column errors
+    if (!e.message?.includes('Duplicate column')) {
+      console.warn('[OAuth] column migration:', e.message);
+    }
+  }
+}
+ensureOAuthColumns().catch((e) => console.warn('[OAuth] migration:', e));
+
 /** Ensure user_pins table exists */
 async function ensurePinTable() {
   await db.execute(`
@@ -1248,6 +1303,276 @@ authRouter.get('/pin/check/:email', async (req, res, next) => {
       [user.id],
     );
     res.json({ success: true, data: { has_pin: !!pinRow } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Google OAuth2 — SSO login / registration
+// ═══════════════════════════════════════════════════════════════════════════
+
+const googleClient = new OAuth2Client(
+  env.GOOGLE_CLIENT_ID,
+  env.GOOGLE_CLIENT_SECRET,
+  env.GOOGLE_CALLBACK_URL,
+);
+
+// ─── GET /auth/google — Redirect to Google consent screen ─────────
+authRouter.get('/google', (req, res) => {
+  if (!env.GOOGLE_CLIENT_ID) {
+    return res.status(501).json({ success: false, error: 'Google OAuth not configured' });
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  // Store state in a short-lived cookie for CSRF protection
+  res.cookie('oauth_state', state, { httpOnly: true, maxAge: 5 * 60 * 1000, sameSite: 'lax' });
+
+  const authUrl = googleClient.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['openid', 'email', 'profile'],
+    state,
+    prompt: 'select_account',
+  });
+
+  res.json({ success: true, data: { url: authUrl } });
+});
+
+// ─── GET /auth/google/callback — Exchange code for user session ───
+authRouter.get('/google/callback', async (req, res, next) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || typeof code !== 'string') {
+      throw badRequest('Missing authorization code');
+    }
+
+    // Validate CSRF state
+    const savedState = req.cookies?.oauth_state;
+    if (!state || state !== savedState) {
+      throw badRequest('Invalid OAuth state — possible CSRF');
+    }
+    res.clearCookie('oauth_state');
+
+    // Exchange code for tokens
+    const { tokens } = await googleClient.getToken(code);
+    if (!tokens.id_token) {
+      throw badRequest('Google did not return an ID token');
+    }
+
+    // Verify and decode the ID token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email) {
+      throw badRequest('Google account has no email');
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email.toLowerCase();
+    const name = payload.name || email.split('@')[0];
+    const avatar = payload.picture || null;
+
+    // Check if this Google account is already linked
+    let user = await db.queryOne<User>(
+      'SELECT * FROM users WHERE oauth_provider = ? AND oauth_provider_id = ?',
+      ['google', googleId],
+    );
+
+    if (!user) {
+      // Check if a password-based account with the same email exists
+      user = await db.queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
+
+      if (user) {
+        // Link Google to existing account
+        await db.execute(
+          'UPDATE users SET oauth_provider = ?, oauth_provider_id = ?, avatarUrl = COALESCE(avatarUrl, ?) WHERE id = ?',
+          ['google', googleId, avatar, user.id],
+        );
+      } else {
+        // Create a brand-new OAuth user (mirrors /register flow)
+        const userId = generateId();
+        const teamId = generateId();
+        const memberId = generateId();
+        const keyId = generateId();
+        const now = toMySQLDate(new Date());
+
+        await db.transaction(async (conn) => {
+          // Create contact
+          await conn.execute(
+            `INSERT INTO contacts (company_name, contact_person, email, contact_type, active, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 1, ?, ?)`,
+            [name, name, email, now, now],
+          );
+          const [contactRows] = await conn.execute('SELECT LAST_INSERT_ID() as id');
+          const contactId = (contactRows as any[])[0]?.id;
+
+          // Create user (no password — OAuth only)
+          await conn.execute(
+            'INSERT INTO users (id, email, name, passwordHash, oauth_provider, oauth_provider_id, avatarUrl, contact_id, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [userId, email, name, '', 'google', googleId, avatar, contactId, now, now],
+          );
+
+          // Team + membership
+          await conn.execute(
+            'INSERT INTO teams (id, name, createdByUserId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)',
+            [teamId, name + "'s Team", userId, now, now],
+          );
+          await conn.execute(
+            'INSERT INTO team_members (id, teamId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)',
+            [memberId, teamId, userId, 'OPERATOR', now],
+          );
+
+          // Assign default viewer role
+          const [viewerRole] = await conn.execute('SELECT id FROM roles WHERE slug = ? LIMIT 1', ['viewer']);
+          const rows = viewerRole as any[];
+          if (rows.length > 0) {
+            await conn.execute('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [userId, rows[0].id]);
+          }
+
+          // Create activation key
+          const keyCode = generateActivationKey(email);
+          await conn.execute(
+            `INSERT INTO activation_keys (id, code, tier, isActive, cloudSyncAllowed, vaultAllowed, maxAgents, maxUsers, createdAt, createdByUserId)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [keyId, keyCode, 'PERSONAL', true, true, true, null, 1, now, userId],
+          );
+        });
+
+        user = await db.queryOne<User>('SELECT * FROM users WHERE id = ?', [userId]);
+      }
+    }
+
+    if (!user) {
+      throw badRequest('Failed to create or find user');
+    }
+
+    // Issue JWT + session (same as password login)
+    const token = signAccessToken({ userId: user.id });
+    const cookieMaxAge = 7 * 24 * 60 * 60 * 1000;
+    setAuthCookie(req, res, token, cookieMaxAge);
+    await trackSession(user.id, token, req);
+
+    const frontendUser = await buildFrontendUser(user.id);
+
+    // Redirect to frontend with token (for OAuth redirect flow)
+    const frontendOrigin = env.CORS_ORIGIN !== '*' ? env.CORS_ORIGIN : 'https://mcp.softaware.net.za';
+    res.redirect(`${frontendOrigin}/auth/oauth-callback?token=${encodeURIComponent(token)}`);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/google/token — Verify a Google ID token (for mobile/SPA) ──
+authRouter.post('/google/token', loginLimiter, async (req, res, next) => {
+  try {
+    const { id_token } = req.body;
+    if (!id_token || typeof id_token !== 'string') {
+      throw badRequest('Missing id_token');
+    }
+
+    if (!env.GOOGLE_CLIENT_ID) {
+      return res.status(501).json({ success: false, error: 'Google OAuth not configured' });
+    }
+
+    // Verify the ID token directly (no code exchange needed — mobile/SPA flow)
+    const ticket = await googleClient.verifyIdToken({
+      idToken: id_token,
+      audience: env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email) {
+      throw badRequest('Invalid Google ID token');
+    }
+
+    const googleId = payload.sub;
+    const email = payload.email.toLowerCase();
+    const name = payload.name || email.split('@')[0];
+    const avatar = payload.picture || null;
+
+    // Find or create user (same logic as callback)
+    let user = await db.queryOne<User>(
+      'SELECT * FROM users WHERE oauth_provider = ? AND oauth_provider_id = ?',
+      ['google', googleId],
+    );
+
+    if (!user) {
+      user = await db.queryOne<User>('SELECT * FROM users WHERE email = ?', [email]);
+      if (user) {
+        await db.execute(
+          'UPDATE users SET oauth_provider = ?, oauth_provider_id = ?, avatarUrl = COALESCE(avatarUrl, ?) WHERE id = ?',
+          ['google', googleId, avatar, user.id],
+        );
+      } else {
+        // Create new user
+        const userId = generateId();
+        const teamId = generateId();
+        const memberId = generateId();
+        const keyId = generateId();
+        const now = toMySQLDate(new Date());
+
+        await db.transaction(async (conn) => {
+          await conn.execute(
+            `INSERT INTO contacts (company_name, contact_person, email, contact_type, active, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 1, ?, ?)`,
+            [name, name, email, now, now],
+          );
+          const [contactRows] = await conn.execute('SELECT LAST_INSERT_ID() as id');
+          const contactId = (contactRows as any[])[0]?.id;
+
+          await conn.execute(
+            'INSERT INTO users (id, email, name, passwordHash, oauth_provider, oauth_provider_id, avatarUrl, contact_id, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [userId, email, name, '', 'google', googleId, avatar, contactId, now, now],
+          );
+
+          await conn.execute(
+            'INSERT INTO teams (id, name, createdByUserId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?)',
+            [teamId, name + "'s Team", userId, now, now],
+          );
+          await conn.execute(
+            'INSERT INTO team_members (id, teamId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)',
+            [memberId, teamId, userId, 'OPERATOR', now],
+          );
+
+          const [viewerRole] = await conn.execute('SELECT id FROM roles WHERE slug = ? LIMIT 1', ['viewer']);
+          const rows = viewerRole as any[];
+          if (rows.length > 0) {
+            await conn.execute('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)', [userId, rows[0].id]);
+          }
+
+          const keyCode = generateActivationKey(email);
+          await conn.execute(
+            `INSERT INTO activation_keys (id, code, tier, isActive, cloudSyncAllowed, vaultAllowed, maxAgents, maxUsers, createdAt, createdByUserId)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [keyId, keyCode, 'PERSONAL', true, true, true, null, 1, now, userId],
+          );
+        });
+
+        user = await db.queryOne<User>('SELECT * FROM users WHERE id = ?', [userId]);
+      }
+    }
+
+    if (!user) {
+      throw badRequest('Failed to create or find user');
+    }
+
+    const token = signAccessToken({ userId: user.id });
+    const cookieMaxAge = 7 * 24 * 60 * 60 * 1000;
+    setAuthCookie(req, res, token, cookieMaxAge);
+    await trackSession(user.id, token, req);
+
+    const frontendUser = await buildFrontendUser(user.id);
+
+    res.json({
+      success: true,
+      message: 'Google login successful',
+      data: { token, user: frontendUser },
+      accessToken: token,
+      token,
+      expiresIn: env.JWT_EXPIRES_IN,
+      user: frontendUser,
+    });
   } catch (err) {
     next(err);
   }

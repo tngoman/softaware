@@ -8,7 +8,7 @@
 **Scope**: Full package system replacing legacy team-scoped credit model
 
 #### Database Changes
-- **Created** `packages` table — 7 seeded package definitions (Free, Starter, Professional, BYOE, Managed, Architecture & Build, Staff)
+- **Created** `packages` table — 5 canonical tier definitions (Free, Starter, Pro, Advanced, Enterprise) per `config/tiers.ts`, plus Staff package
 - **Created** `contact_packages` table — contact-to-package subscriptions with credit balances
 - **Created** `package_transactions` table — full credit transaction history
 - **Created** `user_contact_link` table — maps users to contacts (companies)
@@ -40,10 +40,10 @@
 
 ## Known Issues & Limitations
 
-### Payment Integration (Not Yet Implemented)
-- **PayFast/Yoco webhooks**: Payment webhooks are defined in the schema but no actual integration exists yet. All subscriptions are created with `payment_provider = 'MANUAL'`.
-- **No idempotency key**: When payment webhook integration is added, it must include idempotency keys to prevent duplicate credit allocations.
-- **No automated billing**: Monthly subscription renewals and credit top-ups require manual admin action.
+### Payment Integration
+- **Yoco is the active payment gateway**: Checkout, webhooks (Svix 3-header verification), status polling, and refunds are fully implemented via `routes/yoco.ts` and the `yoco*.ts` services. Stripe has been removed (returns 410 Gone).
+- **PayFast**: Legacy integration retained for backward compatibility; not the active path.
+- **No automated billing**: Monthly subscription renewals and credit top-ups still require manual admin action or scheduled job.
 
 ### Notification System (Not Yet Implemented)
 - **Low-balance alerts**: The `low_balance_threshold` and `low_balance_alert_sent` columns exist but no automated notification system is in place.
@@ -112,7 +112,7 @@ ALTER TABLE contacts DROP COLUMN IF EXISTS contact_type;
 
 | Priority | Feature | Estimated Effort |
 |----------|---------|------------------|
-| High | PayFast webhook integration | 2–3 days |
+| High | ~~PayFast webhook integration~~ | ✅ Done (Yoco gateway live) |
 | High | Automated monthly credit allocation (cron job) | 1 day |
 | High | User dashboard credit balance display | 1 day |
 | Medium | Low-balance email notifications | 1–2 days |

@@ -18,6 +18,8 @@ import axios from 'axios';
 import { env } from '../config/env.js';
 import { db, toMySQLDate } from '../db/mysql.js';
 import { ChecklistItem, getDefaultChecklist } from '../config/personaTemplates.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
+import { resolveModelTier, getActivePackageForUser } from './packageResolver.js';
 
 const OLLAMA_API = env.OLLAMA_BASE_URL;
 const CATEGORIZER_MODEL = 'qwen2.5:3b-instruct';
@@ -97,6 +99,10 @@ Return ONLY the JSON object, no other text.`;
     );
 
     const responseText = response.data.response || '';
+
+    logAnonymizedChat('categorizer', prompt.slice(0, 200), responseText.slice(0, 200), {
+      source: 'categorizer', model: CATEGORIZER_MODEL, provider: 'ollama',
+    });
 
     // Extract JSON from response (handle markdown code blocks)
     let jsonStr = responseText;
@@ -238,8 +244,9 @@ export async function getAssistantKnowledgeHealth(assistantId: string): Promise<
     business_type: string;
     pages_indexed: number;
     tier: 'free' | 'paid';
+    userId: string;
   }>(
-    `SELECT knowledge_categories, business_type, pages_indexed, tier FROM assistants WHERE id = ?`,
+    `SELECT knowledge_categories, business_type, pages_indexed, tier, userId FROM assistants WHERE id = ?`,
     [assistantId],
   );
 
@@ -260,16 +267,25 @@ export async function getAssistantKnowledgeHealth(assistantId: string): Promise<
     ).catch(() => {});
   }
 
+  // Resolve model tier from owner's package (pro/advanced/enterprise → 'paid')
+  const modelTier = await resolveModelTier(assistant.userId);
+
+  // Resolve the actual page limit from the owner's package/tier limits
+  let pageLimit = 50; // free default
+  try {
+    const pkg = await getActivePackageForUser(assistant.userId);
+    if (pkg) pageLimit = pkg.limits.maxKnowledgePages;
+  } catch { /* no package — use free default */ }
+
   const checklist = parseStoredChecklist(assistant.knowledge_categories, assistant.business_type);
   const health = calculateHealthScore(checklist);
-  const pageLimit = assistant.tier === 'paid' ? 500 : 50;
   const storageFull = pagesIndexed >= pageLimit;
   const pointsPerItem = checklist.length > 0 ? Math.round(100 / checklist.length) : 0;
 
   return {
     ...health,
     pagesIndexed,
-    tier: assistant.tier,
+    tier: modelTier,
     pageLimit,
     storageFull,
     pointsPerItem,

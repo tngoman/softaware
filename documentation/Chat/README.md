@@ -1,6 +1,6 @@
 # Staff Chat Module
 
-> **Last Updated**: 2026-03-08
+> **Last Updated**: 2026-03-18
 > **Status**: 144/144 tasks complete (100%) — E2E validated (77/77 tests passing)
 > **Total LOC**: ~14,855 across 41 files
 
@@ -46,7 +46,11 @@ Full-featured staff messaging system supporting **1-on-1 DMs** and **group conve
 - **Scheduled calls** — Create/manage scheduled meetings with title, description, recurrence, RSVP tracking, and participant management
 
 ### Notifications & Offline
-- **FCM push notifications** — For offline users, high-priority for calls
+- **FCM push notifications** — For offline users, high-priority for calls. Respects user-level `notifications_enabled` + `push_notifications_enabled` preferences
+- **Stale presence cleanup** — On server restart, all `user_presence` rows are reset to offline so push is never skipped due to stale socket state
+- **iOS background delivery** — APNs payload includes `content-available: 1`, `mutable-content: 1`, `apns-priority: 10` for reliable background wake
+- **Android chat channel** — Chat notifications use dedicated `softaware_chat` channel ID; other notifications use `softaware_default`
+- **Data payload duplication** — `title` and `body` are also sent in the `data` payload so mobile apps receive them even when notification display is suppressed
 - **Service worker** — Background notification handling
 - **DND schedule** — Configurable quiet hours (suppresses push except @mentions)
 - **Custom sounds** — Per-conversation notification sound

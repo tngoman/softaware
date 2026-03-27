@@ -1,24 +1,10 @@
 import express, { Request, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
-import { encryptPassword, decryptPassword } from '../utils/cryptoUtils.js';
-import crypto from 'crypto';
-
-function uuidv4() {
-  return crypto.randomUUID();
-}
+import { encryptPassword } from '../utils/cryptoUtils.js';
+import { TIER_LIMITS, getLimitsForTier, TierName } from '../config/tiers.js';
 
 const router = express.Router();
-
-/**
- * Subscription Tier Management Routes
- * 
- * These endpoints allow users and admins to manage widget subscription tiers:
- * - View current subscription
- * - Upgrade/downgrade tiers
- * - Configure advanced features (tone, lead capture)
- * - View usage statistics
- */
 
 /**
  * GET /api/v1/subscriptions/current
@@ -28,67 +14,69 @@ router.get('/subscriptions/current', requireAuth, async (req: AuthRequest, res: 
   try {
     const userId = req.userId;
 
-    const [rows] = await db.execute(
+    const rows = await db.query<any>(
       `SELECT 
          wc.id,
          wc.website_url,
          wc.subscription_tier,
-         wc.monthly_price,
-         wc.billing_cycle_start,
-         wc.billing_cycle_end,
          wc.messages_this_cycle,
          wc.branding_enabled,
          wc.tone_preset,
          wc.lead_capture_enabled,
          wc.lead_notification_email,
          wc.preferred_model,
-         wc.status,
-         stl.max_pages,
-         stl.max_messages_per_month,
-         stl.lead_capture,
-         stl.tone_control,
-         stl.daily_recrawl,
-         stl.document_uploads
+         wc.status
        FROM widget_clients wc
-       LEFT JOIN subscription_tier_limits stl ON wc.subscription_tier = stl.tier
        WHERE wc.user_id = ?
        ORDER BY wc.created_at DESC`,
       [userId]
-    ) as any;
+    );
 
-    res.json({
-      success: true,
-      subscriptions: rows || []
+    // Enrich each row with its static tier limits
+    const enriched = rows.map((wc: any) => {
+      const limits = getLimitsForTier(wc.subscription_tier);
+      return {
+        ...wc,
+        max_pages: limits.maxKnowledgePages,
+        max_actions_per_month: limits.maxActionsPerMonth,
+        lead_capture: limits.allowedSystemActions.includes('email_capture'),
+        tone_control: true,
+        daily_recrawl: wc.subscription_tier !== 'free',
+        document_uploads: wc.subscription_tier !== 'free',
+      };
     });
 
+    res.json({ success: true, subscriptions: enriched });
   } catch (error) {
     console.error('Error fetching subscriptions:', error);
-    res.status(500).json({
-      error: 'Failed to fetch subscription details'
-    });
+    res.status(500).json({ error: 'Failed to fetch subscription details' });
   }
 });
 
 /**
  * GET /api/v1/subscriptions/tiers
- * Get all available subscription tiers
+ * Get all available subscription tiers — now served from static config
  */
-router.get('/subscriptions/tiers', async (req: Request, res: Response) => {
+router.get('/subscriptions/tiers', async (_req: Request, res: Response) => {
   try {
-    const [rows] = await db.execute(
-      `SELECT * FROM subscription_tier_limits ORDER BY max_messages_per_month ASC`
-    ) as any;
-
-    res.json({
-      success: true,
-      tiers: rows || []
-    });
-
+    const tiers = Object.entries(TIER_LIMITS).map(([key, t]) => ({
+      tier: key,
+      name: t.name,
+      priceZAR: t.priceZAR,
+      maxSites: t.maxSites,
+      maxWidgets: t.maxWidgets,
+      maxStorageBytes: t.maxStorageBytes,
+      maxActionsPerMonth: t.maxActionsPerMonth,
+      allowAutoRecharge: t.allowAutoRecharge,
+      maxKnowledgePages: t.maxKnowledgePages,
+      allowedSiteType: t.allowedSiteType,
+      canRemoveWatermark: t.canRemoveWatermark,
+      hasOmniChannelEndpoints: t.hasOmniChannelEndpoints,
+    }));
+    res.json({ success: true, tiers });
   } catch (error) {
     console.error('Error fetching tiers:', error);
-    res.status(500).json({
-      error: 'Failed to fetch subscription tiers'
-    });
+    res.status(500).json({ error: 'Failed to fetch subscription tiers' });
   }
 });
 
@@ -99,64 +87,40 @@ router.get('/subscriptions/tiers', async (req: Request, res: Response) => {
 router.post('/subscriptions/:clientId/upgrade', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { clientId } = req.params;
-    const { tier, monthlyPrice } = req.body;
+    const { tier } = req.body;
     const userId = req.userId;
 
-    // Verify ownership
-    const [clientRows] = await db.execute(
-      `SELECT * FROM widget_clients WHERE id = ? AND user_id = ?`,
+    const clientRows = await db.query<any>(
+      'SELECT * FROM widget_clients WHERE id = ? AND user_id = ?',
       [clientId, userId]
-    ) as any;
-
+    );
     if (!clientRows || clientRows.length === 0) {
       return res.status(404).json({ error: 'Widget client not found or access denied' });
     }
 
-    // Validate tier
-    const validTiers = ['free', 'starter', 'advanced', 'enterprise'];
+    const validTiers: TierName[] = ['free', 'starter', 'pro', 'advanced', 'enterprise'];
     if (!validTiers.includes(tier)) {
       return res.status(400).json({ error: 'Invalid subscription tier' });
     }
 
-    // Set billing cycle
-    const now = new Date();
-    const cycleStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const cycleEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const limits = getLimitsForTier(tier);
 
-    // Update subscription
     await db.execute(
       `UPDATE widget_clients 
        SET subscription_tier = ?,
            monthly_price = ?,
-           billing_cycle_start = ?,
-           billing_cycle_end = ?,
            messages_this_cycle = 0,
            branding_enabled = CASE WHEN ? = 'free' THEN TRUE ELSE FALSE END,
            status = 'active',
            updated_at = NOW()
        WHERE id = ?`,
-      [
-        tier,
-        monthlyPrice || 0,
-        cycleStart.toISOString().split('T')[0],
-        cycleEnd.toISOString().split('T')[0],
-        tier,
-        clientId
-      ]
+      [tier, typeof limits.priceZAR === 'number' ? limits.priceZAR : 0, tier, clientId]
     );
 
-    res.json({
-      success: true,
-      message: `Successfully upgraded to ${tier} tier`,
-      tier,
-      monthlyPrice
-    });
-
+    res.json({ success: true, message: `Successfully upgraded to ${tier} tier`, tier });
   } catch (error) {
     console.error('Error upgrading subscription:', error);
-    res.status(500).json({
-      error: 'Failed to upgrade subscription'
-    });
+    res.status(500).json({ error: 'Failed to upgrade subscription' });
   }
 });
 
@@ -178,75 +142,36 @@ router.put('/subscriptions/:clientId/config', requireAuth, async (req: AuthReque
       externalApiKey
     } = req.body;
 
-    // Verify ownership and tier
-    const [clientRows] = await db.execute(
-      `SELECT wc.*, stl.tone_control, stl.lead_capture
-       FROM widget_clients wc
-       LEFT JOIN subscription_tier_limits stl ON wc.subscription_tier = stl.tier
-       WHERE wc.id = ? AND wc.user_id = ?`,
+    const clientRows = await db.query<any>(
+      'SELECT * FROM widget_clients WHERE id = ? AND user_id = ?',
       [clientId, userId]
-    ) as any;
-
+    );
     if (!clientRows || clientRows.length === 0) {
       return res.status(404).json({ error: 'Widget client not found or access denied' });
     }
 
     const client = clientRows[0];
+    const limits = getLimitsForTier(client.subscription_tier);
 
-    // Check if tier supports requested features
-    if (leadCaptureEnabled && !client.lead_capture) {
+    if (leadCaptureEnabled && !limits.allowedSystemActions.includes('email_capture')) {
       return res.status(403).json({
-        error: 'Lead capture requires Advanced or Enterprise tier',
-        upgrade: 'Upgrade to Advanced (R899/month) to enable lead capture'
+        error: 'Lead capture requires a higher tier',
+        upgrade: 'Upgrade to enable lead capture'
       });
     }
 
-    if ((tonePreset || customToneInstructions) && !client.tone_control) {
-      return res.status(403).json({
-        error: 'Tone control requires Advanced or Enterprise tier',
-        upgrade: 'Upgrade to Advanced (R899/month) to customize bot personality'
-      });
-    }
-
-    // Build update query
     const updates: string[] = [];
     const values: any[] = [];
 
-    if (tonePreset !== undefined) {
-      updates.push('tone_preset = ?');
-      values.push(tonePreset);
-    }
-
-    if (customToneInstructions !== undefined) {
-      updates.push('custom_tone_instructions = ?');
-      values.push(customToneInstructions);
-    }
-
-    if (leadCaptureEnabled !== undefined) {
-      updates.push('lead_capture_enabled = ?');
-      values.push(leadCaptureEnabled);
-    }
-
-    if (leadNotificationEmail !== undefined) {
-      updates.push('lead_notification_email = ?');
-      values.push(leadNotificationEmail);
-    }
-
-    if (preferredModel !== undefined) {
-      updates.push('preferred_model = ?');
-      values.push(preferredModel);
-    }
-
-    if (externalApiProvider !== undefined) {
-      updates.push('external_api_provider = ?');
-      values.push(externalApiProvider);
-    }
-
+    if (tonePreset !== undefined) { updates.push('tone_preset = ?'); values.push(tonePreset); }
+    if (customToneInstructions !== undefined) { updates.push('custom_tone_instructions = ?'); values.push(customToneInstructions); }
+    if (leadCaptureEnabled !== undefined) { updates.push('lead_capture_enabled = ?'); values.push(leadCaptureEnabled); }
+    if (leadNotificationEmail !== undefined) { updates.push('lead_notification_email = ?'); values.push(leadNotificationEmail); }
+    if (preferredModel !== undefined) { updates.push('preferred_model = ?'); values.push(preferredModel); }
+    if (externalApiProvider !== undefined) { updates.push('external_api_provider = ?'); values.push(externalApiProvider); }
     if (externalApiKey !== undefined) {
-      // Encrypt API key
       const encryptedKey = encryptPassword(externalApiKey);
-      updates.push('external_api_key_encrypted = ?');
-      values.push(encryptedKey);
+      updates.push('external_api_key_encrypted = ?'); values.push(encryptedKey);
     }
 
     if (updates.length === 0) {
@@ -254,22 +179,12 @@ router.put('/subscriptions/:clientId/config', requireAuth, async (req: AuthReque
     }
 
     values.push(clientId);
+    await db.execute(`UPDATE widget_clients SET ${updates.join(', ')}, updated_at = NOW() WHERE id = ?`, values);
 
-    await db.execute(
-      `UPDATE widget_clients SET ${updates.join(', ')}, updated_at = NOW() WHERE id = ?`,
-      values
-    );
-
-    res.json({
-      success: true,
-      message: 'Configuration updated successfully'
-    });
-
+    res.json({ success: true, message: 'Configuration updated successfully' });
   } catch (error) {
     console.error('Error updating config:', error);
-    res.status(500).json({
-      error: 'Failed to update configuration'
-    });
+    res.status(500).json({ error: 'Failed to update configuration' });
   }
 });
 
@@ -282,21 +197,17 @@ router.get('/subscriptions/:clientId/usage', requireAuth, async (req: AuthReques
     const { clientId } = req.params;
     const userId = req.userId;
 
-    // Verify ownership
-    const [clientRows] = await db.execute(
-      `SELECT * FROM widget_clients WHERE id = ? AND user_id = ?`,
+    const clientRows = await db.query<any>(
+      'SELECT * FROM widget_clients WHERE id = ? AND user_id = ?',
       [clientId, userId]
-    ) as any;
-
+    );
     if (!clientRows || clientRows.length === 0) {
       return res.status(404).json({ error: 'Widget client not found or access denied' });
     }
 
-    // Get usage stats
-    const [usageRows] = await db.execute(
+    const usageRows = await db.query<any>(
       `SELECT 
-         cycle_start,
-         cycle_end,
+         cycle_start, cycle_end,
          SUM(message_count) as total_messages
        FROM widget_usage_logs
        WHERE client_id = ?
@@ -304,10 +215,9 @@ router.get('/subscriptions/:clientId/usage', requireAuth, async (req: AuthReques
        ORDER BY cycle_start DESC
        LIMIT 6`,
       [clientId]
-    ) as any;
+    );
 
-    // Get lead stats
-    const [leadRows] = await db.execute(
+    const leadRows = await db.query<any>(
       `SELECT 
          COUNT(*) as total_leads,
          COUNT(DISTINCT visitor_email) as unique_visitors,
@@ -316,7 +226,7 @@ router.get('/subscriptions/:clientId/usage', requireAuth, async (req: AuthReques
        WHERE client_id = ?
          AND captured_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
       [clientId]
-    ) as any;
+    );
 
     res.json({
       success: true,
@@ -324,12 +234,9 @@ router.get('/subscriptions/:clientId/usage', requireAuth, async (req: AuthReques
       leads: leadRows && leadRows.length > 0 ? leadRows[0] : null,
       client: clientRows[0]
     });
-
   } catch (error) {
     console.error('Error fetching usage:', error);
-    res.status(500).json({
-      error: 'Failed to fetch usage statistics'
-    });
+    res.status(500).json({ error: 'Failed to fetch usage statistics' });
   }
 });
 
@@ -343,37 +250,27 @@ router.get('/subscriptions/:clientId/leads', requireAuth, async (req: AuthReques
     const userId = req.userId;
     const { limit = 50, offset = 0 } = req.query;
 
-    // Verify ownership
-    const [clientRows] = await db.execute(
-      `SELECT * FROM widget_clients WHERE id = ? AND user_id = ?`,
+    const clientRows = await db.query<any>(
+      'SELECT * FROM widget_clients WHERE id = ? AND user_id = ?',
       [clientId, userId]
-    ) as any;
-
+    );
     if (!clientRows || clientRows.length === 0) {
       return res.status(404).json({ error: 'Widget client not found or access denied' });
     }
 
-    // Get leads
-    const [leadRows] = await db.execute(
-      `SELECT 
-         id,
-         visitor_email,
-         visitor_name,
-         visitor_message,
-         captured_at,
-         notification_sent
+    const leadRows = await db.query<any>(
+      `SELECT id, visitor_email, visitor_name, visitor_message, captured_at, notification_sent
        FROM widget_leads_captured
        WHERE client_id = ?
        ORDER BY captured_at DESC
        LIMIT ? OFFSET ?`,
       [clientId, Number(limit), Number(offset)]
-    ) as any;
+    );
 
-    // Get total count
-    const [countRows] = await db.execute(
-      `SELECT COUNT(*) as total FROM widget_leads_captured WHERE client_id = ?`,
+    const countRows = await db.query<any>(
+      'SELECT COUNT(*) as total FROM widget_leads_captured WHERE client_id = ?',
       [clientId]
-    ) as any;
+    );
 
     res.json({
       success: true,
@@ -382,12 +279,9 @@ router.get('/subscriptions/:clientId/leads', requireAuth, async (req: AuthReques
       limit: Number(limit),
       offset: Number(offset)
     });
-
   } catch (error) {
     console.error('Error fetching leads:', error);
-    res.status(500).json({
-      error: 'Failed to fetch leads'
-    });
+    res.status(500).json({ error: 'Failed to fetch leads' });
   }
 });
 

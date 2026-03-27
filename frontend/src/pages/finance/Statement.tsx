@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { ArrowDownTrayIcon } from '@heroicons/react/24/outline';
-import { ContactModel } from '../../models';
+import { ContactModel, AppSettingsModel } from '../../models';
 import { BackButton } from '../../components/UI';
 import { formatDate } from '../../utils/formatters';
 import { notify } from '../../utils/notify';
+import { getApiBaseUrl } from '../../config/app';
 
 interface Transaction {
   type: 'invoice' | 'payment';
@@ -55,10 +56,21 @@ const Statement: React.FC = () => {
     }
   };
 
-  const downloadPDF = () => {
-    if (id) {
-      ContactModel.downloadStatement(parseInt(id));
-      notify.success('Downloading statement...');
+  const downloadPDF = async () => {
+    if (!id) return;
+    try {
+      setLoading(true);
+      const response = await ContactModel.downloadStatement(parseInt(id));
+      const settings = await AppSettingsModel.get();
+      const baseUrl = (settings as any).site_base_url || getApiBaseUrl();
+      const pdfUrl = `${baseUrl}/${response.path}`;
+      window.open(pdfUrl, '_blank');
+      notify.success('Statement PDF opened in new tab');
+    } catch (error) {
+      console.error('Error downloading statement:', error);
+      notify.error('Failed to download statement');
+    } finally {
+      setLoading(false);
     }
   };
 

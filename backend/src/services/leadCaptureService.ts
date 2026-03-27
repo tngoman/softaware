@@ -13,7 +13,7 @@ function uuidv4() {
  * Detects when the AI widget identifies a sales opportunity and captures
  * visitor contact information, sending real-time notifications to the business owner.
  * 
- * This is a core feature of the "Advanced Assistant" tier (R899-R1,499/month).
+ * This is a core feature of the "Advanced" tier (R1,499/month) and above.
  */
 
 interface LeadCaptureData {

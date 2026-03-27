@@ -596,13 +596,13 @@ softawareTasksRouter.post('/:id/comments', requireAuth, async (req: Request, res
 });
 
 // ─── POST /softaware/software/authenticate ─────────────────────
-// Backwards-compatible stub — no per-user external auth needed anymore
+// API-key auth is now resolved automatically via task_sources.
+// Return success with a synthetic token so the frontend treats it as connected.
 softawareTasksRouter.post('/authenticate', requireAuth, async (_req: Request, res: Response) => {
   return res.json({
     success: true,
-    message: 'No external authentication required. Source API key is used automatically.',
-    token: null,
-    user: null,
+    message: 'Authenticated via stored API key — no manual credentials needed.',
+    token: 'api-key-auth',
   });
 });
 

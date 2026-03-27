@@ -1,7 +1,7 @@
 # Assistants Module — Changelog & Known Issues
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -9,6 +9,7 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-14 | 2.4.0 | Widget customization — inline chat UI (no iframe), theme color picker, proactive greeting toggle, custom welcome message, squircle FAB, cache busting, dark text input; frontend config UI in CreateAssistant.tsx |
 | 2026-03-13 | 2.3.0 | Voice interaction awareness — VOICE INTERACTION section added to STAFF_CORE_DEFAULT and CLIENT_CORE_DEFAULT; AI no longer claims it "can't hear" users or formats responses with markdown when used via mobile voice |
 | 2026-03-12 | 2.2.0 | AI Telemetry — POPIA-compliant anonymized chat analytics, PII sanitization, consent API, frontend consent modal with opt-out for paid users |
 | 2026-03-10 | 2.1.0 | Task tools rewired — 22 tools (up from 4), dual-path architecture (local reads + proxy writes), source-level API keys, full lifecycle support |
@@ -23,6 +24,159 @@
 | 2026-03-04 | 1.2.0 | AI categorization fixes — timeout increase, JSON parsing, knowledge health improvements |
 | 2026-03-02 | 1.1.0 | Widget branding — brand favicon, header bar, powered-by footer |
 | 2026-03-02 | 1.0.0 | Initial documentation — per-assistant dashboard health, delete with KB option |
+
+---
+
+| 2026-03-14 | 2.4.0 | Widget customization — inline chat UI (no iframe), theme color picker, proactive greeting toggle, custom welcome message, squircle FAB, cache busting, dark text input; frontend config UI in CreateAssistant.tsx |
+
+---
+
+## 1.5 v2.4.0 — Widget Customization & Inline Chat UI
+
+**Date:** 2026-03-14  
+**Scope:** Replace iframe-based widget with fully inline DOM chat, add theme color, proactive greeting toggle, custom welcome message, squircle FAB, and frontend configuration UI.
+
+### Summary
+
+The embeddable widget (`GET /api/assistants/widget.js`) was completely rewritten from an iframe-based approach to a fully inline DOM chat UI. This eliminates `X-Frame-Options` / `refused to connect` errors on third-party sites. The widget now supports configurable theme colors, proactive greeting tooltips, custom welcome messages, and an Android-style squircle FAB button. The frontend `CreateAssistant.tsx` wizard gained a "Widget Appearance & Behavior" configuration section with a toggle switch for proactive greetings.
+
+### Changes — Database
+
+| Migration | Table | Column | Type | Default | Purpose |
+|-----------|-------|--------|------|---------|---------|
+| Manual ALTER | assistants | `proactive_greeting` | TEXT NULL | NULL | Tooltip text near chat button |
+| Manual ALTER | assistants | `proactive_delay` | INT NOT NULL | 5 | Seconds before tooltip appears |
+| Manual ALTER | assistants | `theme_color` | VARCHAR(7) NULL | NULL | Hex color for widget gradient |
+
+### Changes — Backend
+
+#### Modified: `src/routes/assistants.ts` (~1,108 → ~1,541 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **`parseAssistantRow()`** | Added `customGreeting`, `proactiveGreeting`, `proactiveDelay`, `themeColor` to both JSON data path and column fallback |
+| **`createAssistantSchema`** | Added `customGreeting` (string, optional), `proactiveGreeting` (string, optional), `proactiveDelay` (int ≥0, optional), `themeColor` (string, optional) |
+| **`updateAssistantSchema`** | Same 4 fields + `themeColor` regex validation (`/^#[0-9a-fA-F]{6}$/`) |
+| **POST /create** | INSERT includes `custom_greeting`, `proactive_greeting`, `proactive_delay`, `theme_color` columns |
+| **PUT /:id/update** | UPDATE SET includes all 4 new columns; merge logic preserves existing values |
+| **Widget script (complete rewrite)** | Replaced iframe with inline DOM: squircle button, chat container, SSE streaming via `fetch()` + `ReadableStream`, typing indicator, proactive tooltip, dynamic theming helpers (`darkenHex()`, `hexToRgba()`, `makeGradient()`, `applyTheme()`), custom greeting, dark text input |
+| **Widget response headers** | Changed `Cache-Control` from `public, max-age=3600` to `no-cache, no-store, must-revalidate` |
+
+#### Modified: `src/routes/assistants.js` (~980 → ~1,391 LOC)
+
+| Change | Detail |
+|--------|--------|
+| All `.ts` changes | Mirrored identically in compiled `.js` file |
+
+### Widget Script Architecture
+
+The widget script is a template literal string (~500 lines) inside the `GET /widget.js` route handler. It's served dynamically with the `assistantId` injected from `data-assistant-id`.
+
+**Key components built via DOM manipulation:**
+
+| Component | Element | Purpose |
+|-----------|---------|---------|
+| `button` | `div#softaware-chat-button` | Squircle FAB (56×56, border-radius: 16px, pulse animation) |
+| `proactiveBubble` | `div#softaware-proactive` | Tooltip near button (max-width: 260px, auto-dismiss 12s) |
+| `chatContainer` | `div#softaware-chat-container` | Chat window (400×520px, fixed bottom-right) |
+| `header` | `div` | Gradient header bar with assistant name + close button |
+| `messagesDiv` | `div` | Scrollable message area |
+| `inputRow` | `div` | Text input + send button |
+| `footer` | `div` | "Powered by Soft Aware" link |
+
+**Dynamic theming helpers:**
+
+| Function | Purpose |
+|----------|---------|
+| `darkenHex(hex, pct)` | Darkens hex color by percentage for gradient "to" stop |
+| `hexToRgba(hex, a)` | Converts hex to rgba string for box-shadow colors |
+| `makeGradient()` | Returns `linear-gradient(135deg, themeFrom, themeTo)` |
+| `applyTheme()` | Re-applies gradient + shadow to button, header, send button, pulse animation |
+
+**SSE streaming chat flow:**
+
+```
+User types → fetch(POST /api/assistants/chat) with ReadableStream
+  → Read chunks → TextDecoder → split by newlines
+  → Parse JSON tokens → append to message bubble
+  → Detect {done: true} → finalize message
+  → Auto-scroll messages div
+```
+
+### Changes — Frontend
+
+#### Modified: `src/pages/portal/CreateAssistant.tsx` (~1,259 → ~1,537 LOC)
+
+| Change | Detail |
+|--------|--------|
+| **`FormData` interface** | Added `customGreeting: string`, `proactiveGreeting: string`, `proactiveDelay: number`, `themeColor: string` |
+| **`proactiveEnabled` state** | New `useState<boolean>(false)` — controls toggle switch visibility |
+| **`loadAssistant()`** | Populates all 4 new fields from API response; sets `proactiveEnabled` from `!!a.proactiveGreeting` |
+| **`fullPayload`** | Sends `customGreeting`, `proactiveGreeting` (only if toggle ON), `proactiveDelay` (only if toggle ON, else 5), `themeColor` |
+| **Step 1 UI** | New "Widget Appearance & Behavior" section with: color picker + 8 presets + reset, custom greeting input, proactive toggle switch, proactive text input (conditional), delay slider (conditional) |
+| **Step 3 review** | Shows color swatch + hex, welcome message, proactive greeting with ● Enabled / ○ Disabled badge |
+
+**Proactive toggle switch implementation:**
+
+```tsx
+<button
+  type="button"
+  role="switch"
+  aria-checked={proactiveEnabled}
+  onClick={() => {
+    setProactiveEnabled(prev => !prev);
+    if (proactiveEnabled) {
+      setForm(prev => ({ ...prev, proactiveGreeting: '' }));
+    }
+  }}
+  className={`... ${proactiveEnabled ? 'bg-picton-blue' : 'bg-gray-300'}`}
+>
+  <span className={`... ${proactiveEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+</button>
+```
+
+**Color picker presets:**
+
+| Color | Label | Hex |
+|-------|-------|-----|
+| Indigo | Default | `#667eea` |
+| Emerald | Green | `#10b981` |
+| Amber | Orange | `#f59e0b` |
+| Red | Red | `#ef4444` |
+| Violet | Purple | `#8b5cf6` |
+| Cyan | Teal | `#06b6d4` |
+| Pink | Pink | `#ec4899` |
+| Dark | Slate | `#1e293b` |
+
+### Root Cause Analysis
+
+The original widget used an iframe pointing to `softaware.net.za/chat/{id}`, which was blocked by the server's `X-Frame-Options` header returning "refused to connect" on third-party sites. The fix replaced the entire iframe approach with inline DOM construction + SSE streaming, eliminating any cross-origin embedding issues.
+
+Additionally, the widget.js response had `Cache-Control: public, max-age=3600`, causing browsers to cache stale versions for up to 1 hour. Changed to `no-cache, no-store, must-revalidate`.
+
+The widget's text input had white text on a white background because no explicit color was set. Fixed with `color: #1f2937; background: #fff;`.
+
+### Verification
+
+- ✅ Widget loads on third-party sites without iframe errors
+- ✅ Theme color applied to FAB button, header, send button, pulse animation
+- ✅ Proactive tooltip appears after configured delay, auto-dismisses after 12s
+- ✅ Custom welcome message displayed as first chat bubble
+- ✅ SSE streaming works with `fetch()` + `ReadableStream`
+- ✅ Input text visible (dark on white background)
+- ✅ Both `.ts` and `.js` files in sync
+- ✅ `createAssistantSchema` and `updateAssistantSchema` include all 4 new fields
+- ✅ CREATE and UPDATE SQL include all 4 new columns
+- ✅ Frontend toggle switch controls proactive greeting visibility and save behavior
+- ✅ No compile errors in any modified files
+
+### Files Changed
+
+| File | Changes | LOC |
+|------|---------|-----|
+| `src/routes/assistants.ts` | parseAssistantRow, schemas, CRUD SQL, widget script rewrite, cache headers | ~1,541 |
+| `src/routes/assistants.js` | Mirror of all .ts changes | ~1,391 |
+| `frontend/src/pages/portal/CreateAssistant.tsx` | FormData, proactiveEnabled state, loadAssistant, fullPayload, Step 1 widget config UI, Step 3 review | ~1,537 |
 
 ---
 

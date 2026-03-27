@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { db } from '../db/mysql.js';
 import crypto from 'crypto';
+import { getLimitsForTier } from '../config/tiers.js';
 
 function uuidv4() {
   return crypto.randomUUID();
@@ -22,22 +23,14 @@ interface TierLimits {
 }
 
 /**
- * Get tier limits from database
+ * Get tier limits from static config
  */
 async function getTierLimits(tier: string): Promise<TierLimits | null> {
-  try {
-    const [rows] = await db.execute(
-      `SELECT max_pages, max_messages_per_month 
-       FROM subscription_tier_limits 
-       WHERE tier = ?`,
-      [tier]
-    ) as any;
-    
-    return rows && rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error('Error fetching tier limits:', error);
-    return null;
-  }
+  const limits = getLimitsForTier(tier);
+  return {
+    max_pages: limits.maxKnowledgePages,
+    max_messages_per_month: limits.maxActionsPerMonth
+  };
 }
 
 /**
@@ -132,10 +125,8 @@ export async function checkMessageLimit(clientId: string): Promise<{
          wc.subscription_tier,
          wc.messages_this_cycle,
          wc.billing_cycle_end,
-         wc.status,
-         stl.max_messages_per_month
+         wc.status
        FROM widget_clients wc
-       LEFT JOIN subscription_tier_limits stl ON wc.subscription_tier = stl.tier
        WHERE wc.id = ?`,
       [clientId]
     ) as any;
@@ -150,6 +141,8 @@ export async function checkMessageLimit(clientId: string): Promise<{
     }
     
     const client = rows[0];
+    const limits = getLimitsForTier(client.subscription_tier);
+    client.max_messages_per_month = limits.maxActionsPerMonth;
     
     // Check if client is suspended
     if (client.status === 'suspended') {
@@ -235,9 +228,11 @@ export async function enforceMessageLimit(
         },
         upgrade: {
           message: limitCheck.tier === 'free' 
-            ? 'Upgrade to Starter (R299/month) for 5,000 messages and no branding.'
+            ? 'Upgrade to Starter (R349/month) for 2,000 messages and no branding.'
             : limitCheck.tier === 'starter'
-            ? 'Upgrade to Advanced (R899/month) for 15,000 messages plus lead capture.'
+            ? 'Upgrade to Pro (R699/month) for 5,000 messages plus e-commerce.'
+            : limitCheck.tier === 'pro'
+            ? 'Upgrade to Advanced (R1,499/month) for 20,000 messages plus API webhooks.'
             : 'Contact support to increase your limits.',
           url: 'https://portal.softaware.net.za/billing'
         }
@@ -322,21 +317,28 @@ export async function getClientsNearLimit(threshold: number = 0.9): Promise<any[
          wc.website_url,
          wc.subscription_tier,
          wc.messages_this_cycle,
-         stl.max_messages_per_month,
-         (wc.messages_this_cycle / stl.max_messages_per_month) as usage_ratio,
          u.email,
          u.name
        FROM widget_clients wc
-       LEFT JOIN subscription_tier_limits stl ON wc.subscription_tier = stl.tier
        LEFT JOIN users u ON wc.user_id = u.id
        WHERE wc.status = 'active'
-         AND wc.subscription_tier != 'enterprise'
-         AND (wc.messages_this_cycle / stl.max_messages_per_month) >= ?
-       ORDER BY usage_ratio DESC`,
-      [threshold]
+         AND wc.subscription_tier != 'enterprise'`
     ) as any;
     
-    return rows || [];
+    const nearLimitClients = rows.filter((client: any) => {
+      const limits = getLimitsForTier(client.subscription_tier);
+      const usageRatio = client.messages_this_cycle / limits.maxActionsPerMonth;
+      return usageRatio >= threshold;
+    }).map((client: any) => {
+      const limits = getLimitsForTier(client.subscription_tier);
+      return {
+        ...client,
+        max_messages_per_month: limits.maxActionsPerMonth,
+        usage_ratio: client.messages_this_cycle / limits.maxActionsPerMonth
+      };
+    }).sort((a: any, b: any) => b.usage_ratio - a.usage_ratio);
+    
+    return nearLimitClients;
   } catch (error) {
     console.error('Error fetching clients near limit:', error);
     return [];

@@ -5,16 +5,20 @@
 import { Router, Response } from 'express';
 import { db } from '../db/mysql.js';
 import { requireAuth, AuthRequest, getAuth } from '../middleware/auth.js';
+import { requireAdmin } from '../middleware/requireAdmin.js';
 import { badRequest, notFound } from '../utils/httpErrors.js';
 import { encryptPassword, decryptPassword } from '../utils/cryptoUtils.js';
 import { invalidateCache } from '../services/credentialVault.js';
 
 export const credentialsRouter = Router();
 
+// All credential-management routes require admin
+credentialsRouter.use(requireAuth, requireAdmin);
+
 /**
  * GET /credentials — List all credentials (values are masked unless decrypt=true)
  */
-credentialsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const decrypt = req.query.decrypt === 'true';
     const type = req.query.type as string | undefined;
@@ -64,7 +68,7 @@ credentialsRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, 
 /**
  * GET /credentials/search — Search credentials by query string
  */
-credentialsRouter.get('/search', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/search', async (req: AuthRequest, res: Response, next) => {
   try {
     const q = (req.query.q as string || '').trim();
     if (!q) throw badRequest('q query parameter is required');
@@ -92,7 +96,7 @@ credentialsRouter.get('/search', requireAuth, async (req: AuthRequest, res: Resp
 /**
  * GET /credentials/service/:serviceName — Get credential by service name
  */
-credentialsRouter.get('/service/:serviceName', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/service/:serviceName', async (req: AuthRequest, res: Response, next) => {
   try {
     const { serviceName } = req.params;
     const decrypt = req.query.decrypt === 'true';
@@ -131,7 +135,7 @@ credentialsRouter.get('/service/:serviceName', requireAuth, async (req: AuthRequ
 /**
  * GET /credentials/expired — Get expired credentials
  */
-credentialsRouter.get('/expired', requireAuth, async (_req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/expired', async (_req: AuthRequest, res: Response, next) => {
   try {
     const creds = await db.query<any>(
       'SELECT * FROM credentials WHERE expires_at IS NOT NULL AND expires_at < NOW() AND is_active = 1 ORDER BY expires_at'
@@ -145,7 +149,7 @@ credentialsRouter.get('/expired', requireAuth, async (_req: AuthRequest, res: Re
 /**
  * GET /credentials/expiring — Get credentials expiring within 30 days
  */
-credentialsRouter.get('/expiring', requireAuth, async (_req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/expiring', async (_req: AuthRequest, res: Response, next) => {
   try {
     const creds = await db.query<any>(
       'SELECT * FROM credentials WHERE expires_at IS NOT NULL AND expires_at BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 30 DAY) AND is_active = 1 ORDER BY expires_at'
@@ -159,7 +163,7 @@ credentialsRouter.get('/expiring', requireAuth, async (_req: AuthRequest, res: R
 /**
  * GET /credentials/:id — Get single credential
  */
-credentialsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.get('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const decrypt = req.query.decrypt === 'true';
@@ -196,7 +200,7 @@ credentialsRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Respons
 /**
  * POST /credentials — Create credential
  */
-credentialsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.post('/', async (req: AuthRequest, res: Response, next) => {
   try {
     const { userId } = getAuth(req);
     const { service_name, credential_type, identifier, credential_value, additional_data, environment, expires_at, notes } = req.body;
@@ -238,7 +242,7 @@ credentialsRouter.post('/', requireAuth, async (req: AuthRequest, res: Response,
 /**
  * PUT /credentials/:id — Update credential
  */
-credentialsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.put('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { userId } = getAuth(req);
@@ -293,7 +297,7 @@ credentialsRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Respons
 /**
  * DELETE /credentials/:id — Delete credential
  */
-credentialsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.delete('/:id', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const cred = await db.queryOne<any>('SELECT * FROM credentials WHERE id = ?', [id]);
@@ -310,7 +314,7 @@ credentialsRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Resp
 /**
  * POST /credentials/:id/deactivate — Deactivate credential
  */
-credentialsRouter.post('/:id/deactivate', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.post('/:id/deactivate', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const cred = await db.queryOne<any>('SELECT * FROM credentials WHERE id = ?', [id]);
@@ -327,7 +331,7 @@ credentialsRouter.post('/:id/deactivate', requireAuth, async (req: AuthRequest, 
 /**
  * POST /credentials/:id/rotate — Rotate credential (mark old as inactive, prompt for new)
  */
-credentialsRouter.post('/:id/rotate', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.post('/:id/rotate', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const { new_value } = req.body;
@@ -354,7 +358,7 @@ credentialsRouter.post('/:id/rotate', requireAuth, async (req: AuthRequest, res:
 /**
  * POST /credentials/:id/test — Test if credential is valid (basic check)
  */
-credentialsRouter.post('/:id/test', requireAuth, async (req: AuthRequest, res: Response, next) => {
+credentialsRouter.post('/:id/test', async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
     const cred = await db.queryOne<any>('SELECT * FROM credentials WHERE id = ?', [id]);

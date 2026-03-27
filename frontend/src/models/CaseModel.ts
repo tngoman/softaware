@@ -74,6 +74,11 @@ export class CaseModel {
     await api.post(`/cases/${id}/rate`, { rating, feedback });
   }
 
+  /** Delete own case (reporter or admin) */
+  static async delete(id: string): Promise<void> {
+    await api.delete(`/cases/${id}`);
+  }
+
   // ── Admin endpoints ────────────────────────────────────────
 
   /** Get all cases (admin) */

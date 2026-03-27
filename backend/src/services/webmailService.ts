@@ -333,6 +333,55 @@ export async function setDefaultMailbox(id: number, userId: string): Promise<voi
 
 // ─── IMAP Helpers ────────────────────────────────────────────────────────
 
+// ── Connection cache: reuse IMAP connections for the same mailbox within a TTL ──
+const IMAP_CACHE_TTL_MS = 30_000; // 30 seconds
+const imapCache = new Map<number, { client: ImapFlow; expiresAt: number; refCount: number }>();
+
+/**
+ * Get a cached or new IMAP client for the given account.
+ * Call `releaseImapClient(account.id)` when done (instead of client.logout).
+ */
+async function getImapClient(account: MailboxAccount): Promise<ImapFlow> {
+  const cached = imapCache.get(account.id);
+  if (cached && cached.expiresAt > Date.now()) {
+    cached.refCount++;
+    cached.expiresAt = Date.now() + IMAP_CACHE_TTL_MS; // extend TTL
+    return cached.client;
+  }
+
+  // Evict stale entry
+  if (cached) {
+    cached.client.logout().catch(() => {});
+    imapCache.delete(account.id);
+  }
+
+  const client = createImapClient(account);
+  await connectImap(client, account);
+  imapCache.set(account.id, { client, expiresAt: Date.now() + IMAP_CACHE_TTL_MS, refCount: 1 });
+  return client;
+}
+
+function releaseImapClient(accountId: number): void {
+  const cached = imapCache.get(accountId);
+  if (!cached) return;
+  cached.refCount--;
+  if (cached.refCount <= 0 && cached.expiresAt <= Date.now()) {
+    cached.client.logout().catch(() => {});
+    imapCache.delete(accountId);
+  }
+}
+
+// Periodic cleanup of expired connections
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of imapCache) {
+    if (entry.expiresAt <= now && entry.refCount <= 0) {
+      entry.client.logout().catch(() => {});
+      imapCache.delete(id);
+    }
+  }
+}, 60_000);
+
 function createImapClient(account: MailboxAccount): ImapFlow {
   return new ImapFlow({
     host: account.imap_host,
@@ -820,7 +869,7 @@ export async function sendMail(
         else resolve(message);
       });
       // Handle newer nodemailer where build() returns a Promise
-      if (result && typeof (result as any).then === 'function') {
+      if ((result as any) && typeof (result as any).then === "function") {
         (result as any).then((msg: Buffer) => resolve(msg)).catch(reject);
       }
     });
@@ -851,7 +900,7 @@ export async function sendMail(
           if (err) reject(err);
           else resolve(message);
         });
-        if (result && typeof (result as any).then === 'function') {
+        if ((result as any) && typeof (result as any).then === "function") {
           (result as any).then((msg: Buffer) => resolve(msg)).catch(reject);
         }
       });

@@ -101,7 +101,7 @@ const ContactDetails: React.FC = () => {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [quotations, setQuotations] = useState<Quotation[]>([]);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'quotations' | 'statement' | 'assistants' | 'landing-pages' | 'documentation'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'invoices' | 'quotations' | 'statement' | 'assistants' | 'landing-pages' | 'documentation' | 'expenses'>('overview');
   
   // AI/Client Manager state
   const [clientDetail, setClientDetail] = useState<any>(null);
@@ -133,6 +133,10 @@ const ContactDetails: React.FC = () => {
   const [docFiles, setDocFiles] = useState<Array<{ filename: string; size: number; modified: string }>>([]);
   const [docActiveFile, setDocActiveFile] = useState('Api.md');
   const [docAvailable, setDocAvailable] = useState(false);
+
+  // Supplier expense state
+  const [supplierExpenses, setSupplierExpenses] = useState<any[]>([]);
+  const [supplierExpenseSummary, setSupplierExpenseSummary] = useState<{ total_expenses: number; total_vat: number; total_exclusive: number; count: number }>({ total_expenses: 0, total_vat: 0, total_exclusive: 0, count: 0 });
 
   // Developer role check
   const hasDeveloperAccess = useCallback(() => {
@@ -189,6 +193,11 @@ const ContactDetails: React.FC = () => {
         loadInvoices(parseInt(id!));
         loadQuotations(parseInt(id!));
         loadStatementData(parseInt(id!));
+      }
+
+      // Load expenses if supplier
+      if (contactData.contact_type === 2) {
+        loadSupplierExpenses(parseInt(id!));
       }
     } catch (error) {
       console.error('Error loading contact:', error);
@@ -273,6 +282,18 @@ const ContactDetails: React.FC = () => {
       setStatementData(data);
     } catch (error) {
       console.error('Error loading statement:', error);
+    }
+  };
+
+  const loadSupplierExpenses = async (contactId: number) => {
+    try {
+      const result = await ContactModel.getExpenses(contactId);
+      setSupplierExpenses(result.data || []);
+      if (result.summary) {
+        setSupplierExpenseSummary(result.summary);
+      }
+    } catch (error) {
+      console.error('Error loading supplier expenses:', error);
     }
   };
 
@@ -434,6 +455,8 @@ const ContactDetails: React.FC = () => {
                   const parsed = JSON.parse(data);
                   if (parsed.done) continue;
                   if (parsed.error) { fullText += `\n⚠️ ${parsed.error}`; continue; }
+                  if (parsed.toolExecuted) { fullText = parsed.replace ?? ''; continue; }
+                  if (parsed.toolCall?.message) { fullText = parsed.toolCall.message; continue; }
                   fullText += parsed.token || parsed.content || parsed.text || '';
                 } catch { /* skip malformed */ }
               }
@@ -573,6 +596,62 @@ const ContactDetails: React.FC = () => {
         </button>
       )
     }
+  ];
+
+  // Expense columns for supplier DataTable
+  const expenseColumns: any[] = [
+    {
+      accessorKey: 'transaction_date',
+      header: 'Date',
+      cell: ({ getValue }: any) => formatDate(getValue())
+    },
+    {
+      accessorKey: 'invoice_number',
+      header: 'Invoice #',
+      cell: ({ getValue }: any) => (
+        <span className="font-semibold text-gray-900">{getValue() || '—'}</span>
+      )
+    },
+    {
+      accessorKey: 'category_name',
+      header: 'Category',
+      cell: ({ getValue }: any) => getValue() || <span className="text-gray-400">—</span>
+    },
+    {
+      accessorKey: 'exclusive_amount',
+      header: 'Excl. Amount',
+      cell: ({ getValue }: any) => formatCurrency(getValue())
+    },
+    {
+      accessorKey: 'vat_amount',
+      header: 'VAT',
+      cell: ({ getValue }: any) => formatCurrency(getValue())
+    },
+    {
+      accessorKey: 'total_amount',
+      header: 'Total',
+      cell: ({ getValue }: any) => (
+        <span className="font-semibold">{formatCurrency(getValue())}</span>
+      )
+    },
+    {
+      accessorKey: 'vat_type',
+      header: 'VAT Type',
+      cell: ({ getValue }: any) => {
+        const vt = getValue() as string;
+        const colors: Record<string, string> = {
+          standard: 'bg-green-100 text-green-800',
+          zero: 'bg-blue-100 text-blue-800',
+          exempt: 'bg-amber-100 text-amber-800',
+          'non-vat': 'bg-gray-100 text-gray-600',
+        };
+        return (
+          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colors[vt] || 'bg-gray-100 text-gray-600'}`}>
+            {vt || 'non-vat'}
+          </span>
+        );
+      }
+    },
   ];
 
   if (loading || !contact) {
@@ -1413,17 +1492,217 @@ const ContactDetails: React.FC = () => {
         </>
       )}
 
-      {/* Supplier-specific content (if needed in future) */}
+      {/* Supplier Tabs */}
       {isSupplier && (
-        <Card>
-          <div className="text-center py-12">
-            <BuildingOfficeIcon className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-medium text-gray-900 mb-2">Supplier Information</h3>
-            <p className="text-gray-500">
-              Additional supplier-specific features can be added here in the future.
-            </p>
+        <>
+          {/* Tab Navigation */}
+          <div className="border-b border-gray-200">
+            <nav className="-mb-px flex space-x-8 overflow-x-auto">
+              <button
+                onClick={() => setActiveTab('overview')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
+                  activeTab === 'overview'
+                    ? 'border-picton-blue text-picton-blue'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <ChartBarIcon className="h-5 w-5 inline mr-2" />
+                Overview
+              </button>
+              <button
+                onClick={() => setActiveTab('expenses')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
+                  activeTab === 'expenses'
+                    ? 'border-picton-blue text-picton-blue'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <ReceiptPercentIcon className="h-5 w-5 inline mr-2" />
+                Expenses ({supplierExpenseSummary.count})
+              </button>
+              {docAvailable && (
+                <button
+                  onClick={() => setActiveTab('documentation')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
+                    activeTab === 'documentation'
+                      ? 'border-emerald-600 text-emerald-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  <DocumentTextIcon className="h-5 w-5 inline mr-2" />
+                  Documentation
+                </button>
+              )}
+            </nav>
           </div>
-        </Card>
+
+          {/* Supplier Tab Content */}
+          <div className="mt-6">
+            {activeTab === 'overview' && (
+              supplierExpenses.length > 0 ? (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {/* Summary Stats */}
+                  <Card>
+                    <h3 className="text-lg font-bold text-gray-900 mb-4">Expense Summary</h3>
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center pb-3 border-b border-gray-200">
+                        <span className="text-sm text-gray-600">Total Expenses (Incl.)</span>
+                        <span className="text-lg font-bold text-gray-900">{formatCurrency(supplierExpenseSummary.total_expenses)}</span>
+                      </div>
+                      <div className="flex justify-between items-center pb-3 border-b border-gray-200">
+                        <span className="text-sm text-gray-600">Total Excl. VAT</span>
+                        <span className="text-lg font-bold text-gray-900">{formatCurrency(supplierExpenseSummary.total_exclusive)}</span>
+                      </div>
+                      <div className="flex justify-between items-center pb-3 border-b border-gray-200">
+                        <span className="text-sm text-gray-600">VAT Claimed</span>
+                        <span className="text-lg font-bold text-green-600">{formatCurrency(supplierExpenseSummary.total_vat)}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-600">Total Transactions</span>
+                        <span className="text-lg font-bold text-gray-900">{supplierExpenseSummary.count}</span>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* Recent Expenses */}
+                  <Card className="lg:col-span-2">
+                    <h3 className="text-lg font-bold text-gray-900 mb-4">Recent Expenses</h3>
+                    <div className="space-y-3">
+                      {supplierExpenses.slice(0, 5).map((expense: any) => (
+                        <div
+                          key={expense.transaction_id}
+                          className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="h-10 w-10 rounded-full flex items-center justify-center bg-orange-100">
+                              <ReceiptPercentIcon className="h-5 w-5 text-orange-600" />
+                            </div>
+                            <div>
+                              <p className="font-medium text-gray-900">
+                                {expense.invoice_number || `EXP-${expense.transaction_id}`}
+                              </p>
+                              <p className="text-sm text-gray-500">
+                                {formatDate(expense.transaction_date)}
+                                {expense.category_name && (
+                                  <span className="ml-2 text-xs text-gray-400">• {expense.category_name}</span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-semibold text-gray-900">
+                              {formatCurrency(expense.total_amount)}
+                            </p>
+                            {expense.vat_type && expense.vat_type !== 'non-vat' && (
+                              <span className="text-xs text-green-600">VAT: {formatCurrency(expense.vat_amount)}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {supplierExpenses.length > 5 && (
+                        <button
+                          onClick={() => setActiveTab('expenses')}
+                          className="w-full mt-2 text-sm text-picton-blue hover:text-picton-blue/80 font-medium"
+                        >
+                          View all {supplierExpenses.length} expenses →
+                        </button>
+                      )}
+                    </div>
+                  </Card>
+                </div>
+              ) : (
+                <Card>
+                  <div className="text-center py-12">
+                    <ChartBarIcon className="h-16 w-16 text-gray-400 mx-auto mb-4" />
+                    <h3 className="text-lg font-medium text-gray-900 mb-2">No Expense Data</h3>
+                    <p className="text-gray-500">
+                      Expense transactions for this supplier will appear here once captured.
+                    </p>
+                  </div>
+                </Card>
+              )
+            )}
+
+            {activeTab === 'expenses' && (
+              <Card>
+                <DataTable
+                  data={supplierExpenses}
+                  columns={expenseColumns}
+                  searchable={true}
+                  emptyMessage="No expense transactions found for this supplier."
+                />
+              </Card>
+            )}
+
+            {activeTab === 'documentation' && docAvailable && (
+              <div>
+                {/* File selector if multiple docs */}
+                {docFiles.length > 1 && (
+                  <div className="flex items-center gap-2 mb-4 flex-wrap">
+                    {docFiles.map((f) => (
+                      <button
+                        key={f.filename}
+                        onClick={() => {
+                          if (f.filename !== docActiveFile) {
+                            setDocContent(null);
+                            loadDocumentation(f.filename);
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                          f.filename === docActiveFile
+                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200'
+                        }`}
+                      >
+                        {f.filename.replace('.md', '')}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {docLoading && (
+                  <div className="text-center py-16">
+                    <div className="inline-flex items-center gap-2 text-gray-400">
+                      <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      <span className="text-sm">Loading documentation…</span>
+                    </div>
+                  </div>
+                )}
+
+                {!docLoading && !docContent && (
+                  <div className="text-center py-16">
+                    <DocumentTextIcon className="h-12 w-12 text-gray-200 mx-auto mb-3" />
+                    <p className="text-gray-400 text-sm">No documentation content found.</p>
+                  </div>
+                )}
+
+                {!docLoading && docContent && (
+                  <Card>
+                    <article className="prose prose-sm sm:prose max-w-none
+                      prose-headings:text-gray-900 prose-headings:font-bold
+                      prose-h1:text-2xl prose-h1:border-b prose-h1:border-gray-200 prose-h1:pb-3 prose-h1:mb-6
+                      prose-h2:text-xl prose-h2:mt-8 prose-h2:mb-4
+                      prose-h3:text-lg prose-h3:mt-6 prose-h3:mb-3
+                      prose-p:text-gray-700 prose-p:leading-relaxed
+                      prose-a:text-picton-blue prose-a:no-underline hover:prose-a:underline
+                      prose-strong:text-gray-900
+                      prose-code:text-sm prose-code:bg-gray-100 prose-code:text-rose-600 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:font-mono prose-code:before:content-none prose-code:after:content-none
+                      prose-pre:bg-gray-900 prose-pre:text-gray-100 prose-pre:rounded-xl prose-pre:overflow-x-auto
+                      prose-table:border prose-table:border-gray-200 prose-table:rounded-lg
+                      prose-th:bg-gray-50 prose-th:text-left prose-th:px-4 prose-th:py-2 prose-th:text-xs prose-th:font-semibold prose-th:text-gray-600 prose-th:uppercase prose-th:tracking-wide prose-th:border-b prose-th:border-gray-200
+                      prose-td:px-4 prose-td:py-2 prose-td:text-sm prose-td:border-b prose-td:border-gray-100
+                    ">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{docContent}</ReactMarkdown>
+                    </article>
+                  </Card>
+                )}
+              </div>
+            )}
+          </div>
+        </>
       )}
 
       {/* ── Chat Modal ── */}

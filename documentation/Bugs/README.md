@@ -26,8 +26,9 @@ The Bugs module provides a dedicated bug tracking system with a complete workflo
 │  ┌───────────────┐ ┌──────────────┐ ┌──────────────────────────┐ │
 │  │ BugStatsBar   │ │ BugTableRow  │ │ BugDetailDialog          │ │
 │  │ • Open count  │ │ • Severity   │ │ • Tabbed: Comments /     │ │
-│  │ • Active      │ │ • Table row  │ │   Attachments / Task     │ │
-│  │ • Pending QA  │ │ • Phase btn  │ │ • AttachmentImage (blob) │ │
+│  │ • Active      │ │ • Table row  │ │   Attachments / Task /   │ │
+│  │ • Pending QA  │ │ • Phase btn  │ │   AI Resolution          │ │
+│  │ • Resolved    │ │ • Status ↓   │ │ • AttachmentImage (blob) │ │
 │  │ • Resolved    │ │ • Status ↓   │ │ • AttachmentFile (blob)  │ │
 │  │ • Critical    │ │ • Actions    │ │ • Lightbox viewer        │ │
 │  └───────────────┘ └──────────────┘ └──────────────────────────┘ │
@@ -185,6 +186,7 @@ const requireAuth = (req, _res, next) => {
 2. **Comments tab:** View timeline of user + system comments, add new comments
 3. **Attachments tab:** Upload files (max 20MB each, up to 10 at once), view images with lightbox, download files
 4. **Task tab:** Link to existing task, convert bug → task
+5. **AI Resolution tab:** Integrated debugging capabilities using your Personal AI Assistant.
 
 ### 4.4 Workflow Management
 
@@ -222,6 +224,7 @@ const requireAuth = (req, _res, next) => {
 | Role-based default filter | ✅ Active | Phase filter auto-set by user role on page load (developer→development, qa→quality_review) |
 | Branded email templates | ✅ Active | HTML emails with gradient header, severity badge, detail table, CTA button, branded footer |
 | Bug loading indicator | ✅ Active | Spinning icon on row title and View button while bug detail is being fetched |
+| AI Bug Resolution | ✅ Beta | Lets non-dev staff debug code using their personalised Assistant profile and tools |
 
 ---
 
@@ -271,3 +274,10 @@ No module-specific configuration. Uses global settings from `env.ts`:
 - [Notifications](../Notifications/README.md) — In-app + push notification infrastructure
 - [Software](../Software/README.md) — Software products (bug association)
 - [Cases](../Cases/README.md) — Similar pattern: CRUD + workflow + notifications
+
+### 4.6 AI-Assisted Bug Resolution
+
+Staff with the "Developer Tool Access via AI" flag enabled can leverage their configured Personal Assistant to resolve bugs. 
+- The resolution environment ensures that all execution (LLM prompt, execution toolchain, tokenization) utilizes the Assistant's **configured `preferred_model` (e.g., GPT, Claude, or specific Ollama/Qwen model)** rather than using hardcoded defaults. 
+- If the user hasn't configured an assistant, they are met with a direct prompt to configure one in their profile before proceeding with AI assistance.
+- Uses `mobileAIProcessor` integration and tools from `AI_DEBUG_TOOLS` (`modify_codebase`, `run_dev_server`, etc.).

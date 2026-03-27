@@ -9,7 +9,7 @@ export class InvoiceModel {
   /**
    * Get all invoices with pagination
    */
-  static async getAll(params?: PaginationParams) {
+  static async getAll(params?: PaginationParams & { invoice_type?: string }) {
     const response = await api.get<Invoice[] | PaginationResponse<Invoice>>('/invoices', { params });
     return response.data;
   }
@@ -67,6 +67,14 @@ export class InvoiceModel {
    */
   static async sendEmail(id: number, data: { to: string; cc?: string; subject: string; body: string }) {
     const response = await api.post<{ success: boolean; message: string }>(`/invoices/${id}/send-email`, data);
+    return response.data;
+  }
+
+  /**
+   * Convert proforma invoice to tax invoice
+   */
+  static async convertToTax(id: number) {
+    const response = await api.post<{ success: boolean; data: any }>(`/invoices/${id}/convert-to-tax`, {});
     return response.data;
   }
 

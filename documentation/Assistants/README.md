@@ -1,7 +1,7 @@
 # Assistants Module — Overview
 
-**Version:** 2.3.0  
-**Last Updated:** 2026-03-13
+**Version:** 2.4.0  
+**Last Updated:** 2026-03-14
 
 ---
 
@@ -52,6 +52,14 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 - **PII sanitization** — emails, SA phone numbers, SA ID numbers, credit cards, account numbers, and street addresses stripped before analytics storage
 - **Telemetry consent flow** — users must accept telemetry terms before first assistant creation; paid users get an opt-out toggle
 - **Fire-and-forget analytics** — `analyticsLogger.ts` writes to SQLite asynchronously; errors never break chat flow
+- **Inline widget chat UI** — replaced iframe-based widget with fully inline DOM chat using SSE streaming via `fetch()` + `ReadableStream`; eliminates `X-Frame-Options` / `refused to connect` errors on third-party sites
+- **Widget theme color** — configurable hex color with 8 preset swatches (Indigo, Emerald, Amber, Red, Violet, Cyan, Pink, Dark) + native color picker; `darkenHex()` gradient generation, `hexToRgba()` shadow coloring, `applyTheme()` dynamic re-theming
+- **Proactive greeting** — auto-popup tooltip near chat button after configurable delay (1–30s); auto-dismiss after 12s; click opens chat; close button to dismiss
+- **Proactive greeting toggle** — UI toggle switch (on/off) in assistant config; when off, greeting text cleared and not sent to widget
+- **Custom welcome message** — configurable first message shown when chat opens (replaces default "Hello! How can I help you today?")
+- **Android squircle button** — widget FAB uses `border-radius: 16px` squircle shape with pulse animation, hover scale, gradient background
+- **Widget cache busting** — `Cache-Control: no-cache, no-store, must-revalidate` on widget.js responses
+- **Dark text input** — widget input uses explicit `color: #1f2937; background: #fff;` to prevent white-on-white text
 
 > **🔗 sqlite-vec Deep Dive:** This module is the primary consumer of sqlite-vec vector storage. See [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a comprehensive deep-dive covering the vec0 KNN engine, embedding pipeline, dual-storage write path, drift risks, and performance characteristics.
 
@@ -61,10 +69,10 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 |--------|-------|
 | Backend route files | 5 (assistants.ts, assistantIngest.ts, myAssistant.ts, staffAssistant.ts, mobileIntent.ts) |
 | Backend service files | 9 (vectorStore.ts, knowledgeCategorizer.ts, ingestionWorker.ts, ingestionAIRouter.ts, **assistantAIRouter.ts**, mobileTools.ts, mobileAIProcessor.ts, mobileActionExecutor.ts, **analyticsLogger.ts**) |
-| Backend LOC | ~7,440 |
+| Backend LOC | ~7,600 |
 | Frontend source files | 5 (AssistantsPage.tsx, CreateAssistant.tsx, Dashboard.tsx, KnowledgeHealthBadge.tsx, KnowledgeHealthScore.tsx) + Profile.tsx (StaffAssistantTab) + SystemModels.ts |
-| Frontend LOC | ~4,666 |
-| Total LOC | ~12,106 |
+| Frontend LOC | ~4,800 |
+| Total LOC | ~12,400 |
 | API endpoints | 38 (+ 2 telemetry consent) |
 | Staff AI tools | 59 (53 staff-accessible) — 22 task tools + 31 other staff tools |
 | MySQL tables | 4 (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 3 task tables (task_sources, local_tasks, task_sync_log) + 1 legacy (assistant_knowledge) + telemetry columns on `users` |
@@ -466,31 +474,62 @@ The full `KnowledgeHealthScore` component (used on assistant detail/edit pages) 
 
 On creation, assistants receive a business-type-specific knowledge checklist (e.g., restaurant gets "Menu Prices", "Opening Hours"; SaaS gets "Pricing Plans", "Integrations"). Templates are defined in `personaTemplates.ts`.
 
-### 4.4 Embeddable Widget (Branded)
+### 4.4 Embeddable Widget (Inline Chat UI) ⭐ REWRITTEN (v2.4.0)
 
-`GET /api/assistants/widget.js` serves a self-contained JavaScript snippet that creates a **branded floating chat widget** on external websites. The widget uses the Soft Aware favicon (`/images/favicon.png`) as the FAB button icon, displays a branded header bar with the Soft Aware logo and title, and includes a "Powered by Soft Aware" footer. External sites embed it with a single script tag:
+`GET /api/assistants/widget.js` serves a **self-contained JavaScript snippet** that creates a fully inline chat widget on external websites. The widget builds its entire UI via DOM manipulation — no iframes — and uses SSE streaming via `fetch()` + `ReadableStream` for real-time chat responses. External sites embed it with a single script tag:
 
 ```html
 <script src="https://softaware.net.za/widget.js" data-assistant-id="assistant-123"></script>
 ```
 
+**Widget features:**
+
+- **Android squircle FAB** — `border-radius: 16px`, gradient background, pulse animation, hover scale
+- **Dynamic theme** — loads `themeColor` from assistant config; generates gradient via `darkenHex()`, shadow via `hexToRgba()`, recolors all branded elements via `applyTheme()`
+- **Custom welcome message** — uses `customGreeting` from config (falls back to "Hello! How can I help you today?")
+- **Proactive greeting tooltip** — pops up after `proactiveDelay` seconds near the chat button; auto-dismisses after 12s; click opens chat
+- **SSE streaming chat** — real-time token-by-token display using `fetch()` + `ReadableStream` (not EventSource)
+- **Typing indicator** — animated dots while assistant responds
+- **Dark text input** — explicit `color: #1f2937; background: #fff;` prevents white-on-white
+- **Cache busting** — `Cache-Control: no-cache, no-store, must-revalidate`
+
 **Widget visual structure:**
 
 ```
-┌─────────────────────────────┐
-│ [favicon] Soft Aware Asst  ✕│  ← Branded header (gradient)
-├─────────────────────────────┤
-│                             │
-│        Chat iframe          │  ← Full chat UI
-│                             │
-├─────────────────────────────┤
-│  [icon] Powered by Soft Aware│  ← Branded footer
-└─────────────────────────────┘
+           [squircle]           ← FAB button (gradient, 56×56, border-radius: 16px)
+     ┌─────────────────┐
+     │ 👋 Need help?   │        ← Proactive greeting tooltip (auto-dismiss)
+     └─────────────────┘
 
-           [favicon]            ← FAB button (brand icon)
+┌─────────────────────────────┐
+│ [name]                   ✕  │  ← Header (gradient from themeColor)
+├─────────────────────────────┤
+│ ┌─────────────────────┐     │
+│ │ Welcome message     │     │  ← Custom greeting bubble
+│ └─────────────────────┘     │
+│                             │
+│ User message ────────────── │
+│                             │
+│ ┌─────────────────────┐     │
+│ │ AI streaming reply  │     │  ← SSE streaming tokens
+│ └─────────────────────┘     │
+├─────────────────────────────┤
+│ [input ........................] [→]│  ← Dark text input + send button
+│  Powered by Soft Aware      │  ← Branded footer link
+└─────────────────────────────┘
 ```
 
 Also available via the API route: `https://softaware.net.za/api/assistants/widget.js`
+
+**Configuration fields used by widget:**
+
+| Field | Source | Purpose |
+|-------|--------|--------|
+| `themeColor` | `assistants.theme_color` | Primary gradient color for all branded elements |
+| `customGreeting` | `assistants.custom_greeting` | Welcome message shown when chat opens |
+| `proactiveGreeting` | `assistants.proactive_greeting` | Tooltip text near chat button |
+| `proactiveDelay` | `assistants.proactive_delay` | Seconds before proactive tooltip appears |
+| `name` | `assistants.name` | Displayed in header bar |
 
 ### 4.5 Tiered Ingestion Queue
 
@@ -573,6 +612,23 @@ The staff `StaffAssistantTab` in `Profile.tsx` provides rich capabilities awaren
 - **Card-based voice style picker** — 4 clickable cards: Concise, Detailed, Conversational, Formal (replacing dropdown)
 - Footer info note: "Changes take effect on your next mobile conversation"
 - Gradient save button with shadow
+
+### 4.11 Widget Customization UI ⭐ NEW (v2.4.0)
+
+The `CreateAssistant.tsx` 4-step wizard includes a **"Widget Appearance & Behavior"** section in Step 1 (Details) with:
+
+- **Color picker** — native `<input type="color">` + 8 preset swatch buttons (Indigo, Emerald, Amber, Red, Violet, Cyan, Pink, Dark) + Reset button
+- **Color preview** — gradient swatch + hex value displayed below picker when color is set
+- **Custom greeting input** — text field for the welcome message shown when chat opens
+- **Proactive greeting toggle** — pill-style on/off switch (`role="switch"`, `aria-checked`); when OFF, greeting text cleared and not sent; when ON, reveals greeting text input + delay slider
+- **Proactive delay slider** — range input (1–30 seconds) with current value highlighted in brand blue; only visible when proactive greeting is enabled and has text
+- **Step 3 review** — shows color swatch, welcome message, and proactive greeting status (● Enabled / ○ Disabled badge with detail)
+
+**Toggle behavior:**
+- `proactiveEnabled` state initialized from `!!a.proactiveGreeting` when editing
+- Toggling OFF clears `form.proactiveGreeting` to empty string
+- Save payload sends `undefined` for both `proactiveGreeting` and `proactiveDelay` when disabled
+- Widget only shows proactive tooltip when greeting text is non-empty
 
 ---
 

@@ -23,7 +23,6 @@ const CreateQuotation: React.FC = () => {
   const [markupPercentage, setMarkupPercentage] = useState<number>(25); // Default 25%
   const [contactSearchQuery, setContactSearchQuery] = useState('');
   const [showContactDropdown, setShowContactDropdown] = useState(false);
-  const [quoteTerms, setQuoteTerms] = useState<string>('');
   
   const isEditMode = id && id !== 'new';
 
@@ -33,6 +32,8 @@ const CreateQuotation: React.FC = () => {
       quotation_date: new Date().toISOString().split('T')[0],
       quotation_valid_until: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       quotation_status: 0,
+      terms_type: 'ppe' as const,
+      qty_label: 'qty' as const,
       quotation_notes: '',
       items: [{ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 }]
     }
@@ -62,14 +63,6 @@ const CreateQuotation: React.FC = () => {
       const settings = await AppSettingsModel.get();
       const markup = parseFloat(settings.default_markup_percentage || '25');
       setMarkupPercentage(markup);
-      // Load quote terms from settings
-      if (settings.site_quote_terms) {
-        setQuoteTerms(settings.site_quote_terms);
-        // Set default notes to terms if creating new and no notes yet
-        if (!isEditMode) {
-          setValue('quotation_notes', settings.site_quote_terms);
-        }
-      }
     } catch (error) {
       console.error('Error loading markup percentage:', error);
       // Keep default of 25%
@@ -100,10 +93,17 @@ const CreateQuotation: React.FC = () => {
         quotation_date: quotation.quotation_date,
         quotation_valid_until: quotation.quotation_valid_until,
         quotation_status: quotation.quotation_status,
+        terms_type: quotation.terms_type || 'ppe',
+        qty_label: quotation.qty_label || 'qty',
         quotation_notes: quotation.quotation_notes || '',
         items: quotation.items && quotation.items.length > 0 
           ? quotation.items.map((item: any) => ({
               ...item,
+              item_qty: parseFloat(String(item.item_qty)) || 1,
+              item_price: parseFloat(String(item.item_price)) || 0,
+              item_cost: item.item_cost != null ? parseFloat(String(item.item_cost)) : 0,
+              item_discount: parseFloat(String(item.item_discount)) || 0,
+              item_subtotal: parseFloat(String(item.item_subtotal)) || 0,
               item_vat: item.item_vat === 1 ? 1 : 0,
             }))
           : [{ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 }]
@@ -467,17 +467,6 @@ const CreateQuotation: React.FC = () => {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Terms &amp; Conditions / Notes
-                </label>
-                <textarea
-                  {...register('quotation_notes')}
-                  rows={4}
-                  placeholder="Quotation terms, conditions and notes..."
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-picton-blue focus:border-transparent"
-                />
-              </div>
             </div>
           </div>
         </div>
@@ -485,17 +474,7 @@ const CreateQuotation: React.FC = () => {
         {/* Line Items */}
         <div className="bg-white rounded-xl shadow-md border border-gray-100 overflow-hidden">
           <div className="p-6 border-b border-gray-200">
-            <div className="flex justify-between items-center">
-              <h3 className="text-lg font-semibold text-gray-900">Line Items</h3>
-              <button
-                type="button"
-                onClick={() => append({ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 })}
-                className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-picton-blue hover:bg-picton-blue/90 rounded-lg transition-colors"
-              >
-                <PlusIcon className="h-4 w-4 mr-1" />
-                Add Item
-              </button>
-            </div>
+            <h3 className="text-lg font-semibold text-gray-900">Line Items</h3>
           </div>
 
           <div className="overflow-x-auto">
@@ -610,9 +589,64 @@ const CreateQuotation: React.FC = () => {
             </table>
           </div>
 
-          {/* Totals */}
-          <div className="border-t-2 border-gray-200 bg-gray-50 p-6">
-            <div className="max-w-md ml-auto space-y-3">
+          {/* Add Item Button */}
+          <div className="px-6 py-3 border-t border-gray-200">
+            <button
+              type="button"
+              onClick={() => append({ item_product: '', item_qty: 1, item_price: 0, item_cost: 0, item_subtotal: 0, item_discount: 0, item_vat: 0 })}
+              className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-picton-blue hover:bg-picton-blue/90 rounded-lg transition-colors"
+            >
+              <PlusIcon className="h-4 w-4 mr-1" />
+              Add Item
+            </button>
+          </div>
+
+          {/* Totals & Notes */}
+          <div className="border-t-2 border-gray-200 bg-gray-50 p-6 flex flex-col lg:flex-row gap-8">
+            <div className="flex-1 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Notes
+                </label>
+                <textarea
+                  {...register('quotation_notes')}
+                  rows={3}
+                  placeholder="Order number, reference, delivery instructions..."
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-picton-blue focus:border-transparent"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Terms &amp; Conditions
+                  </label>
+                  <select
+                    {...register('terms_type')}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-picton-blue focus:border-transparent"
+                  >
+                    <option value="ppe">PPE Terms</option>
+                    <option value="web">Web Services Terms</option>
+                  </select>
+                  <p className="mt-1 text-xs text-gray-400">Global T&amp;Cs from Settings are used on the PDF</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Quantity Label (PDF)
+                  </label>
+                  <select
+                    {...register('qty_label')}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-picton-blue focus:border-transparent"
+                  >
+                    <option value="qty">QTY</option>
+                    <option value="hours">Hours</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            
+            <div className="w-full lg:w-96 space-y-3">
               <div className="flex justify-between items-center text-sm">
                 <span className="text-gray-600 font-medium">Subtotal:</span>
                 <span className="text-gray-900 font-semibold">{formatCurrency(totals.subtotal)}</span>

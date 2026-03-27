@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   PlusIcon,
@@ -10,8 +10,6 @@ import {
   ClipboardDocumentIcon,
   CheckIcon,
   XMarkIcon,
-  PaperAirplaneIcon,
-  UserCircleIcon,
   LightBulbIcon,
   GlobeAltIcon,
   UserGroupIcon,
@@ -20,16 +18,11 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   RocketLaunchIcon,
-  ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import api, { API_BASE_URL } from '../../services/api';
 import Swal from 'sweetalert2';
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-}
+import { useTierLimits } from '../../hooks/useTierLimits';
+import AssistantChatModal from '../../components/AI/AssistantChatModal';
 
 interface Assistant {
   id: string;
@@ -50,14 +43,8 @@ const AssistantsPage: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const navigate = useNavigate();
 
-  // Chat state — persisted per assistant until user clears
-  const chatHistoryRef = useRef<Record<string, ChatMessage[]>>({});
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const [showCapabilities, setShowCapabilities] = useState(false);
+  const { canCreate, limits, loading: limitsLoading } = useTierLimits();
 
   const CAPABILITIES = [
     { icon: ChatBubbleLeftRightIcon, title: 'AI-Powered Chat', desc: 'Your assistant answers visitor questions 24/7 using your knowledge base content.', color: 'text-blue-600 bg-blue-50' },
@@ -83,139 +70,6 @@ const AssistantsPage: React.FC = () => {
   useEffect(() => {
     loadAssistants();
   }, [loadAssistants]);
-
-  // Restore saved messages when opening a chat modal (or start empty)
-  const prevChatModalId = useRef<string | null>(null);
-  useEffect(() => {
-    if (chatModal) {
-      // Save previous assistant's messages before switching
-      if (prevChatModalId.current && prevChatModalId.current !== chatModal.id) {
-        chatHistoryRef.current[prevChatModalId.current] = messages;
-      }
-      prevChatModalId.current = chatModal.id;
-      // Restore this assistant's history or start fresh
-      setMessages(chatHistoryRef.current[chatModal.id] || []);
-      setTimeout(() => chatInputRef.current?.focus(), 100);
-    } else if (prevChatModalId.current) {
-      // Modal closing — save current messages
-      chatHistoryRef.current[prevChatModalId.current] = messages;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatModal]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    // Keep per-assistant history in sync
-    if (chatModal) chatHistoryRef.current[chatModal.id] = messages;
-  }, [messages, chatModal]);
-
-  // Chat functionality
-  const sendMessage = async () => {
-    if (!chatInput.trim() || streaming || !chatModal) return;
-
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: chatInput.trim(),
-    };
-    const assistantMsgId = `assistant-${Date.now()}`;
-    const assistantMsg: ChatMessage = { id: assistantMsgId, role: 'assistant', content: '' };
-
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setChatInput('');
-    setStreaming(true);
-
-    try {
-      // Build conversation history from previous messages for context
-      const history = messages
-        .filter(m => m.content)
-        .map(m => ({ role: m.role, content: m.content }));
-
-      const response = await fetch(
-        `${API_BASE_URL}/assistants/chat`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            assistantId: chatModal.id,
-            message: userMsg.content,
-            conversationHistory: history.slice(-10),
-          }),
-        }
-      );
-
-      // Handle HTTP errors before attempting to stream
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null);
-        throw new Error(errData?.error || `Server error (${response.status})`);
-      }
-
-      const contentType = response.headers.get('content-type') || '';
-
-      if (contentType.includes('text/event-stream') || contentType.includes('text/plain')) {
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let fullText = '';
-        let lineBuffer = '';
-
-        if (reader) {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            lineBuffer += decoder.decode(value, { stream: true });
-            const lines = lineBuffer.split('\n');
-            lineBuffer = lines.pop() ?? '';
-
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6);
-                if (data === '[DONE]') continue;
-                try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.done) continue;
-                  if (parsed.error) {
-                    fullText += `\n⚠️ ${parsed.error}`;
-                    continue;
-                  }
-                  fullText += parsed.token || parsed.content || parsed.text || '';
-                } catch {
-                  // Skip malformed JSON fragments
-                }
-              }
-            }
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantMsgId ? { ...m, content: fullText } : m))
-            );
-          }
-        }
-      } else {
-        const data = await response.json();
-        const reply = data.response || data.message || data.content || 'No response';
-        setMessages((prev) =>
-          prev.map((m) => (m.id === assistantMsgId ? { ...m, content: reply } : m))
-        );
-      }
-    } catch (err) {
-      console.error('Chat error:', err);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, content: err instanceof Error ? err.message : 'Sorry, I encountered an error. Please try again.' }
-            : m
-        )
-      );
-    } finally {
-      setStreaming(false);
-      chatInputRef.current?.focus();
-    }
-  };
-
-  const handleChatKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
 
   const handleDelete = async (id: string, name: string) => {
     const result = await Swal.fire({
@@ -277,13 +131,23 @@ const AssistantsPage: React.FC = () => {
             What Can My Assistant Do?
             {showCapabilities ? <ChevronUpIcon className="h-3.5 w-3.5" /> : <ChevronDownIcon className="h-3.5 w-3.5" />}
           </button>
-          <Link
-            to="/portal/assistants/new"
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-          >
-            <PlusIcon className="h-4 w-4" />
-            New Assistant
-          </Link>
+          {canCreate('assistants') ? (
+            <Link
+              to="/portal/assistants/new"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-picton-blue text-white text-sm font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+            >
+              <PlusIcon className="h-4 w-4" />
+              New Assistant
+            </Link>
+          ) : (
+            <span
+              title={`${limits.tier} plan limit reached (${limits.assistants.used}/${limits.assistants.limit})`}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-300 text-gray-500 text-sm font-semibold rounded-lg cursor-not-allowed"
+            >
+              <PlusIcon className="h-4 w-4" />
+              Limit Reached
+            </span>
+          )}
         </div>
       </div>
 
@@ -334,13 +198,20 @@ const AssistantsPage: React.FC = () => {
             <p className="text-gray-500 mb-8 max-w-md mx-auto">
               Set up an AI-powered chatbot in minutes. It will answer visitor questions, capture leads, and support your customers 24/7.
             </p>
-            <Link
-              to="/portal/assistants/new"
-              className="inline-flex items-center gap-2 px-6 py-3 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
-            >
-              <PlusIcon className="h-4 w-4" />
-              Get Started
-            </Link>
+            {canCreate('assistants') ? (
+              <Link
+                to="/portal/assistants/new"
+                className="inline-flex items-center gap-2 px-6 py-3 bg-picton-blue text-white font-semibold rounded-lg hover:bg-picton-blue/90 transition-all shadow-sm"
+              >
+                <PlusIcon className="h-4 w-4" />
+                Get Started
+              </Link>
+            ) : (
+              <span className="inline-flex items-center gap-2 px-6 py-3 bg-gray-300 text-gray-500 font-semibold rounded-lg cursor-not-allowed">
+                <PlusIcon className="h-4 w-4" />
+                Assistant Limit Reached — Upgrade to Create More
+              </span>
+            )}
           </div>
           {/* Quick overview */}
           <div className="border-t border-slate-100 bg-slate-50/50 px-8 py-6">
@@ -487,102 +358,10 @@ const AssistantsPage: React.FC = () => {
 
       {/* Chat Modal */}
       {chatModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl h-[80vh] max-h-[700px] border border-slate-200 flex flex-col">
-            {/* Modal Header */}
-            <div className="flex items-center gap-3 p-4 border-b border-slate-100">
-              <div className="w-10 h-10 rounded-xl bg-picton-blue/10 flex items-center justify-center">
-                <SparklesIcon className="h-5 w-5 text-picton-blue" />
-              </div>
-              <div className="flex-1">
-                <h3 className="text-base font-semibold text-gray-900">{chatModal.name}</h3>
-                <p className="text-xs text-gray-400">AI Assistant • Test Chat</p>
-              </div>
-              {messages.length > 0 && (
-                <button
-                  onClick={() => { setMessages([]); setChatInput(''); if (chatModal) chatHistoryRef.current[chatModal.id] = []; }}
-                  title="New Chat"
-                  className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                >
-                  <TrashIcon className="h-4 w-4" />
-                </button>
-              )}
-              <button
-                onClick={() => setChatModal(null)}
-                className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <XMarkIcon className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.length === 0 && (
-                <div className="text-center py-12">
-                  <SparklesIcon className="h-12 w-12 text-gray-200 mx-auto mb-3" />
-                  <p className="text-gray-400 text-sm">Send a message to start chatting</p>
-                </div>
-              )}
-
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  {msg.role === 'assistant' && (
-                    <div className="w-8 h-8 rounded-full bg-picton-blue/10 flex items-center justify-center flex-shrink-0">
-                      <SparklesIcon className="h-4 w-4 text-picton-blue" />
-                    </div>
-                  )}
-                  <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                      msg.role === 'user'
-                        ? 'bg-picton-blue text-white rounded-br-md'
-                        : 'bg-gray-100 text-gray-800 rounded-bl-md'
-                    }`}
-                  >
-                    {msg.content || (
-                      <span className="inline-flex gap-1">
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </span>
-                    )}
-                  </div>
-                  {msg.role === 'user' && (
-                    <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
-                      <UserCircleIcon className="h-5 w-5 text-gray-500" />
-                    </div>
-                  )}
-                </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-
-            {/* Input */}
-            <div className="border-t border-slate-100 p-4">
-              <div className="flex items-end gap-3">
-                <textarea
-                  ref={chatInputRef}
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={handleChatKeyDown}
-                  placeholder="Type your message…"
-                  rows={1}
-                  className="flex-1 resize-none px-4 py-2.5 bg-white border border-gray-300 rounded-xl text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-picton-blue focus:border-picton-blue transition-all"
-                  disabled={streaming}
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={!chatInput.trim() || streaming}
-                  className="p-2.5 bg-picton-blue text-white rounded-xl hover:bg-picton-blue/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                >
-                  <PaperAirplaneIcon className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <AssistantChatModal
+          assistant={{ id: chatModal.id, name: chatModal.name }}
+          onClose={() => setChatModal(null)}
+        />
       )}
     </div>
   );

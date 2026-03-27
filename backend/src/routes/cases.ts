@@ -14,6 +14,7 @@ import { db, generateId, toMySQLDate } from '../db/mysql.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { analyzeComponentFromContext } from '../services/caseAnalyzer.js';
 import { createNotification } from '../services/notificationService.js';
+import { safeJson, mapCaseRow } from '../utils/caseMappers.js';
 
 export const casesRouter = Router();
 
@@ -43,46 +44,6 @@ const upload = multer({
   },
 });
 
-/** Safely handle MySQL JSON columns (already parsed objects or JSON strings) */
-function safeJson(val: any, fallback: any = null) {
-  if (val == null) return fallback;
-  if (typeof val === 'object') return val;
-  try { return JSON.parse(val); } catch { return fallback; }
-}
-
-/** Map a raw DB case row to the frontend-expected shape */
-function mapCaseRow(row: any, aiOverride?: any) {
-  if (!row) return row;
-
-  // Derive source from type if the source column is still null
-  const source = row.source || (() => {
-    switch (row.type) {
-      case 'auto_detected': return 'auto_detected';
-      case 'monitoring': return 'health_monitor';
-      default: return 'user_report';
-    }
-  })();
-
-  return {
-    ...row,
-    // Always provide category & source (frontend relies on them)
-    category: row.category || 'other',
-    source,
-    // Map DB field names → frontend field names
-    user_rating: row.rating ?? null,
-    user_feedback: row.rating_comment ?? null,
-    page_url: row.url ?? null,
-    // Reporter / assignee aliases already come from JOINs:
-    reporter_name: row.reported_by_name ?? null,
-    reporter_email: row.reported_by_email ?? null,
-    assignee_name: row.assigned_to_name ?? null,
-    // Parse JSON columns safely
-    ai_analysis: aiOverride !== undefined ? aiOverride : safeJson(row.ai_analysis, null),
-    metadata: safeJson(row.metadata, {}),
-    tags: safeJson(row.tags, []),
-    browser_info: safeJson(row.browser_info, {}),
-  };
-}
 
 // ─── Validation Schemas ─────────────────────────────────────────────────
 
@@ -555,6 +516,42 @@ casesRouter.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Respons
     }
     console.error('[Cases] Rate error:', err);
     res.status(500).json({ success: false, error: 'Failed to rate case' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// DELETE /api/cases/:id - Delete own case (reporter or admin)
+// ═════════════════════════════════════════════════════════════════════════
+casesRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const caseId = req.params.id;
+
+    const caseData = await db.queryOne<any>('SELECT * FROM cases WHERE id = ?', [caseId]);
+    if (!caseData) {
+      return res.status(404).json({ success: false, error: 'Case not found' });
+    }
+
+    // Allow reporter or admin to delete
+    const adminRow = await db.queryOne<{ is_admin: number }>(
+      'SELECT is_admin FROM users WHERE id = ?',
+      [userId]
+    );
+    const isAdmin = adminRow && adminRow.is_admin;
+
+    if (caseData.reported_by !== userId && !isAdmin) {
+      return res.status(403).json({ success: false, error: 'You can only delete your own cases' });
+    }
+
+    // Delete related records first
+    await db.execute('DELETE FROM case_comments WHERE case_id = ?', [caseId]);
+    await db.execute('DELETE FROM case_activity WHERE case_id = ?', [caseId]);
+    await db.execute('DELETE FROM cases WHERE id = ?', [caseId]);
+
+    res.json({ success: true, message: 'Case deleted successfully' });
+  } catch (err) {
+    console.error('[Cases] Delete error:', err);
+    res.status(500).json({ success: false, error: 'Failed to delete case' });
   }
 });
 

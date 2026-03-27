@@ -30,20 +30,17 @@ pricingRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next
     let query = `SELECT 
       p.id as pricing_id,
       p.item_name as pricing_item,
-      CASE 
-        WHEN p.description LIKE '%|%|%' THEN TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(p.description, ' | ', 2), ' | ', -1))
-        ELSE p.description
-      END as pricing_note,
+      p.notes as pricing_note,
       p.unit_price as pricing_price,
-      SUBSTRING_INDEX(p.description, ' | ', 1) as pricing_unit,
+      p.unit as pricing_unit,
       p.category_id as pricing_category_id,
       c.category_name,
       p.created_at,
       p.updated_at
     FROM pricing p 
     LEFT JOIN categories c ON p.category_id = c.id 
-    WHERE 1=1`;
-    let countQuery = 'SELECT COUNT(*) as count FROM pricing p WHERE 1=1';
+    WHERE p.is_deleted = 0`;
+    let countQuery = 'SELECT COUNT(*) as count FROM pricing p WHERE p.is_deleted = 0';
     const params: any[] = [];
     const countParams: any[] = [];
 
@@ -55,11 +52,11 @@ pricingRouter.get('/', requireAuth, async (req: AuthRequest, res: Response, next
     }
 
     if (search) {
-      query += ' AND (p.item_name LIKE ? OR p.description LIKE ?)';
-      countQuery += ' AND (p.item_name LIKE ? OR p.description LIKE ?)';
+      query += ' AND (p.item_name LIKE ? OR p.description LIKE ? OR p.unit LIKE ? OR p.notes LIKE ?)';
+      countQuery += ' AND (p.item_name LIKE ? OR p.description LIKE ? OR p.unit LIKE ? OR p.notes LIKE ?)';
       const searchVal = `%${search}%`;
-      params.push(searchVal, searchVal);
-      countParams.push(searchVal, searchVal);
+      params.push(searchVal, searchVal, searchVal, searchVal);
+      countParams.push(searchVal, searchVal, searchVal, searchVal);
     }
 
     query += ' ORDER BY p.item_name ASC LIMIT ? OFFSET ?';
@@ -92,17 +89,14 @@ pricingRouter.get('/:id', requireAuth, async (req: AuthRequest, res: Response, n
       `SELECT 
         p.id as pricing_id,
         p.item_name as pricing_item,
-        CASE 
-          WHEN p.description LIKE '%|%|%' THEN TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(p.description, ' | ', 2), ' | ', -1))
-          ELSE p.description
-        END as pricing_note,
+        p.notes as pricing_note,
         p.unit_price as pricing_price,
-        SUBSTRING_INDEX(p.description, ' | ', 1) as pricing_unit,
+        p.unit as pricing_unit,
         p.category_id as pricing_category_id,
         c.category_name
       FROM pricing p 
       LEFT JOIN categories c ON p.category_id = c.id 
-      WHERE p.id = ?`,
+      WHERE p.id = ? AND p.is_deleted = 0`,
       [id]
     );
     if (!item) {
@@ -126,6 +120,8 @@ pricingRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, nex
       category_id: data.pricing_category_id,
       item_name: data.pricing_item,
       description: [data.pricing_unit, data.pricing_note].filter(Boolean).join(' | '),
+      unit: data.pricing_unit || null,
+      notes: data.pricing_note || null,
       unit_price: data.pricing_price,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -138,12 +134,9 @@ pricingRouter.post('/', requireAuth, async (req: AuthRequest, res: Response, nex
       `SELECT 
         p.id as pricing_id,
         p.item_name as pricing_item,
-        CASE 
-          WHEN p.description LIKE '%|%|%' THEN TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(p.description, ' | ', 2), ' | ', -1))
-          ELSE p.description
-        END as pricing_note,
+        p.notes as pricing_note,
         p.unit_price as pricing_price,
-        SUBSTRING_INDEX(p.description, ' | ', 1) as pricing_unit,
+        p.unit as pricing_unit,
         p.category_id as pricing_category_id,
         c.category_name
       FROM pricing p 
@@ -166,7 +159,7 @@ pricingRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, n
     const { id } = req.params;
     const data = updatePricingSchema.parse(req.body);
 
-    const existing = await db.queryOne('SELECT id FROM pricing WHERE id = ?', [id]);
+    const existing = await db.queryOne('SELECT id FROM pricing WHERE id = ? AND is_deleted = 0', [id]);
     if (!existing) {
       throw notFound('Pricing item not found');
     }
@@ -179,6 +172,8 @@ pricingRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, n
     if (data.pricing_category_id !== undefined) dbData.category_id = data.pricing_category_id;
     if (data.pricing_item !== undefined) dbData.item_name = data.pricing_item;
     if (data.pricing_price !== undefined) dbData.unit_price = data.pricing_price;
+    if (data.pricing_unit !== undefined) dbData.unit = data.pricing_unit;
+    if (data.pricing_note !== undefined) dbData.notes = data.pricing_note;
     if (data.pricing_note !== undefined || data.pricing_unit !== undefined) {
       dbData.description = [data.pricing_unit, data.pricing_note].filter(Boolean).join(' | ');
     }
@@ -193,12 +188,9 @@ pricingRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, n
       `SELECT 
         p.id as pricing_id,
         p.item_name as pricing_item,
-        CASE 
-          WHEN p.description LIKE '%|%|%' THEN TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(p.description, ' | ', 2), ' | ', -1))
-          ELSE p.description
-        END as pricing_note,
+        p.notes as pricing_note,
         p.unit_price as pricing_price,
-        SUBSTRING_INDEX(p.description, ' | ', 1) as pricing_unit,
+        p.unit as pricing_unit,
         p.category_id as pricing_category_id,
         c.category_name
       FROM pricing p 
@@ -219,11 +211,11 @@ pricingRouter.put('/:id', requireAuth, async (req: AuthRequest, res: Response, n
 pricingRouter.delete('/:id', requireAuth, async (req: AuthRequest, res: Response, next) => {
   try {
     const { id } = req.params;
-    const existing = await db.queryOne('SELECT id FROM pricing WHERE id = ?', [id]);
+    const existing = await db.queryOne('SELECT id FROM pricing WHERE id = ? AND is_deleted = 0', [id]);
     if (!existing) {
       throw notFound('Pricing item not found');
     }
-    await db.execute('DELETE FROM pricing WHERE id = ?', [id]);
+    await db.execute('UPDATE pricing SET is_deleted = 1, updated_at = ? WHERE id = ?', [new Date().toISOString(), id]);
     res.json({ success: true, message: 'Pricing item deleted' });
   } catch (err) {
     next(err);
@@ -312,15 +304,15 @@ pricingRouter.post('/import', requireAuth, async (req: AuthRequest, res: Respons
       
       // Check if item already exists by id or item_name
       const existing = await db.queryOne<any>(
-        'SELECT id FROM pricing WHERE id = ? OR item_name = ?',
+        'SELECT id FROM pricing WHERE (id = ? OR item_name = ?) AND is_deleted = 0',
         [id, description]
       );
       
       if (existing) {
         // Update existing
         await db.execute(
-          'UPDATE pricing SET item_name = ?, unit_price = ?, description = ?, category_id = ?, updated_at = ? WHERE id = ?',
-          [description, price || 0, descriptionField, categoryId, new Date().toISOString(), existing.id]
+          'UPDATE pricing SET item_name = ?, unit_price = ?, description = ?, unit = ?, notes = ?, category_id = ?, updated_at = ? WHERE id = ?',
+          [description, price || 0, descriptionField, unit, notes, categoryId, new Date().toISOString(), existing.id]
         );
         updated++;
       } else {
@@ -329,6 +321,8 @@ pricingRouter.post('/import', requireAuth, async (req: AuthRequest, res: Respons
           item_name: description,
           unit_price: price || 0,
           description: descriptionField,
+          unit: unit,
+          notes: notes,
           category_id: categoryId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),

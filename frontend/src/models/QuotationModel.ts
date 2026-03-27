@@ -50,7 +50,15 @@ export class QuotationModel {
    * Convert quotation to invoice
    */
   static async convertToInvoice(quoteId: number) {
-    const response = await api.post<{ success: boolean; invoice_id: number }>(`/quotations/${quoteId}/convert-to-invoice`, {});
+    const response = await api.post<{ success: boolean; message: string; data: any }>(`/quotations/${quoteId}/convert-to-invoice`, {});
+    return response.data;
+  }
+
+  /**
+   * Convert quotation to proforma invoice
+   */
+  static async convertToProforma(quoteId: number) {
+    const response = await api.post<{ success: boolean; data: any }>(`/quotations/${quoteId}/convert-to-proforma`, {});
     return response.data;
   }
 
@@ -65,7 +73,7 @@ export class QuotationModel {
   /**
    * Send quotation via email
    */
-  static async sendEmail(id: number, data: { to: string; subject: string; body: string }) {
+  static async sendEmail(id: number, data: { to: string; cc?: string; subject: string; body: string }) {
     const response = await api.post<{ success: boolean; message: string }>(`/quotations/${id}/send-email`, data);
     return response.data;
   }

@@ -24,8 +24,10 @@ import {
   FireIcon,
   ArrowRightIcon,
   ClockIcon,
+  InformationCircleIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
+import AiMarkdown from '../../components/AI/AiMarkdown';
 import Swal from 'sweetalert2';
 import api from '../../services/api';
 import { useAppStore } from '../../store';
@@ -691,6 +693,7 @@ const BugsPage: React.FC = () => {
           onClose={() => setDetailBug(null)}
           bug={detailBug}
           userName={userName}
+          hasAiTools={!!user?.ai_developer_tools_granted}
           onRefresh={async () => {
             try {
               const res = await BugsModel.getById(detailBug.id);
@@ -1077,19 +1080,60 @@ const AttachmentFile: React.FC<{
   );
 };
 
+/* AiMarkdown is now imported from ../../components/AI/AiMarkdown */
+
 const BugDetailDialog: React.FC<{
   open: boolean;
   onClose: () => void;
   bug: Bug;
   userName: string;
+  hasAiTools: boolean;
   onRefresh: () => void;
   onConvertToTask: () => void;
-}> = ({ open, onClose, bug, userName, onRefresh, onConvertToTask }) => {
+}> = ({ open, onClose, bug, userName, hasAiTools, onRefresh, onConvertToTask }) => {
   const [commentText, setCommentText] = useState('');
   const [addingComment, setAddingComment] = useState(false);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'attachments'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'attachments' | 'ai'>('details');
+
+  /* ── AI Resolution state ────────────────────────────────── */
+  const [assistant, setAssistant] = useState<{id: string; name: string; is_staff_agent: number; personality_flare?: string} | null>(null);
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [aiMessages, setAiMessages] = useState<Array<{role: 'user' | 'assistant'; content: string}>>([]);
+  const [aiInput, setAiInput] = useState('');
+  const [aiSending, setAiSending] = useState(false);
+  const [aiConversationId, setAiConversationId] = useState<string | null>(null);
+  const [aiSessionStarted, setAiSessionStarted] = useState(false);
+  const [showAiInfo, setShowAiInfo] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (hasAiTools && open) {
+      setAssistantLoading(true);
+      api.get('/v1/mobile/my-assistant')
+        .then(res => {
+          const list = res.data.assistants || res.data.data || [];
+          const found = Array.isArray(list) ? list[0] || null : list;
+          setAssistant(found);
+        })
+        .catch(() => setAssistant(null))
+        .finally(() => setAssistantLoading(false));
+    }
+  }, [hasAiTools, open]);
+
+  // Auto-scroll chat
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [aiMessages]);
+
+  // Reset AI state when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setAiMessages([]);
+      setAiConversationId(null);
+      setAiSessionStarted(false);
+      setAiInput('');
+    }
+  }, [open]);
 
   if (!open || !bug) return null;
 
@@ -1132,108 +1176,180 @@ const BugDetailDialog: React.FC<{
     catch { notify.error('Failed'); }
   };
 
+  /* ── AI helpers ─────────────────────────────────────────── */
+  const startAiSession = () => {
+    if (!assistant) return;
+    setAiSessionStarted(true);
+    
+    // Check if a codebase is linked, and explicitly state it so the AI doesn't hallucinate
+    const hasCodebase = bug.software_id ? true : false;
+    
+    const bugContext = [
+      `Bug #${bug.id}: ${bug.title}`,
+      `Severity: ${bug.severity} | Status: ${bug.status} | Phase: ${bug.workflow_phase}`,
+      bug.software_name ? `Software: ${bug.software_name} (ID: ${bug.software_id})` : 'Software: None selected',
+      hasCodebase ? `*** A codebase is linked (softwareId: ${bug.software_id}). You may use developer tools to modify it. ***` : `*** NO CODEBASE IS LINKED. You CANNOT use developer tools to modify files or run servers for this bug. Tell the user they need to link a software project to this bug first. ***`,
+      bug.description ? `Description: ${bug.description.replace(/<[^>]*>/g, '')}` : '',
+      bug.current_behaviour ? `Current Behaviour: ${bug.current_behaviour}` : '',
+      bug.expected_behaviour ? `Expected Behaviour: ${bug.expected_behaviour}` : '',
+    ].filter(Boolean).join('\n');
+    const initMessage = `I need help resolving this bug:\n\n${bugContext}\n\nPlease analyze this issue and suggest a fix.`;
+    sendAiMessage(initMessage, true);
+  };
+
+  const sendAiMessage = async (text: string, isInit = false) => {
+    if (!text.trim() || !assistant) return;
+    const userMsg = { role: 'user' as const, content: text };
+    setAiMessages(prev => [...prev, userMsg]);
+    if (!isInit) setAiInput('');
+    setAiSending(true);
+    try {
+      const res = await api.post('/v1/mobile/intent', {
+        text,
+        conversationId: aiConversationId || undefined,
+        assistantId: assistant.id,
+      });
+      const data = res.data;
+      if (data.conversationId) setAiConversationId(data.conversationId);
+      setAiMessages(prev => [...prev, { role: 'assistant', content: data.reply || 'No response received.' }]);
+    } catch (err: any) {
+      setAiMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.response?.data?.error || err.message || 'Request failed'}` }]);
+    } finally {
+      setAiSending(false);
+    }
+  };
+
+  const handleAiKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendAiMessage(aiInput);
+    }
+  };
+
   const tabs = [
-    { key: 'details'     as const, label: 'Details'                          },
-    { key: 'comments'    as const, label: `Comments (${comments.length})`    },
-    { key: 'attachments' as const, label: `Attachments (${attachments.length})` },
+    { key: 'details'     as const, label: 'Details',     icon: DocumentTextIcon },
+    { key: 'comments'    as const, label: `Comments (${comments.length})`, icon: ChatBubbleLeftIcon },
+    { key: 'attachments' as const, label: `Files (${attachments.length})`, icon: PaperClipIcon },
+    ...(hasAiTools ? [{ key: 'ai' as const, label: 'AI Resolution', icon: FireIcon }] : []),
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl mx-4 max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center shadow-sm flex-shrink-0">
-              <BugAntIcon className="w-4 h-4 text-white" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl mx-4 h-[95vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+
+        {/* ═══ HEADER ═══ */}
+        <div className="flex items-center justify-between px-6 py-4 border-b bg-gradient-to-r from-slate-50 to-white flex-shrink-0">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center shadow-md flex-shrink-0">
+              <BugAntIcon className="w-5 h-5 text-white" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-400 font-mono">#{bug.id}</span>
-                <h3 className="text-base font-semibold truncate">{bug.title}</h3>
+                <h3 className="text-lg font-bold text-gray-900 truncate">{bug.title}</h3>
               </div>
-              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${SEVERITY_COLORS[bug.severity]}`}>{bug.severity}</span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${STATUS_COLORS[bug.status]}`}>{bug.status}</span>
+              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${SEVERITY_COLORS[bug.severity]}`}>{bug.severity}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${STATUS_COLORS[bug.status]}`}>{bug.status}</span>
                 <span className={`text-[10px] inline-flex items-center gap-0.5 ${phase.color}`}>
                   <PhaseIcon className="w-3 h-3" /> {phase.label}
                 </span>
+                {bug.software_name && <span className="text-[10px] text-gray-400">· {bug.software_name}</span>}
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0">
             {!bug.converted_to_task && (
               <button onClick={onConvertToTask}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100">
-                <ArrowsRightLeftIcon className="w-3.5 h-3.5" /> To Task
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition">
+                <ArrowsRightLeftIcon className="w-3.5 h-3.5" /> Convert to Task
               </button>
             )}
-            <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 ml-1"><XMarkIcon className="w-5 h-5" /></button>
+            <button onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100 transition"><XMarkIcon className="w-5 h-5 text-gray-400" /></button>
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b px-4 flex-shrink-0">
-          {tabs.map(tab => (
-            <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${activeTab === tab.key ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-              {tab.label}
-            </button>
-          ))}
+        {/* ═══ TABS ═══ */}
+        <div className="flex border-b bg-gray-50/50 px-6 flex-shrink-0">
+          {tabs.map(tab => {
+            const Icon = tab.icon;
+            return (
+              <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+                className={`inline-flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-all ${
+                  activeTab === tab.key
+                    ? 'border-red-500 text-red-600 bg-white'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-white/60'
+                }`}>
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5">
+        {/* ═══ BODY ═══ */}
+        <div className="flex-1 overflow-y-auto">
+
+          {/* ─── DETAILS TAB ─── */}
           {activeTab === 'details' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div><span className="text-gray-500">Reporter:</span><span className="ml-2 font-medium">{bug.reporter_name}</span></div>
-                <div><span className="text-gray-500">Software:</span><span className="ml-2 font-medium">{bug.software_name || '—'}</span></div>
-                <div><span className="text-gray-500">Assigned To:</span><span className="ml-2 font-medium">{bug.assigned_to_name || '—'}</span></div>
-                <div><span className="text-gray-500">Created:</span><span className="ml-2">{bug.created_at ? new Date(bug.created_at).toLocaleString() : '—'}</span></div>
-                {bug.resolved_at && (
-                  <div><span className="text-gray-500">Resolved:</span><span className="ml-2">{new Date(bug.resolved_at).toLocaleString()} by {bug.resolved_by}</span></div>
-                )}
-                {bug.linked_task && (
-                  <div className="col-span-2">
-                    <span className="text-gray-500">Linked Task:</span>
-                    <span className="ml-2 text-indigo-600 font-medium">#{bug.linked_task.external_id || bug.linked_task.id} — {bug.linked_task.title}</span>
+            <div className="p-6 space-y-5">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {[
+                  { label: 'Reporter', value: bug.reporter_name },
+                  { label: 'Assigned To', value: bug.assigned_to_name || '—' },
+                  { label: 'Software', value: bug.software_name || '—' },
+                  { label: 'Created', value: bug.created_at ? new Date(bug.created_at).toLocaleString() : '—' },
+                ].map(item => (
+                  <div key={item.label} className="bg-gray-50 rounded-lg p-3">
+                    <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">{item.label}</p>
+                    <p className="text-sm font-medium text-gray-800 mt-1">{item.value}</p>
                   </div>
-                )}
+                ))}
               </div>
+              {bug.resolved_at && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm">
+                  <span className="font-medium text-emerald-700">Resolved:</span> {new Date(bug.resolved_at).toLocaleString()} by {bug.resolved_by}
+                </div>
+              )}
+              {bug.linked_task && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-sm">
+                  <span className="font-medium text-indigo-700">Linked Task:</span> #{bug.linked_task.external_id || bug.linked_task.id} — {bug.linked_task.title}
+                </div>
+              )}
               {bug.description && (
                 <div>
-                  <h4 className="text-sm font-semibold text-gray-700 mb-1">Description</h4>
-                  <div className="text-sm text-gray-600 bg-gray-50 rounded-lg p-3" dangerouslySetInnerHTML={{ __html: bug.description }} />
+                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Description</h4>
+                  <div className="text-sm text-gray-700 bg-gray-50 rounded-lg p-4 leading-relaxed" dangerouslySetInnerHTML={{ __html: bug.description }} />
                 </div>
               )}
               {bug.current_behaviour && (
                 <div>
-                  <h4 className="text-sm font-semibold text-red-600 mb-1">🔴 Current Behaviour</h4>
-                  <div className="text-sm text-gray-600 bg-red-50 rounded-lg p-3 border border-red-200">{bug.current_behaviour}</div>
+                  <h4 className="text-xs font-semibold text-red-500 uppercase tracking-wider mb-2">🔴 Current Behaviour</h4>
+                  <div className="text-sm text-gray-700 bg-red-50 rounded-lg p-4 border border-red-200">{bug.current_behaviour}</div>
                 </div>
               )}
               {bug.expected_behaviour && (
                 <div>
-                  <h4 className="text-sm font-semibold text-green-600 mb-1">🟢 Expected Behaviour</h4>
-                  <div className="text-sm text-gray-600 bg-green-50 rounded-lg p-3 border border-green-200">{bug.expected_behaviour}</div>
+                  <h4 className="text-xs font-semibold text-green-500 uppercase tracking-wider mb-2">🟢 Expected Behaviour</h4>
+                  <div className="text-sm text-gray-700 bg-green-50 rounded-lg p-4 border border-green-200">{bug.expected_behaviour}</div>
                 </div>
               )}
               {bug.resolution_notes && (
                 <div>
-                  <h4 className="text-sm font-semibold text-emerald-600 mb-1">✅ Resolution Notes</h4>
-                  <div className="text-sm text-gray-600 bg-emerald-50 rounded-lg p-3">{bug.resolution_notes}</div>
+                  <h4 className="text-xs font-semibold text-emerald-500 uppercase tracking-wider mb-2">✅ Resolution Notes</h4>
+                  <div className="text-sm text-gray-700 bg-emerald-50 rounded-lg p-4">{bug.resolution_notes}</div>
                 </div>
               )}
             </div>
           )}
 
+          {/* ─── COMMENTS TAB ─── */}
           {activeTab === 'comments' && (
-            <div className="space-y-3">
+            <div className="p-6 space-y-3">
               {comments.length === 0
-                ? <div className="text-center py-8"><ChatBubbleLeftIcon className="h-8 w-8 text-gray-300 mx-auto mb-2" /><p className="text-sm text-gray-400">No comments yet</p></div>
+                ? <div className="text-center py-16"><ChatBubbleLeftIcon className="h-10 w-10 text-gray-200 mx-auto mb-3" /><p className="text-sm text-gray-400">No comments yet</p></div>
                 : comments.map(c => (
-                  <div key={c.id} className={`rounded-lg p-3 text-sm ${c.comment_type === 'workflow_change' || c.comment_type === 'status_change' ? 'bg-indigo-50 border border-indigo-200' : 'bg-gray-50 border border-gray-200'}`}>
+                  <div key={c.id} className={`rounded-lg p-3.5 text-sm ${c.comment_type === 'workflow_change' || c.comment_type === 'status_change' ? 'bg-indigo-50 border border-indigo-200' : 'bg-gray-50 border border-gray-200'}`}>
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-gray-700">{c.author_name}</span>
@@ -1253,12 +1369,12 @@ const BugDetailDialog: React.FC<{
                   </div>
                 ))
               }
-              <div className="pt-3 border-t">
+              <div className="pt-4 border-t">
                 <textarea value={commentText} onChange={e => setCommentText(e.target.value)} rows={3}
-                  className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Add a comment..." />
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-200 focus:border-red-400 transition" placeholder="Add a comment..." />
                 <div className="flex justify-end mt-2">
                   <button onClick={addComment} disabled={addingComment || !commentText.trim()}
-                    className="px-4 py-1.5 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50">
+                    className="px-4 py-2 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition">
                     {addingComment ? 'Adding…' : 'Add Comment'}
                   </button>
                 </div>
@@ -1266,12 +1382,13 @@ const BugDetailDialog: React.FC<{
             </div>
           )}
 
+          {/* ─── ATTACHMENTS TAB ─── */}
           {activeTab === 'attachments' && (() => {
             const imageAtts = attachments.filter(a => a.mime_type?.startsWith('image/') ||
               /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(a.original_name));
             const fileAtts  = attachments.filter(a => !imageAtts.includes(a));
             return (
-              <div className="space-y-4">
+              <div className="p-6 space-y-4">
                 {/* Upload bar */}
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-400">
@@ -1282,7 +1399,7 @@ const BugDetailDialog: React.FC<{
                   <button
                     onClick={() => fileRef.current?.click()}
                     disabled={uploading}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition"
                   >
                     <ArrowUpTrayIcon className="h-3.5 w-3.5" />{uploading ? 'Uploading…' : 'Add Files'}
                   </button>
@@ -1328,6 +1445,221 @@ const BugDetailDialog: React.FC<{
               </div>
             );
           })()}
+
+          {/* ─── AI RESOLUTION TAB ─── */}
+          {activeTab === 'ai' && (
+            <div className="flex flex-col h-[calc(95vh-130px)]">
+              {assistantLoading ? (
+                <div className="flex-1 flex items-center justify-center">
+                  <ArrowPathIcon className="w-6 h-6 text-gray-300 animate-spin" />
+                </div>
+              ) : !assistant ? (
+                /* No assistant — onboarding CTA */
+                <div className="flex-1 flex items-center justify-center p-8">
+                  <div className="text-center max-w-md">
+                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-orange-100 to-red-100 flex items-center justify-center mx-auto mb-4">
+                      <FireIcon className="w-8 h-8 text-orange-400" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 mb-2">Personal Assistant Required</h3>
+                    <p className="text-sm text-gray-500 mb-6 leading-relaxed">
+                      To use AI-powered bug resolution, you need to create your Personal Assistant first.
+                      Your assistant will learn your preferences and help you debug issues using the linked codebase.
+                    </p>
+                    <a href="/portal/create-assistant"
+                      className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-red-600 to-rose-600 text-white text-sm font-semibold rounded-xl shadow-lg hover:shadow-xl hover:from-red-700 hover:to-rose-700 transition-all">
+                      <FireIcon className="w-4 h-4" /> Create Your Assistant
+                    </a>
+                  </div>
+                </div>
+              ) : !aiSessionStarted ? (
+                /* Assistant found — start session */
+                <div className="flex-1 flex items-center justify-center p-8">
+                  <div className="text-center max-w-lg">
+                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center mx-auto mb-4">
+                      <FireIcon className="w-8 h-8 text-emerald-500" />
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 mb-1">Ready to debug with {assistant.name}</h3>
+                    <p className="text-sm text-gray-500 mb-2">
+                      {assistant.personality_flare || 'Your AI assistant is ready to help resolve this bug.'}
+                    </p>
+                    <div className="bg-gray-50 rounded-xl p-4 text-left mb-6 border">
+                      <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Bug Context</p>
+                      <p className="text-sm font-medium text-gray-800">{bug.title}</p>
+                      <p className="text-xs text-gray-500 mt-1">{bug.severity} · {bug.status} · {phase.label}</p>
+                      {bug.description && <p className="text-xs text-gray-500 mt-2 line-clamp-3">{bug.description.replace(/<[^>]*>/g, '')}</p>}
+                    </div>
+                    <button onClick={startAiSession}
+                      className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-slate-800 to-slate-900 text-white text-sm font-semibold rounded-xl shadow-lg hover:shadow-xl hover:from-slate-900 hover:to-black transition-all">
+                      <CodeBracketIcon className="w-4 h-4" /> Start Resolution with {assistant.name}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Active chat session */
+                <>
+                  {/* Chat header */}
+                  <div className="flex items-center justify-between px-6 py-3 border-b bg-slate-50 flex-shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-teal-500 flex items-center justify-center">
+                        <FireIcon className="w-4 h-4 text-white" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">{assistant.name}</p>
+                        <p className="text-[10px] text-gray-400">AI Developer Assistant · Bug #{bug.id}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {aiConversationId && <span className="text-[10px] text-gray-300 font-mono">Session: {aiConversationId.slice(0, 8)}</span>}
+                      <button
+                        onClick={() => setShowAiInfo(prev => !prev)}
+                        className={`p-1.5 rounded-lg transition ${
+                          showAiInfo ? 'bg-blue-100 text-blue-600' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                        }`}
+                        title="How does this work?"
+                      >
+                        <InformationCircleIcon className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* ── AI Info Panel ── */}
+                  {showAiInfo && (
+                    <div className="border-b bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-4 flex-shrink-0">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <InformationCircleIcon className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                          <h4 className="text-sm font-bold text-gray-800">How AI Bug Resolution Works</h4>
+                        </div>
+                        <button onClick={() => setShowAiInfo(false)} className="text-gray-400 hover:text-gray-600 p-0.5">
+                          <XMarkIcon className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-gray-600">
+                        {/* Pipeline */}
+                        <div className="bg-white/70 rounded-lg p-3 border border-blue-100">
+                          <p className="font-semibold text-gray-700 mb-1.5">🔄 The Pipeline</p>
+                          <p className="leading-relaxed">
+                            Your messages are sent to your <strong>Personal Assistant</strong>, which uses a local AI model to understand the bug.
+                            The AI can call <strong>developer tools</strong> (read, search, and modify files) against the linked codebase.
+                            Each tool call is validated, executed, and the result is fed back to the AI for further reasoning.
+                          </p>
+                        </div>
+
+                        {/* Security */}
+                        <div className="bg-white/70 rounded-lg p-3 border border-blue-100">
+                          <p className="font-semibold text-gray-700 mb-1.5">🔒 Security & Safety</p>
+                          <p className="leading-relaxed">
+                            File changes are <strong>sandboxed</strong> to the linked codebase directory only — no access outside <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">/var/www/code/</code>.
+                            Tools are only available if an admin has <strong>granted you AI Developer Tools</strong> and the bug's software has a <strong>linked codebase</strong> configured.
+                          </p>
+                        </div>
+
+                        {/* Tools */}
+                        <div className="bg-white/70 rounded-lg p-3 border border-blue-100">
+                          <p className="font-semibold text-gray-700 mb-1.5">🛠️ Available Tools</p>
+                          <ul className="space-y-1 leading-relaxed">
+                            <li><strong>List Files</strong> — Browse the project directory structure</li>
+                            <li><strong>Read File</strong> — Read the actual source code of any file</li>
+                            <li><strong>Search Code</strong> — Search for patterns, functions, or keywords across the codebase</li>
+                            <li><strong>Modify Codebase</strong> — Write or update files (after reading them first)</li>
+                            <li><strong>Run Dev Server</strong> — Start the dev server for testing</li>
+                          </ul>
+                        </div>
+
+                        {/* Tips */}
+                        <div className="bg-white/70 rounded-lg p-3 border border-blue-100">
+                          <p className="font-semibold text-gray-700 mb-1.5">💡 AI Workflow</p>
+                          <ul className="space-y-1 leading-relaxed">
+                            <li>The AI will <strong>explore, read, and search</strong> your code before making changes.</li>
+                            <li>It will <strong>explain the root cause</strong> and propose a fix before modifying files.</li>
+                            <li>Changes are <strong>minimal and targeted</strong> — only the bug-related lines are changed.</li>
+                            <li>You can ask it to <strong>read specific files</strong> or search for code yourself.</li>
+                          </ul>
+                        </div>
+                      </div>
+
+                      {/* Status bar */}
+                      <div className="flex items-center gap-4 mt-3 pt-3 border-t border-blue-100 text-[10px]">
+                        <span className={`inline-flex items-center gap-1 font-medium ${
+                          bug.software_id ? 'text-emerald-600' : 'text-amber-600'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            bug.software_id ? 'bg-emerald-500' : 'bg-amber-500'
+                          }`} />
+                          {bug.software_id ? `Codebase linked (Software #${bug.software_id})` : 'No codebase linked — guidance only'}
+                        </span>
+                        <span className="text-gray-400">·</span>
+                        <span className="text-gray-500">Assistant: {assistant.name}</span>
+                        <span className="text-gray-400">·</span>
+                        <span className="text-gray-500">Tools: {bug.software_id ? 'Active' : 'Disabled'}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Chat messages */}
+                  <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+                    {aiMessages.map((msg, i) => (
+                      <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-slate-800 text-white rounded-br-md'
+                            : 'bg-gray-100 text-gray-800 rounded-bl-md border border-gray-200'
+                        }`}>
+                          {msg.role === 'assistant' && (
+                            <p className="text-[10px] font-semibold text-emerald-600 mb-1">{assistant.name}</p>
+                          )}
+                          {msg.role === 'assistant' ? (
+                            <AiMarkdown content={msg.content} />
+                          ) : (
+                            <div className="whitespace-pre-wrap">{msg.content}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {aiSending && (
+                      <div className="flex justify-start">
+                        <div className="bg-gray-100 border border-gray-200 rounded-2xl rounded-bl-md px-4 py-3">
+                          <p className="text-[10px] font-semibold text-emerald-600 mb-1">{assistant.name}</p>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+
+                  {/* Chat input */}
+                  <div className="flex-shrink-0 border-t bg-white px-6 py-4">
+                    <div className="flex items-end gap-3">
+                      <textarea
+                        value={aiInput}
+                        onChange={e => setAiInput(e.target.value)}
+                        onKeyDown={handleAiKeyDown}
+                        rows={2}
+                        disabled={aiSending}
+                        placeholder={`Ask ${assistant.name} to analyze, fix, or test…`}
+                        className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm resize-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-400 transition disabled:opacity-50"
+                      />
+                      <button
+                        onClick={() => sendAiMessage(aiInput)}
+                        disabled={aiSending || !aiInput.trim()}
+                        className="px-5 py-3 bg-gradient-to-r from-slate-800 to-slate-900 text-white text-sm font-medium rounded-xl hover:from-slate-900 hover:to-black disabled:opacity-40 transition-all shadow"
+                      >
+                        {aiSending ? 'Sending…' : 'Send'}
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-2">
+                      Press Enter to send · Shift+Enter for new line · {assistant.name} has access to developer tools
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

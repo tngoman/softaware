@@ -1,9 +1,19 @@
 # Mobile App — Chat Advanced Features Wiring Guide
 
 > **Purpose**: Step-by-step guide for the React Native developer to implement the remaining chat features — Voice/Video Calling (WebRTC), Call History, Screen Sharing, Session Management, and DND Scheduling.
+> **Last Updated**: 2026-03-18
 > **Prerequisite docs**: `Chat/README.md`, `Chat/ROUTES.md`, `Chat/FIELDS.md`, `Chat/PATTERNS.md`
 > **Cross-references**: `Mobile/SCHEDULING_WIRING_GUIDE.md` (scheduled calls), `Mobile/APP_WIRING_AND_STATUS.md` (full app map)
 > **Backend base URL**: `https://api.softaware.net.za`
+
+### ⚠️ Backend Reliability Notes (v4.9 — 2026-03-18)
+
+The following backend fixes were applied to improve mobile push notification reliability:
+
+1. **Stale presence cleanup on restart** — When the backend restarts (pm2/deploy), all `user_presence` rows are reset to `offline`. Previously, stale `online` rows caused `pushToOfflineMembers` to skip users who were actually disconnected, silently dropping their push notifications.
+2. **User notification preference enforcement** — `pushToOfflineMembers` now checks `users.notifications_enabled` and `users.push_notifications_enabled` before sending FCM push. Previously only `createNotificationWithPush` (used by Tasks/Cases) checked these flags.
+3. **Improved FCM payloads** — iOS: added `content-available: 1`, `mutable-content: 1`, `apns-priority: 10` for reliable background wake. Android: chat notifications now use `softaware_chat` channel (register it in `AndroidManifest.xml`). Both platforms: `title` and `body` are duplicated into the `data` payload so background-killed apps can reconstruct the notification.
+4. **All call IDs are numbers** — `call_sessions.id` is `BIGINT AUTO_INCREMENT`, **not UUID**. The backend creates the call ID server-side via `POST /calls/initiate`. The mobile app must **not** generate call IDs.
 
 ---
 
@@ -119,7 +129,7 @@ export type CallType = 'voice' | 'video';
 export type CallStatus = 'ringing' | 'active' | 'ended' | 'missed' | 'declined';
 
 export interface CallSession {
-  id: string;                    // UUID
+  id: number;                    // BIGINT AUTO_INCREMENT (NOT UUID)
   conversation_id: number;
   type: CallType;
   initiated_by: string;          // user UUID
@@ -131,7 +141,7 @@ export interface CallSession {
 
 export interface CallParticipant {
   id: number;
-  call_id: string;
+  call_id: number;               // FK → call_sessions.id (BIGINT)
   user_id: string;
   joined_at: string | null;
   left_at: string | null;
@@ -143,7 +153,7 @@ export interface CallParticipant {
 }
 
 export interface CallHistoryEntry {
-  id: string;                    // call_session UUID
+  id: number;                    // call_sessions.id (BIGINT AUTO_INCREMENT)
   conversation_id: number;
   call_type: CallType;
   status: string;
@@ -169,10 +179,10 @@ export interface ICEServerConfig {
 // ─── Incoming Call Payload (from Socket.IO) ──────────────
 
 export interface IncomingCallPayload {
-  callId: string;
+  callId: number;                // BIGINT — from call_sessions.id
   callType: CallType;
   conversationId: number;
-  callerUserId: string;
+  callerId: string;              // caller's user UUID
   callerName: string;
   callerAvatar: string | null;
   conversationName: string | null;
@@ -182,22 +192,32 @@ export interface IncomingCallPayload {
 // ─── WebRTC Signaling Payloads ───────────────────────────
 
 export interface WebRTCOfferPayload {
+  callId: number;
+  conversationId: number;
   fromUserId: string;
+  targetUserId: string;
   sdp: RTCSessionDescriptionInit;
 }
 
 export interface WebRTCAnswerPayload {
+  callId: number;
+  conversationId: number;
   fromUserId: string;
+  targetUserId: string;
   sdp: RTCSessionDescriptionInit;
 }
 
 export interface WebRTCICECandidatePayload {
+  callId: number;
+  conversationId: number;
   fromUserId: string;
+  targetUserId: string;
   candidate: RTCIceCandidateInit;
 }
 
 export interface CallParticipantUpdate {
-  callId: string;
+  callId: number;
+  conversationId: number;
   userId: string;
   muted?: boolean;
   cameraOff?: boolean;
@@ -244,27 +264,27 @@ export async function getICEConfig(): Promise<ICEServerConfig> {
   return res.data;
 }
 
-/** Initiate a voice or video call */
+/** Initiate a voice or video call.
+ *  The backend creates the call_session row and returns the call_id.
+ *  Do NOT generate a call ID on the mobile side. */
 export async function initiateCall(
   conversationId: number,
   callType: 'voice' | 'video',
-  callId: string
-): Promise<CallSession> {
+): Promise<{ call_id: number; conversation_id: number; call_type: string; status: string }> {
   const res = await client.post('/staff-chat/calls/initiate', {
     conversation_id: conversationId,
     call_type: callType,
-    call_id: callId,
   });
-  return res.data;
+  return res.data.data;   // { call_id, conversation_id, call_type, status }
 }
 
 /** Accept an incoming call */
-export async function acceptCall(callId: string): Promise<void> {
+export async function acceptCall(callId: number): Promise<void> {
   await client.post(`/staff-chat/calls/${callId}/accept`);
 }
 
 /** End a call */
-export async function endCall(callId: string): Promise<void> {
+export async function endCall(callId: number): Promise<void> {
   await client.post(`/staff-chat/calls/${callId}/end`);
 }
 
@@ -281,7 +301,7 @@ export async function getCallHistory(
 
 /** Get single call detail with participants */
 export async function getCallDetail(
-  callId: string
+  callId: number
 ): Promise<{ call: CallSession; participants: CallParticipant[] }> {
   const res = await client.get(`/staff-chat/calls/${callId}`);
   return res.data;
@@ -387,7 +407,7 @@ class WebRTCService {
   private localStream: MediaStream | null = null;
   private remoteStreams: Map<string, MediaStream> = new Map();
   private iceConfig: ICEServerConfig | null = null;
-  private currentCallId: string | null = null;
+  private currentCallId: number | null = null;
   private currentCallType: CallType | null = null;
   private onEvent: CallEventCallback | null = null;
   private screenStream: MediaStream | null = null;
@@ -599,9 +619,10 @@ class WebRTCService {
 
   private currentConversationId: number = 0;
 
-  /** Start a new outgoing call */
+  /** Start a new outgoing call.
+   *  callId comes from the backend POST /calls/initiate response. */
   async startCall(
-    callId: string,
+    callId: number,
     conversationId: number,
     callType: CallType
   ): Promise<MediaStream> {
@@ -611,7 +632,7 @@ class WebRTCService {
 
     const stream = await this.acquireLocalMedia(callType);
 
-    // Emit call-initiate via socket
+    // Emit call-initiate via socket (backend uses this for room relay)
     const socket = getChatSocket();
     socket?.emit('call-initiate', {
       conversationId,
@@ -624,7 +645,7 @@ class WebRTCService {
 
   /** Accept an incoming call */
   async acceptIncomingCall(
-    callId: string,
+    callId: number,
     conversationId: number,
     callType: CallType
   ): Promise<MediaStream> {
@@ -641,7 +662,7 @@ class WebRTCService {
   }
 
   /** Decline an incoming call */
-  declineIncomingCall(callId: string, conversationId: number): void {
+  declineIncomingCall(callId: number, conversationId: number): void {
     const socket = getChatSocket();
     socket?.emit('call-decline', {
       callId,
@@ -693,7 +714,7 @@ class WebRTCService {
     return this.remoteStreams.get(userId) ?? null;
   }
   getAllRemoteStreams(): Map<string, MediaStream> { return this.remoteStreams; }
-  getCurrentCallId(): string | null { return this.currentCallId; }
+  getCurrentCallId(): number | null { return this.currentCallId; }
   getCurrentCallType(): CallType | null { return this.currentCallType; }
   isInCall(): boolean { return this.currentCallId !== null; }
 }
@@ -713,19 +734,19 @@ Add these emitter helper functions alongside the existing socket setup:
 ```typescript
 // ─── Call Signaling Emitters ─────────────────────────────
 
-export function emitCallInitiate(conversationId: number, callType: string, callId: string) {
+export function emitCallInitiate(conversationId: number, callType: string, callId: number) {
   socket?.emit('call-initiate', { conversationId, callType, callId });
 }
 
-export function emitCallAccept(callId: string, conversationId: number) {
+export function emitCallAccept(callId: number, conversationId: number) {
   socket?.emit('call-accept', { callId, conversationId });
 }
 
-export function emitCallDecline(callId: string, conversationId: number, reason?: string) {
+export function emitCallDecline(callId: number, conversationId: number, reason?: string) {
   socket?.emit('call-decline', { callId, conversationId, reason });
 }
 
-export function emitCallEnd(callId: string, conversationId: number) {
+export function emitCallEnd(callId: number, conversationId: number) {
   socket?.emit('call-end', { callId, conversationId });
 }
 ```
@@ -737,37 +758,51 @@ Register these listeners inside the existing `useEffect` that sets up socket eve
 ```typescript
 // ─── Call Signaling Listeners ────────────────────────────
 
-// Incoming call ring
-socket.on('call-ringing', (data: IncomingCallPayload) => {
-  // Update ChatContext with incoming call
-  setIncomingCall(data);
+// Incoming call ring — payload from backend emitCallRinging()
+socket.on('call-ringing', (data: {
+  callId: number;              // BIGINT from call_sessions.id
+  conversationId: number;
+  callType: 'voice' | 'video';
+  callerId: string;            // caller user UUID
+  callerName: string;
+}) => {
+  setIncomingCall({
+    callId: data.callId,
+    callType: data.callType,
+    conversationId: data.conversationId,
+    callerId: data.callerId,
+    callerName: data.callerName,
+    callerAvatar: null,           // avatar not in socket payload — fetch from cache
+    conversationName: null,
+    conversationType: 'direct',   // refine from local conversation cache
+  });
 });
 
 // Call accepted by remote party
-socket.on('call-accepted', (data: { callId: string; userId: string }) => {
-  // Trigger WebRTC offer exchange
+socket.on('call-accepted', (data: { callId: number; conversationId: number; userId: string }) => {
+  // Trigger WebRTC offer exchange — caller creates offer to the acceptor
   webrtcService.createOffer(data.userId);
 });
 
 // Call declined
-socket.on('call-declined', (data: { callId: string; userId: string; reason?: string }) => {
+socket.on('call-declined', (data: { callId: number; conversationId: number; userId: string; reason?: string }) => {
   // If all declined, show "call declined" toast
 });
 
 // Call ended
-socket.on('call-ended', (data: { callId: string; duration?: number }) => {
+socket.on('call-ended', (data: { callId: number; conversationId: number; endedBy: string; durationSeconds: number }) => {
   webrtcService.cleanup();
   setActiveCall(null);
   setIncomingCall(null);
 });
 
 // Call missed (45s timeout on backend)
-socket.on('call-missed', (data: { callId: string }) => {
+socket.on('call-missed', (data: { callId: number; conversationId: number }) => {
   setIncomingCall(null);
   // Show "Missed call" toast
 });
 
-// WebRTC signaling
+// WebRTC signaling — all events include callId + conversationId from backend relay
 socket.on('webrtc-offer', (data: WebRTCOfferPayload) => {
   webrtcService.handleOffer(data.fromUserId, data.sdp);
 });
@@ -809,7 +844,7 @@ Add these state fields and methods to the existing `ChatContext.tsx`:
 // ─── New State ───────────────────────────────────────────
 
 const [activeCall, setActiveCall] = useState<{
-  callId: string;
+  callId: number;                // BIGINT from backend — NOT UUID
   conversationId: number;
   callType: CallType;
   participants: Map<string, { muted: boolean; cameraOff: boolean }>;
@@ -819,11 +854,16 @@ const [incomingCall, setIncomingCall] = useState<IncomingCallPayload | null>(nul
 
 // ─── New Methods ─────────────────────────────────────────
 
-/** Start an outgoing call */
+/** Start an outgoing call.
+ *  IMPORTANT: The backend creates the call_session and returns the call_id.
+ *  Do NOT generate a call ID on the client side. */
 const startCall = async (conversationId: number, callType: CallType) => {
-  const callId = generateUUID(); // Use a UUID generator
+  // 1. POST to backend → creates call_session row, returns call_id
+  const { call_id: callId } = await chatApi.initiateCall(conversationId, callType);
+
+  // 2. Acquire media + emit socket call-initiate with the backend-assigned callId
   const stream = await webrtcService.startCall(callId, conversationId, callType);
-  await chatApi.initiateCall(conversationId, callType, callId);
+
   setActiveCall({
     callId,
     conversationId,
@@ -880,24 +920,54 @@ const value = {
 
 ## 9. Push Notifications for Calls
 
-### FCM Payload Format (sent by backend)
+### FCM Payload Format (sent by backend — v4.9)
+
+The backend sends both `notification` and `data` payloads. As of v4.9, `title` and `body` are duplicated into the `data` payload so background-killed apps can reconstruct the notification.
 
 ```json
 {
   "notification": {
     "title": "Incoming video call",
-    "body": "John Doe is calling...",
-    "priority": "high"
+    "body": "John Doe is calling..."
   },
   "data": {
     "type": "incoming_call",
-    "callId": "uuid-here",
+    "title": "Incoming video call",
+    "body": "John Doe is calling...",
+    "callId": "42",
     "callType": "video",
     "conversationId": "123",
+    "callerId": "user-uuid-here",
     "callerName": "John Doe",
-    "callerAvatar": "/uploads/avatars/john.jpg"
+    "priority": "high",
+    "link": "/chat?c=123"
+  },
+  "android": {
+    "priority": "high",
+    "notification": {
+      "channelId": "softaware_chat",
+      "sound": "default"
+    }
+  },
+  "apns": {
+    "headers": { "apns-priority": "10" },
+    "payload": {
+      "aps": {
+        "sound": "default",
+        "badge": 1,
+        "content-available": 1,
+        "mutable-content": 1
+      }
+    }
   }
 }
+```
+
+> **⚠️ Android Notification Channel**: The mobile app **must** register a notification channel named `softaware_chat` in addition to the existing `softaware_default`. Chat messages and calls use `softaware_chat`; other modules use `softaware_default`. If the channel doesn't exist, Android silently drops the notification.
+>
+> **⚠️ Data payload parsing**: All `data` values are strings (FCM requirement). Parse `callId` and `conversationId` with `parseInt()`.
+>
+> **⚠️ iOS content-available**: The `content-available: 1` flag wakes the app in background for silent processing. Combined with `mutable-content: 1`, this allows a Notification Service Extension to modify the notification before display (e.g., fetch caller avatar).
 ```
 
 ### Handle in `src/services/chatNotificationHandler.ts`
@@ -908,19 +978,21 @@ Add a case for `incoming_call` in the existing notification handler:
 case 'incoming_call': {
   // If app is in foreground, set incomingCall in ChatContext
   // which will show IncomingCallModal
+  // NOTE: FCM data values are always strings — parse numbers!
   chatContext.setIncomingCall({
-    callId: data.callId,
+    callId: parseInt(data.callId),           // number, not UUID
     callType: data.callType as CallType,
     conversationId: parseInt(data.conversationId),
-    callerUserId: data.callerUserId,
+    callerId: data.callerId,                 // user UUID string
     callerName: data.callerName,
-    callerAvatar: data.callerAvatar,
-    conversationName: data.conversationName ?? null,
-    conversationType: data.conversationType ?? 'direct',
+    callerAvatar: null,                      // not in push data — fetch from cache
+    conversationName: null,
+    conversationType: 'direct',
   });
 
-  // Optionally use react-native-callkeep for native call UI
-  // RNCallKeep.displayIncomingCall(data.callId, data.callerName, data.callerName);
+  // Use react-native-callkeep for native call UI (Android/iOS)
+  // NOTE: CallKeep requires string UUIDs — convert callId to string
+  // RNCallKeep.displayIncomingCall(String(data.callId), data.callerName, data.callerName);
   break;
 }
 ```
@@ -1253,17 +1325,19 @@ Add a screen share button to `InCallScreen` controls. When active, swap the loca
 
 ### Server → Client (listen on mobile)
 
+> **All `callId` values are numbers** (BIGINT AUTO_INCREMENT), not UUIDs.
+
 | Event | Payload | Action |
 |-------|---------|--------|
-| `call-ringing` | `{ callId, callType, callerName, callerAvatar, ... }` | Show `IncomingCallModal` |
-| `call-accepted` | `{ callId, userId }` | Begin WebRTC exchange |
-| `call-declined` | `{ callId, userId, reason }` | Show toast if all declined |
-| `call-ended` | `{ callId, duration }` | Cleanup WebRTC, navigate back |
-| `call-missed` | `{ callId }` | Dismiss modal, show "Missed" toast |
-| `webrtc-offer` | `{ fromUserId, sdp }` | `webrtcService.handleOffer()` |
-| `webrtc-answer` | `{ fromUserId, sdp }` | `webrtcService.handleAnswer()` |
-| `webrtc-ice-candidate` | `{ fromUserId, candidate }` | `webrtcService.handleIceCandidate()` |
-| `call-participant-updated` | `{ callId, userId, muted?, cameraOff? }` | Update participant UI |
+| `call-ringing` | `{ callId: number, conversationId, callType, callerId, callerName }` | Show `IncomingCallModal` |
+| `call-accepted` | `{ callId: number, conversationId, userId }` | Begin WebRTC exchange |
+| `call-declined` | `{ callId: number, conversationId, userId, reason }` | Show toast if all declined |
+| `call-ended` | `{ callId: number, conversationId, endedBy, durationSeconds }` | Cleanup WebRTC, navigate back |
+| `call-missed` | `{ callId: number, conversationId }` | Dismiss modal, show "Missed" toast |
+| `webrtc-offer` | `{ callId: number, conversationId, fromUserId, targetUserId, sdp }` | `webrtcService.handleOffer()` |
+| `webrtc-answer` | `{ callId: number, conversationId, fromUserId, targetUserId, sdp }` | `webrtcService.handleAnswer()` |
+| `webrtc-ice-candidate` | `{ callId: number, conversationId, fromUserId, targetUserId, candidate }` | `webrtcService.handleIceCandidate()` |
+| `call-participant-updated` | `{ callId: number, conversationId, userId, muted?, cameraOff? }` | Update participant UI |
 
 ---
 
@@ -1362,8 +1436,8 @@ Backend                    FCM                        Mobile (callee)
 
 | Backend Field | Mobile Mapping | Notes |
 |---------------|---------------|-------|
-| `call_sessions.id` | `string` (UUID) | Not auto-increment — generated client-side for `call-initiate` |
-| `call_sessions.type` | `'voice' \| 'video'` | Maps to `CallType` |
+| `call_sessions.id` | `number` (BIGINT) | **AUTO_INCREMENT, NOT UUID.** Created server-side by `POST /calls/initiate`. Never generate on mobile. |
+| `call_sessions.type` | `'voice' \| 'video'` | Maps to `CallType`. Backend column name is `type`, API returns as `call_type`. |
 | `call_sessions.status` | `'ringing' \| 'active' \| 'ended' \| 'missed' \| 'declined'` | 5 states |
 | `call_participants.muted` | `boolean` (TINYINT in DB) | 0/1 from API, treat as boolean |
 | `call_participants.camera_off` | `boolean` (TINYINT in DB) | 0/1 from API, treat as boolean |
@@ -1371,6 +1445,31 @@ Backend                    FCM                        Mobile (callee)
 | `user_presence.dnd_start/end` | `string` (`"HH:MM:SS"`) | MySQL TIME format, use time picker |
 | Call duration | `duration_seconds: number` | Backend computes from `started_at` → `ended_at` |
 | ICE config | `{ iceServers: [...] }` | Cache on the mobile side; refresh every 24h max |
+| FCM `data.*` values | `string` | FCM data payload values are always strings. Parse `callId`, `conversationId`, `badge` with `parseInt()`. |
+
+### Android Notification Channel Registration
+
+The backend now sends chat-related FCM notifications with `channelId: 'softaware_chat'`. The mobile app **must** create this channel at startup, otherwise Android silently drops chat/call notifications:
+
+```typescript
+import notifee from '@notifee/react-native'; // or your notification library
+
+// At app initialization:
+await notifee.createChannel({
+  id: 'softaware_chat',
+  name: 'Chat & Calls',
+  importance: AndroidImportance.HIGH,
+  sound: 'default',
+  vibration: true,
+});
+
+await notifee.createChannel({
+  id: 'softaware_default',
+  name: 'General Notifications',
+  importance: AndroidImportance.DEFAULT,
+  sound: 'default',
+});
+```
 
 ---
 

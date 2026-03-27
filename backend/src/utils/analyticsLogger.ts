@@ -39,12 +39,14 @@ function getDb(): Database.Database {
   _db.pragma('busy_timeout = 5000');
 
   // Create the analytics log table if it doesn't exist
+  // NOTE: source column has no CHECK constraint — any string is valid.
+  // Known sources: assistant, widget, enterprise, ingestion, sitebuilder,
+  //                desktop, mobile-tts, case-analyzer, categorizer
   _db.exec(`
     CREATE TABLE IF NOT EXISTS ai_analytics_logs (
       id                  INTEGER PRIMARY KEY AUTOINCREMENT,
       client_id           TEXT,
-      source              TEXT DEFAULT 'assistant'
-                          CHECK(source IN ('assistant','widget','enterprise')),
+      source              TEXT DEFAULT 'assistant',
       sanitized_prompt    TEXT,
       sanitized_response  TEXT,
       model               TEXT,
@@ -53,6 +55,35 @@ function getDb(): Database.Database {
       created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migrate: drop the old CHECK constraint if the table already exists with one.
+  // SQLite can't ALTER CHECK constraints, so we detect it and recreate.
+  try {
+    const tableInfo = _db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_analytics_logs'"
+    ).get() as { sql: string } | undefined;
+    if (tableInfo?.sql?.includes("CHECK(source IN")) {
+      _db.exec(`
+        ALTER TABLE ai_analytics_logs RENAME TO _ai_analytics_logs_old;
+        CREATE TABLE ai_analytics_logs (
+          id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id           TEXT,
+          source              TEXT DEFAULT 'assistant',
+          sanitized_prompt    TEXT,
+          sanitized_response  TEXT,
+          model               TEXT,
+          provider            TEXT,
+          duration_ms         INTEGER,
+          created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO ai_analytics_logs SELECT * FROM _ai_analytics_logs_old;
+        DROP TABLE _ai_analytics_logs_old;
+      `);
+      console.log('[Analytics] Migrated ai_analytics_logs — removed CHECK(source) constraint');
+    }
+  } catch (migErr) {
+    console.warn('[Analytics] CHECK migration skipped:', (migErr as Error).message);
+  }
 
   // Index for querying by client and time
   _db.exec(`

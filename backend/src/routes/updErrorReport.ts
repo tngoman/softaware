@@ -10,6 +10,7 @@
 
 import { Router } from 'express';
 import { z } from 'zod';
+import crypto from 'node:crypto';
 import { db } from '../db/mysql.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/requireAdmin.js';
@@ -239,6 +240,35 @@ updErrorReportRouter.post('/', async (req, res, next) => {
         ]
       );
       received++;
+
+      // Upsert into client_errors (deduplicated by hash) if we have a client record
+      if (client) {
+        try {
+          const msgStr = error.message.substring(0, 500);
+          const errorHash = crypto
+            .createHash('sha256')
+            .update([error.type, error.level, msgStr, error.file || ''].join('|'))
+            .digest('hex');
+
+          await db.execute(
+            `INSERT INTO client_errors
+              (client_id, error_type, error_level, error_message, error_file, error_line, error_trace, occurrences, first_seen_at, last_seen_at, is_cleared, error_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW(), 0, ?)
+             ON DUPLICATE KEY UPDATE
+               occurrences = occurrences + 1,
+               last_seen_at = NOW(),
+               is_cleared = 0,
+               error_message = VALUES(error_message),
+               error_trace = VALUES(error_trace)`,
+            [
+              client.id, error.type, error.level,
+              error.message.substring(0, 65000),
+              error.file, error.line, error.trace,
+              errorHash,
+            ]
+          );
+        } catch { /* ignore client_errors upsert failures */ }
+      }
     }
 
     // Update client error summary

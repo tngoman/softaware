@@ -13,6 +13,10 @@ import {
   CircleStackIcon,
   DocumentTextIcon,
   CheckBadgeIcon,
+  UserIcon,
+  FunnelIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
 } from '@heroicons/react/24/outline';
 import { notify } from '../../utils/notify';
 import Swal from 'sweetalert2';
@@ -22,7 +26,6 @@ import RichTextEditor from '../../components/RichTextEditor';
 
 /* ═══════════════════════════════════════════════════════════════
    Updates Administration — CRUD for update_releases
-   Mirrors the desktop updates/page.tsx (publish update packages)
    ═══════════════════════════════════════════════════════════════ */
 
 interface UpdateRelease {

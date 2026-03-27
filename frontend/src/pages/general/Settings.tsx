@@ -463,17 +463,29 @@ const SettingsPage: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Quotation Terms & Conditions
+                    PPE Quotation Terms & Conditions
                   </label>
                   <textarea
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     rows={3}
-                    placeholder="Enter quotation terms (e.g., validity period, lead time, etc.)"
+                    placeholder="Enter PPE quotation terms (e.g., validity period, lead time, etc.)"
                     {...register('site_quote_terms')}
                   />
                   {errors.site_quote_terms && (
                     <p className="mt-1 text-sm text-red-600">{errors.site_quote_terms.message}</p>
                   )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Web Services Quotation Terms & Conditions
+                  </label>
+                  <textarea
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    rows={3}
+                    placeholder="Enter Web Services quotation terms (e.g., payment schedule, project scope, etc.)"
+                    {...register('site_quote_terms_web')}
+                  />
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

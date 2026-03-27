@@ -12,7 +12,6 @@ import {
   NoSymbolIcon,
   ArrowPathIcon,
   BoltIcon,
-  FireIcon,
   ChartBarIcon,
   CurrencyDollarIcon,
   ServerStackIcon,
@@ -38,9 +37,9 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const COLORS = ['#6366F1', '#8B5CF6', '#EC4899', '#F59E0B', '#10B981', '#3B82F6', '#EF4444', '#14B8A6', '#F97316', '#A855F7'];
-const fmt = (n: number) => n.toLocaleString('en-ZA');
-const fmtR = (n: number) => `R${n.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const fmtUSD = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-ZA');
+const fmtR = (n: number | null | undefined) => `R${(n ?? 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtUSD = (n: number | null | undefined) => `$${(n ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
 const fmtBytes = (b: number) => {
   if (b >= 1e9) return `${(b / 1e9).toFixed(1)} GB`;
   if (b >= 1e6) return `${(b / 1e6).toFixed(0)} MB`;
@@ -199,19 +198,19 @@ const AIOverview: React.FC = () => {
 
   useEffect(() => { loadData(); }, []);
 
-  // Daily usage from package credit system for the chart
+  // Daily usage from telemetry for the chart
   const dailyUsage = useMemo(() => {
     if (!data) return [];
-    return (data.packageCredits?.dailyUsage || []).map(d => ({
+    return (data.telemetry?.dailyVolume || []).map((d: any) => ({
       ...d,
       label: new Date(d.day + 'T00:00').toLocaleDateString('en-ZA', { month: 'short', day: 'numeric' }),
     }));
   }, [data]);
 
-  // Usage by type from package system
-  const usageByType = useMemo(() => {
+  // Usage by source from telemetry
+  const usageBySource = useMemo(() => {
     if (!data) return [];
-    return (data.packageCredits?.usageByType || []).sort((a, b) => b.credits - a.credits);
+    return (data.telemetry?.bySource || []).sort((a: any, b: any) => b.cnt - a.cnt);
   }, [data]);
 
   if (loading) {
@@ -238,6 +237,7 @@ const AIOverview: React.FC = () => {
   const prov = data.providers;
   const mc = data.modelConfig;
   const ep = data.enterprise;
+  const gw = data.clientApiGateway || { total: 0, active: 0, paused: 0, disabled: 0, totalRequests: 0, configs: [] };
 
   return (
     <div className="space-y-4 max-w-[1600px]">
@@ -267,24 +267,33 @@ const AIOverview: React.FC = () => {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <HeroCard
           label="Total AI Requests"
-          value={fmt(sp.totalCreditsUsed)}
+          value={fmt(tel.totalLogs)}
           icon={BoltIcon}
           gradient="from-indigo-500 to-indigo-600"
-          subtitle={`${fmt(tel.totalLogs)} telemetry logs`}
+          subtitle={`Avg response ${fmt(tel.avgDurationMs)}ms`}
         />
         <HeroCard
-          label="Active Subscriptions"
-          value={fmt(data.packageCredits.activeSubscriptions)}
-          icon={UserGroupIcon}
+          label="OpenAI Spend"
+          value={sp.openAISpendUSD != null ? fmtUSD(sp.openAISpendUSD) : fmt(sp.openAIRequests || 0)}
+          icon={CurrencyDollarIcon}
           gradient="from-emerald-500 to-emerald-600"
-          subtitle={`${fmt(sp.totalCreditsBalance)} credits available`}
+          subtitle={sp.openAISpendUSD != null
+            ? `${fmt(sp.openAIRequests || 0)} requests · avg ${fmt(sp.openAIAvgMs || 0)}ms`
+            : (sp.openAIRequests || 0) > 0
+              ? `avg ${fmt(sp.openAIAvgMs || 0)}ms response`
+              : 'No OpenAI requests logged'
+          }
+          badge={sp.openAISpendUSD != null ? 'This month' : (sp.openAIRequests || 0) > 0 ? 'Requests' : undefined}
+          badgeColor="bg-white/20"
         />
         <HeroCard
-          label="Credits Consumed"
-          value={fmt(sp.totalCreditsUsed)}
-          icon={FireIcon}
+          label="Free AI Usage"
+          value={fmt((sp.glmRequests || 0) + (sp.ollamaRequests || 0))}
+          icon={ServerStackIcon}
           gradient="from-orange-500 to-orange-600"
-          subtitle={`${fmt(data.packageCredits.totalTransactions)} transactions`}
+          subtitle={`GLM: ${fmt(sp.glmRequests || 0)} · Ollama: ${fmt(sp.ollamaRequests || 0)}${(sp.ollamaLoadedModels || 0) > 0 ? ` · ${sp.ollamaLoadedModels} models in RAM` : ''}`}
+          badge={(sp.glmRequests || 0) + (sp.ollamaRequests || 0) > 0 ? 'Zero cost' : undefined}
+          badgeColor="bg-white/20"
         />
         <HeroCard
           label="OpenRouter Spend"
@@ -394,12 +403,13 @@ const AIOverview: React.FC = () => {
       </div>
 
       {/* ═══════════════ INFRASTRUCTURE ROW ═══════════════ */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
         <MetricCard label="Assistants" value={data.assistants.total} icon={ChatBubbleLeftRightIcon} color="bg-indigo-500" subtitle={`${data.assistants.active} active · ${data.assistants.paid} paid`} />
         <MetricCard label="Widgets" value={data.widgets.total} icon={CodeBracketIcon} color="bg-cyan-500" subtitle={`${data.widgets.active} active`} />
         <MetricCard label="API Keys" value={data.apiKeys} icon={ShieldCheckIcon} color="bg-slate-500" subtitle="Consumer keys issued" />
         <MetricCard label="AI Configs" value={data.aiConfigurations} icon={WrenchScrewdriverIcon} color="bg-teal-500" subtitle="Team model configs" />
         <MetricCard label="Endpoints" value={ep.total} icon={GlobeAltIcon} color="bg-emerald-500" subtitle={`${ep.active} active · ${ep.paused} paused`} />
+        <MetricCard label="API Gateways" value={gw.total} icon={ServerStackIcon} color="bg-orange-500" subtitle={`${gw.active} active · ${fmt(gw.totalRequests)} reqs`} />
         <MetricCard label="Subscriptions" value={data.packageCredits.activeSubscriptions} icon={UserGroupIcon} color="bg-violet-500" subtitle="Active & trial" />
       </div>
 
@@ -407,7 +417,7 @@ const AIOverview: React.FC = () => {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         {/* Daily Usage (30 days) */}
         <div className="xl:col-span-2 bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700">
-          <SectionHeader icon={ChartBarIcon} title="Daily AI Usage" subtitle="Last 30 days — requests & credits consumed" color="bg-indigo-500" />
+          <SectionHeader icon={ChartBarIcon} title="Daily AI Usage" subtitle="Last 30 days — requests & avg latency" color="bg-indigo-500" />
           {dailyUsage.length > 0 ? (
             <ResponsiveContainer width="100%" height={220}>
               <AreaChart data={dailyUsage}>
@@ -428,7 +438,7 @@ const AIOverview: React.FC = () => {
                 <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: 'none', borderRadius: '8px', color: '#fff', fontSize: 12 }} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Area yAxisId="left" type="monotone" dataKey="requests" name="Requests" stroke="#6366F1" strokeWidth={2} fill="url(#reqGrad)" />
-                <Area yAxisId="right" type="monotone" dataKey="creditsUsed" name="Credits" stroke="#F59E0B" strokeWidth={2} fill="url(#credGrad)" />
+                <Area yAxisId="right" type="monotone" dataKey="avgMs" name="Avg Latency (ms)" stroke="#F59E0B" strokeWidth={2} fill="url(#credGrad)" />
               </AreaChart>
             </ResponsiveContainer>
           ) : (
@@ -441,29 +451,29 @@ const AIOverview: React.FC = () => {
           )}
         </div>
 
-        {/* Usage by Request Type */}
+        {/* Usage by Source */}
         <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700">
-          <SectionHeader icon={CpuChipIcon} title="Usage by Request Type" subtitle="Credits consumed per category" color="bg-purple-500" />
-          {usageByType.length > 0 ? (
+          <SectionHeader icon={CpuChipIcon} title="Usage by Source" subtitle="Requests per source category" color="bg-purple-500" />
+          {usageBySource.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={140}>
                 <PieChart>
-                  <Pie data={usageByType} cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={3} dataKey="credits" nameKey="type">
-                    {usageByType.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                  <Pie data={usageBySource} cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={3} dataKey="cnt" nameKey="source">
+                    {usageBySource.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                   </Pie>
-                  <Tooltip formatter={(v: any) => fmt(Number(v)) + ' credits'} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+                  <Tooltip formatter={(v: any) => fmt(Number(v)) + ' requests'} contentStyle={{ fontSize: 11, borderRadius: 8 }} />
                 </PieChart>
               </ResponsiveContainer>
               <div className="space-y-1.5 mt-2">
-                {usageByType.map((u, i) => (
-                  <div key={u.type} className="flex items-center justify-between text-[11px]">
+                {usageBySource.map((u: any, i: number) => (
+                  <div key={u.source} className="flex items-center justify-between text-[11px]">
                     <div className="flex items-center gap-1.5">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
-                      <span className="font-mono text-gray-700 dark:text-gray-300">{u.type}</span>
+                      <span className="font-mono text-gray-700 dark:text-gray-300 capitalize">{u.source}</span>
                     </div>
                     <div className="text-right">
-                      <span className="font-bold text-gray-900 dark:text-white">{fmt(u.credits)}</span>
-                      <span className="text-gray-400 ml-1">({fmt(u.count)})</span>
+                      <span className="font-bold text-gray-900 dark:text-white">{fmt(u.cnt)}</span>
+                      <span className="text-gray-400 ml-1">requests</span>
                     </div>
                   </div>
                 ))}
@@ -580,63 +590,16 @@ const AIOverview: React.FC = () => {
         )}
       </CollapsibleSection>
 
-      {/* ═══════════════ PACKAGE CREDIT DETAILS ═══════════════ */}
+      {/* ═══════════════ PACKAGE SUBSCRIPTIONS ═══════════════ */}
       <CollapsibleSection
-        title="Package Credits & Subscriptions"
+        title="Package Subscriptions"
         icon={CubeIcon}
         color="bg-green-600"
-        subtitle={`${fmt(data.packageCredits.activeSubscriptions)} active subscriptions · Balance: ${fmt(sp.totalCreditsBalance)} credits`}
+        subtitle={`${fmt(data.packageCredits.activeSubscriptions)} active subscriptions`}
       >
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-          <div className="p-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
-            <p className="text-[10px] font-semibold text-green-700 dark:text-green-400 uppercase">Total Purchased</p>
-            <p className="text-lg font-bold text-green-800 dark:text-green-200">{fmt(sp.totalCreditsPurchased)}</p>
-            <p className="text-[10px] text-green-600 dark:text-green-500">{fmtR(sp.totalCreditsPurchasedRands)}</p>
-          </div>
-          <div className="p-3 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
-            <p className="text-[10px] font-semibold text-orange-700 dark:text-orange-400 uppercase">Total Consumed</p>
-            <p className="text-lg font-bold text-orange-800 dark:text-orange-200">{fmt(sp.totalCreditsUsed)}</p>
-            <p className="text-[10px] text-orange-600 dark:text-orange-500">{fmtR(sp.totalCreditsUsedRands)}</p>
-          </div>
-          <div className="p-3 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
-            <p className="text-[10px] font-semibold text-blue-700 dark:text-blue-400 uppercase">Current Balance</p>
-            <p className="text-lg font-bold text-blue-800 dark:text-blue-200">{fmt(sp.totalCreditsBalance)}</p>
-            <p className="text-[10px] text-blue-600 dark:text-blue-500">{fmtR(sp.totalCreditsBalanceRands)}</p>
-          </div>
-          <div className="p-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800">
-            <p className="text-[10px] font-semibold text-purple-700 dark:text-purple-400 uppercase">OpenRouter Spend</p>
-            <p className="text-lg font-bold text-purple-800 dark:text-purple-200">{sp.openRouterSpendUSD != null ? fmtUSD(sp.openRouterSpendUSD) : 'N/A'}</p>
-            <p className="text-[10px] text-purple-600 dark:text-purple-500">
-              {sp.openRouterLimitUSD != null ? `Limit: ${fmtUSD(sp.openRouterLimitUSD)}` : 'No key'}
-            </p>
-          </div>
-        </div>
-
-        {/* Package credit breakdown */}
-        <div>
-          <h4 className="text-xs font-bold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-1">
-            <CubeIcon className="w-3.5 h-3.5" /> Package Credits (Contact-scoped)
-          </h4>
-          <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                <tr><td className="py-1 text-gray-500">Active subscriptions</td><td className="py-1 text-right font-bold text-gray-900 dark:text-white">{fmt(data.packageCredits.activeSubscriptions)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Total balance</td><td className="py-1 text-right font-bold text-green-600">{fmt(data.packageCredits.totalBalance)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Used (lifetime)</td><td className="py-1 text-right font-bold text-orange-600">{fmt(data.packageCredits.totalUsedLifetime)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Purchased</td><td className="py-1 text-right font-bold">{fmt(data.packageCredits.totalPurchased)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Monthly allocations</td><td className="py-1 text-right">{fmt(data.packageCredits.totalAllocated)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Bonus</td><td className="py-1 text-right">{fmt(data.packageCredits.totalBonus)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Adjusted</td><td className="py-1 text-right">{fmt(data.packageCredits.totalAdjusted)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Refunded</td><td className="py-1 text-right">{fmt(data.packageCredits.totalRefunded)}</td></tr>
-                <tr><td className="py-1 text-gray-500">Total txns</td><td className="py-1 text-right">{fmt(data.packageCredits.totalTransactions)}</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Subscription Breakdown */}
-        {data.subscriptionBreakdown.length > 0 && (
-          <div className="mt-4">
+        {/* Subscription Status Breakdown */}
+        {data.subscriptionBreakdown.length > 0 ? (
+          <div>
             <h4 className="text-xs font-bold text-gray-700 dark:text-gray-300 mb-2">Subscription Status Breakdown</h4>
             <div className="flex flex-wrap gap-2">
               {data.subscriptionBreakdown.map(s => (
@@ -647,6 +610,8 @@ const AIOverview: React.FC = () => {
               ))}
             </div>
           </div>
+        ) : (
+          <p className="text-xs text-gray-400 py-4 text-center">No subscription data</p>
         )}
       </CollapsibleSection>
 
@@ -654,7 +619,7 @@ const AIOverview: React.FC = () => {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Top Consumers */}
         <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700">
-          <SectionHeader icon={ArrowTrendingUpIcon} title="Top Credit Consumers" subtitle="By lifetime usage" color="bg-orange-500" />
+          <SectionHeader icon={ArrowTrendingUpIcon} title="Top Package Subscribers" subtitle="By subscription activity" color="bg-orange-500" />
           {data.topConsumers.length > 0 ? (
             <div className="space-y-2">
               {data.topConsumers.map((c, i) => (
@@ -668,21 +633,17 @@ const AIOverview: React.FC = () => {
                       <p className="text-[10px] text-gray-400">{c.packageName || 'No package'} · <StatusBadge status={c.status} /></p>
                     </div>
                   </div>
-                  <div className="text-right ml-2 shrink-0">
-                    <p className="text-xs font-bold text-gray-900 dark:text-white">{fmt(c.creditsUsed)}</p>
-                    <p className="text-[10px] text-gray-400">bal: {fmt(c.creditsBalance)}</p>
-                  </div>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-gray-400 py-4 text-center">No consumer data</p>
+            <p className="text-xs text-gray-400 py-4 text-center">No subscriber data</p>
           )}
         </div>
 
         {/* Package Popularity */}
         <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700">
-          <SectionHeader icon={CubeIcon} title="Package Popularity" subtitle="Subscribers & usage per package" color="bg-violet-500" />
+          <SectionHeader icon={CubeIcon} title="Package Popularity" subtitle="Subscribers per package" color="bg-violet-500" />
           {data.packagePopularity.length > 0 ? (
             <>
               <ResponsiveContainer width="100%" height={160}>
@@ -700,10 +661,7 @@ const AIOverview: React.FC = () => {
                     <span className="font-medium text-gray-700 dark:text-gray-300">{p.name}</span>
                     <div>
                       <span className="font-bold text-gray-900 dark:text-white">{p.subscribers}</span>
-                      <span className="text-gray-400 ml-1.5">subs</span>
-                      <span className="text-gray-300 mx-1.5">·</span>
-                      <span className="font-bold text-orange-600">{fmt(p.totalCreditsUsed)}</span>
-                      <span className="text-gray-400 ml-1">credits</span>
+                      <span className="text-gray-400 ml-1.5">subscribers</span>
                     </div>
                   </div>
                 ))}
@@ -750,6 +708,50 @@ const AIOverview: React.FC = () => {
                       <td className="py-1.5 font-mono text-gray-600 dark:text-gray-400">{e.llm_model}</td>
                       <td className="py-1.5"><StatusBadge status={e.status} /></td>
                       <td className="py-1.5 text-right font-bold text-gray-900 dark:text-white">{fmt(e.total_requests)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CollapsibleSection>
+      )}
+
+      {/* ═══════════════ CLIENT API GATEWAY ═══════════════ */}
+      {gw.total > 0 && (
+        <CollapsibleSection
+          title="Client API Gateway"
+          icon={ServerStackIcon}
+          color="bg-orange-600"
+          subtitle={`${gw.total} total · ${gw.active} active · ${fmt(gw.totalRequests)} requests`}
+          defaultOpen={false}
+        >
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+            <MetricCard label="Active" value={gw.active} icon={CheckCircleIcon} color="bg-green-500" />
+            <MetricCard label="Paused" value={gw.paused} icon={PauseCircleIcon} color="bg-amber-500" />
+            <MetricCard label="Disabled" value={gw.disabled} icon={NoSymbolIcon} color="bg-red-500" />
+            <MetricCard label="Total Requests" value={fmt(gw.totalRequests)} icon={BoltIcon} color="bg-blue-500" />
+          </div>
+          {gw.configs && gw.configs.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="text-left text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                    <th className="pb-2 font-semibold">Client</th>
+                    <th className="pb-2 font-semibold">Target URL</th>
+                    <th className="pb-2 font-semibold">Auth</th>
+                    <th className="pb-2 font-semibold">Status</th>
+                    <th className="pb-2 font-semibold text-right">Requests</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {gw.configs.map((c: any) => (
+                    <tr key={c.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                      <td className="py-1.5 font-medium text-gray-900 dark:text-white">{c.client_name}</td>
+                      <td className="py-1.5 font-mono text-gray-600 dark:text-gray-400 max-w-[200px] truncate" title={c.target_base_url}>{c.target_base_url}</td>
+                      <td className="py-1.5 text-gray-600 dark:text-gray-400">{c.auth_type || 'none'}</td>
+                      <td className="py-1.5"><StatusBadge status={c.status} /></td>
+                      <td className="py-1.5 text-right font-bold text-gray-900 dark:text-white">{fmt(c.total_requests)}</td>
                     </tr>
                   ))}
                 </tbody>

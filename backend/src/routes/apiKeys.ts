@@ -17,15 +17,15 @@ const createApiKeySchema = z.object({
 apiKeysRouter.get('/', async (req: any, res, next) => {
   try {
     const apiKeys = await db.query<api_keys>(
-      `SELECT id, name, \`key\`, isActive, lastUsedAt, createdAt, expiresAt 
+      `SELECT id, name, key_prefix, isActive, lastUsedAt, createdAt, expiresAt 
        FROM api_keys WHERE userId = ? ORDER BY createdAt DESC`,
       [req.user!.id]
     );
 
-    // Mask keys except last 8 characters
+    // Mask keys — show prefix only
     const maskedKeys = apiKeys.map(key => ({
       ...key,
-      key: `****${key.key.slice(-8)}`
+      key: `${(key as any).key_prefix || '????'}****`
     }));
 
     res.json({ apiKeys: maskedKeys });
@@ -40,6 +40,8 @@ apiKeysRouter.post('/', async (req: any, res, next) => {
     const { name, expiresInDays } = createApiKeySchema.parse(req.body);
     
     const apiKey = crypto.randomBytes(32).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+    const keyPrefix = apiKey.slice(0, 8);
     const keyId = generateId();
     const now = toMySQLDate(new Date());
     
@@ -48,9 +50,9 @@ apiKeysRouter.post('/', async (req: any, res, next) => {
       : null;
 
     await db.execute(
-      `INSERT INTO api_keys (id, name, \`key\`, userId, isActive, createdAt, expiresAt) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [keyId, name, apiKey, req.user!.id, true, now, expiresAt]
+      `INSERT INTO api_keys (id, name, \`key\`, key_hash, key_prefix, userId, isActive, createdAt, expiresAt) 
+       VALUES (?, ?, '', ?, ?, ?, ?, ?, ?)`,
+      [keyId, name, keyHash, keyPrefix, req.user!.id, true, now, expiresAt]
     );
 
     const newKey = await db.queryOne<api_keys>('SELECT * FROM api_keys WHERE id = ?', [keyId]);

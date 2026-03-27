@@ -146,6 +146,10 @@ export interface User {
   phone?: string;
   avatarUrl?: string;
   passwordHash: string;
+  plan_type?: string;
+  has_used_trial?: boolean;
+  trial_expires_at?: Date | null;
+  contact_id?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -313,20 +317,6 @@ export interface Invoice {
   paidAt?: Date;
   pdfUrl?: string;
   createdAt: Date;
-}
-
-export interface Payment {
-  id: string;
-  invoiceId: string;
-  amount: number;
-  status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED';
-  provider: 'PAYFAST' | 'YOCO' | 'MANUAL';
-  externalPaymentId?: string;
-  cardLast4?: string;
-  cardBrand?: string;
-  failureReason?: string;
-  createdAt: Date;
-  completedAt?: Date;
 }
 
 // Export for backward compatibility

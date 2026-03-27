@@ -372,7 +372,7 @@ const CaseDetailView: React.FC = () => {
                           </span>
                           <span className="text-xs text-gray-400">•</span>
                           <span className="text-xs text-gray-500">{timeAgo(c.created_at)}</span>
-                          {c.is_internal && (
+                          {!!c.is_internal && (
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-700 font-medium">
                               Internal
                             </span>

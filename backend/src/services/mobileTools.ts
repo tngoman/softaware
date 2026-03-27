@@ -14,6 +14,7 @@
  */
 
 import { type ToolDefinition } from './actionRouter.js';
+import { AI_DEBUG_TOOLS } from './debugTools.js';
 
 // ============================================================================
 // Client Tools — Self-service (scoped to the authenticated user)
@@ -1691,7 +1692,7 @@ export type MobileRole = 'client' | 'staff';
  * Client role gets self-service tools (assistants, leads, sites, email).
  * Staff role gets ALL tools (client + admin + CRM + cases + scheduling + chat).
  */
-export function getToolsForRole(role: MobileRole): ToolDefinition[] {
+export function getToolsForRole(role: MobileRole, ai_developer_tools_granted?: boolean): ToolDefinition[] {
   // ── Core client tools (assistant management) ──
   const clientCoreTools = [
     LIST_MY_ASSISTANTS,
@@ -1824,6 +1825,7 @@ export function getToolsForRole(role: MobileRole): ToolDefinition[] {
       ...staffSchedulingTools,
       ...staffChatTools,
       ...staffBugTools,
+      ...(ai_developer_tools_granted ? AI_DEBUG_TOOLS : []),
     ];
   }
 

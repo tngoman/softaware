@@ -2,7 +2,7 @@
  * Seed Silulumanzi Enterprise Endpoint
  *
  * Migrates the hardcoded /silulumanzi endpoint to the dynamic enterprise webhook system.
- * Run once: node dist/scripts/seedSilulumanzi.js
+ * Run once: npx tsx src/scripts/seedSilulumanzi.ts
  */
 
 import { createEndpoint, getEndpointsByClient } from '../services/enterpriseEndpoints.js';

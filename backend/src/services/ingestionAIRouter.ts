@@ -9,6 +9,7 @@
 
 import { env } from '../config/env.js';
 import { getSecret } from './credentialVault.js';
+import { logAnonymizedChat } from '../utils/analyticsLogger.js';
 
 const CLEAN_SYSTEM_PROMPT = `You are a content extraction assistant.
 Given raw text scraped from a web page or document, extract ONLY the meaningful informational content.
@@ -60,7 +61,12 @@ async function cleanWithOpenRouter(content: string): Promise<string> {
           ?.filter((b: any) => b.type === 'text')
           .map((b: any) => b.text)
           .join('');
-        if (glmContent) return glmContent.trim();
+        if (glmContent) {
+          logAnonymizedChat('ingestion', content.slice(0, 200), glmContent.slice(0, 200), {
+            source: 'ingestion', model: env.GLM_MODEL || 'glm-4.6', provider: 'glm',
+          });
+          return glmContent.trim();
+        }
       } else {
         console.warn(`[IngestionRouter] GLM ${glmRes.status} — trying OpenRouter`);
       }
@@ -103,7 +109,11 @@ async function cleanWithOpenRouter(content: string): Promise<string> {
   }
 
   const data = (await response.json()) as any;
-  return (data.choices?.[0]?.message?.content ?? content).trim();
+  const result = (data.choices?.[0]?.message?.content ?? content).trim();
+  logAnonymizedChat('ingestion', content.slice(0, 200), result.slice(0, 200), {
+    source: 'ingestion', model, provider: 'openrouter',
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,5 +143,9 @@ async function cleanWithOllama(content: string): Promise<string> {
   }
 
   const data = (await response.json()) as any;
-  return (data.message?.content ?? content).trim();
+  const result = (data.message?.content ?? content).trim();
+  logAnonymizedChat('ingestion', content.slice(0, 200), result.slice(0, 200), {
+    source: 'ingestion', model, provider: 'ollama',
+  });
+  return result;
 }

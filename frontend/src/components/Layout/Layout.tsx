@@ -34,6 +34,8 @@ import {
   EnvelopeIcon,
   BugAntIcon,
   CalendarIcon,
+  CommandLineIcon,
+  ServerStackIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -57,9 +59,10 @@ interface NavItem {
   href: string;
   icon: React.ComponentType<{ className?: string }>;
   permission?: string;
-  roleSlug?: string;  // If set, item only shows for users with this role (or admin)
-  adminOnly?: boolean; // If true, item only shows for admin/staff users
-  badgeKey?: string;   // Key to look up dynamic badge count
+  roleSlug?: string;    // If set, item only shows for users with this role (or admin)
+  roleSlugs?: string[]; // If set, item only shows for users with one of these roles (or admin)
+  adminOnly?: boolean;  // If true, item only shows for admin/staff users
+  badgeKey?: string;    // Key to look up dynamic badge count
 }
 
 // ─── Collapsible section ─────────────────────────────────────────────────
@@ -67,6 +70,7 @@ interface NavSection {
   label: string;
   permission?: string;
   anyPermission?: string[];
+  roleSlugs?: string[];  // If set, section only shows for users with one of these roles (admin bypass disabled)
   items: NavItem[];
   defaultOpen?: boolean;
   color?: string;
@@ -96,6 +100,9 @@ const navSections: NavSection[] = [
       { name: 'AI Overview', href: '/admin/ai', icon: SparklesIcon, adminOnly: true },
       { name: 'Client Manager', href: '/admin/clients', icon: UsersIcon, adminOnly: true },
       { name: 'AI Packages', href: '/admin/packages', icon: CubeIcon, adminOnly: true },
+      { name: 'Enterprise Endpoints', href: '/admin/enterprise', icon: SignalIcon, adminOnly: true },
+      { name: 'Client API Gateway', href: '/admin/client-api', icon: ServerStackIcon, adminOnly: true },
+      { name: 'Sites', href: '/admin/sites', icon: GlobeAltIcon, adminOnly: true },
     ],
   },
   {
@@ -125,7 +132,10 @@ const navSections: NavSection[] = [
       { name: 'Financial Dashboard', href: '/financial-dashboard', icon: CurrencyDollarIcon, permission: 'dashboard.view' },
       { name: 'Invoices', href: '/invoices', icon: DocumentDuplicateIcon, permission: 'invoices.view' },
       { name: 'Quotations', href: '/quotations', icon: DocumentTextIcon, permission: 'quotations.view' },
+      { name: 'Credit Notes', href: '/credit-notes', icon: DocumentDuplicateIcon, permission: 'invoices.view' },
+      { name: 'Purchase Orders', href: '/purchase-orders', icon: ClipboardDocumentCheckIcon, permission: 'invoices.view' },
       { name: 'Transactions', href: '/transactions', icon: BanknotesIcon, permission: 'transactions.view' },
+      { name: 'Payroll', href: '/admin/payroll', icon: BanknotesIcon, adminOnly: true },
     ],
   },
   {
@@ -165,13 +175,14 @@ const navSections: NavSection[] = [
     label: 'Development',
     defaultOpen: false,
     color: 'purple',
-    anyPermission: ['settings.view'],
+    roleSlugs: ['developer', 'qa_specialist'],
     items: [
-      { name: 'Software', href: '/software', icon: CubeIcon, permission: 'settings.view' },
-      { name: 'Updates', href: '/updates', icon: ArrowPathIcon, permission: 'settings.view' },
+      { name: 'Software', href: '/software', icon: CubeIcon, roleSlugs: ['developer', 'qa_specialist'] },
+      { name: 'Updates', href: '/updates', icon: ArrowPathIcon, roleSlugs: ['developer', 'qa_specialist'] },
       { name: 'Client Monitor', href: '/client-monitor', icon: SignalIcon, adminOnly: true },
-      { name: 'Error Reports', href: '/error-reports', icon: BugAntIcon, adminOnly: true },
-      { name: 'Database', href: '/database', icon: CircleStackIcon, permission: 'settings.view', roleSlug: 'developer' },
+      { name: 'Error Reports', href: '/error-reports', icon: BugAntIcon, roleSlugs: ['developer', 'qa_specialist'] },
+      { name: 'Source Control', href: '/source-control', icon: CommandLineIcon, permission: 'settings.view', roleSlug: 'developer' },
+      { name: 'Database', href: '/database', icon: CircleStackIcon, roleSlug: 'developer' },
     ],
   },
 ];
@@ -196,6 +207,14 @@ const SidebarSection: React.FC<{
 
   // Hide entire section from non-admin users if section is admin-only
   if (section.adminOnly && !isStrictAdmin()) return null;
+
+  // Hide section if roleSlugs specified and user doesn't have one of the required roles
+  if (section.roleSlugs) {
+    const userRoleSlug = user?.role?.slug || '';
+    const userRoleSlugs = user?.roles?.map(r => r.slug) || [];
+    const hasRole = section.roleSlugs.some(s => s === userRoleSlug || userRoleSlugs.includes(s));
+    if (!hasRole) return null;
+  }
 
   const isPurple = section.color === 'purple';
   const isRed = section.color === 'red';
@@ -271,12 +290,22 @@ const SidebarSection: React.FC<{
             // Hide admin-only items from non-admin users
             if (item.adminOnly && !isStrictAdmin()) return null;
 
+            // Check roleSlug (singular) - legacy
             if (item.roleSlug) {
               const userRoleSlug = user?.role?.slug || '';
               const userRoleSlugs = user?.roles?.map(r => r.slug) || [];
               const hasRole = user?.is_admin || userRoleSlug === item.roleSlug || userRoleSlugs.includes(item.roleSlug);
               if (!hasRole) return null;
             }
+
+            // Check roleSlugs (plural) - new pattern
+            if (item.roleSlugs) {
+              const userRoleSlug = user?.role?.slug || '';
+              const userRoleSlugs = user?.roles?.map(r => r.slug) || [];
+              const hasRole = user?.is_admin || item.roleSlugs.some(s => s === userRoleSlug || userRoleSlugs.includes(s));
+              if (!hasRole) return null;
+            }
+
             if (item.permission) {
               return (
                 <Can key={item.name} permission={item.permission}>

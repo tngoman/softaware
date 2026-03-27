@@ -212,7 +212,8 @@ export async function getPayFastConfig(): Promise<{
 }
 
 /**
- * Get Yoco credentials.
+ * Get Yoco credentials (legacy — single key, no mode awareness).
+ * @deprecated Use getYocoActiveConfig() for mode-aware credential lookup.
  */
 export async function getYocoConfig(): Promise<{
   secretKey: string;
@@ -234,6 +235,110 @@ export async function getYocoConfig(): Promise<{
     };
   }
   return null;
+}
+
+// ─── Yoco Mode-Aware Config ──────────────────────────────────────────
+
+export interface YocoConfig {
+  mode: 'live' | 'test';
+  secretKey: string;
+  webhookSecret: string;
+}
+
+/**
+ * Get the active Yoco configuration based on the `yoco_mode` sys_setting.
+ *
+ * Resolution order:
+ *   1. Mode-specific credential from vault ('Yoco Live' or 'Yoco Test')
+ *      — specifically the secret/private key row (identifier: PrivateKey / SecretLive)
+ *   2. Legacy single credential  (YOCO)
+ *   3. Environment variables     (YOCO_SECRET_KEY / YOCO_WEBHOOK_SECRET)
+ *
+ * Returns `null` if no Yoco credentials are configured at all.
+ */
+export async function getYocoActiveConfig(): Promise<YocoConfig | null> {
+  // 1. Read mode from sys_settings (default: test for safety)
+  const modeRow = await db.queryOne<any>(
+    "SELECT `value` FROM sys_settings WHERE `key` = 'yoco_mode'",
+  );
+  const mode: 'live' | 'test' = modeRow?.value === 'live' ? 'live' : 'test';
+
+  // 2. Fetch secret key from vault using actual service names
+  const secretKey = await getYocoSecretKeyForMode(mode);
+  if (secretKey) {
+    // Also try to find webhook secret from additional_data (if stored)
+    const serviceName = mode === 'live' ? 'Yoco Live' : 'Yoco Test';
+    const webhookRow = await db.queryOne<any>(
+      `SELECT additional_data FROM credentials
+       WHERE service_name = ? AND is_active = 1 AND additional_data IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+      [serviceName],
+    );
+    const webhookSecret = webhookRow?.additional_data
+      ? (parseAdditionalData(webhookRow.additional_data) as any)?.webhook_secret || ''
+      : '';
+
+    return { mode, secretKey, webhookSecret };
+  }
+
+  // 3. Fallback to legacy single 'YOCO' credential
+  const legacy = await getCredential('YOCO');
+  if (legacy?.value) {
+    return {
+      mode,
+      secretKey: legacy.value,
+      webhookSecret: legacy.data?.webhook_secret || '',
+    };
+  }
+
+  // 4. Env var fallback
+  const envKey = process.env.YOCO_SECRET_KEY;
+  if (envKey) {
+    return {
+      mode,
+      secretKey: envKey,
+      webhookSecret: process.env.YOCO_WEBHOOK_SECRET || '',
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Fetch the Yoco secret (private) key for a given mode from the vault.
+ *
+ * Vault layout:
+ *   service_name='Yoco Test', identifier='PrivateKey'  → test secret key
+ *   service_name='Yoco Live', identifier='SecretLive'   → live secret key
+ */
+export async function getYocoSecretKeyForMode(mode: 'live' | 'test'): Promise<string | null> {
+  const serviceName = mode === 'live' ? 'Yoco Live' : 'Yoco Test';
+  const identifiers = mode === 'live' ? ['SecretLive', 'PrivateKey'] : ['PrivateKey', 'SecretLive'];
+
+  for (const identifier of identifiers) {
+    const row = await db.queryOne<any>(
+      `SELECT credential_value FROM credentials
+       WHERE service_name = ? AND identifier = ? AND is_active = 1
+       LIMIT 1`,
+      [serviceName, identifier],
+    );
+    if (row?.credential_value) {
+      return tryDecrypt(row.credential_value);
+    }
+  }
+
+  // Fallback: any credential for this service (ORDER BY id DESC picks the secret key
+  // since it was inserted after the public key)
+  const fallback = await getCredential(serviceName);
+  return fallback?.value || null;
+}
+
+/**
+ * Get GitHub Personal Access Token for authenticated git operations.
+ * Falls back to GITHUB_TOKEN env var during migration.
+ */
+export async function getGitHubToken(): Promise<string> {
+  return getSecret('Github', process.env.GITHUB_TOKEN);
 }
 
 /**

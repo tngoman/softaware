@@ -3,7 +3,7 @@
  *
  * Routes assistant chat requests based on tier with cascading fallback:
  *
- *   Free tier  → GLM → Ollama
+ *   Free tier  → Ollama (local, zero cost)
  *   Paid tier  → GLM → OpenRouter (gpt-4o-mini) → Ollama
  *
  * Provides both streaming (SSE for /api/assistants/chat) and
@@ -11,9 +11,9 @@
  *
  * GLM (ZhipuAI) uses the Anthropic-compatible Messages API at
  * api.z.ai/api/anthropic.  The Coding Lite plan grants access via
- * this endpoint.  GLM is tried first for ALL tiers.  OpenRouter
- * is only used as a paid-tier fallback.  Ollama is always the
- * last resort.
+ * this endpoint.  GLM is tried first for paid tiers only.
+ * OpenRouter is only used as a paid-tier fallback.  Ollama is always
+ * the last resort and the sole provider for free-tier users.
  */
 
 import { env } from '../config/env.js';
@@ -377,20 +377,23 @@ export async function chatCompletion(
   opts: ChatOptions = {},
   modelOverride?: string,
 ): Promise<{ content: string; model: string; provider: PaidProvider }> {
-  // ── 1. GLM (tried first for ALL tiers) ──
+  // ── Free tier → straight to Ollama (local, zero cost) ──
+  if (tier !== 'paid') {
+    return ollamaChat(messages, opts, modelOverride);
+  }
+
+  // ── Paid tier: GLM → OpenRouter → Ollama ──
+  // 1. GLM
   const glmKey = await getGLMKey();
   if (glmKey) {
     try {
       return await glmChat(messages, opts);
     } catch (err) {
-      console.warn(`[AssistantRouter] GLM failed: ${(err as Error).message} — trying ${tier === 'paid' ? 'OpenRouter' : 'Ollama'}`);
+      console.warn(`[AssistantRouter] GLM failed: ${(err as Error).message} — trying OpenRouter`);
     }
   }
 
-  // ── 2. OpenRouter (paid tier only) ──
-  if (tier !== 'paid') {
-    return ollamaChat(messages, opts, modelOverride);
-  }
+  // 2. OpenRouter
   const orKey = await getOpenRouterKey();
   if (orKey) {
     try {
@@ -400,7 +403,7 @@ export async function chatCompletion(
     }
   }
 
-  // ── 3. Ollama (last resort) ──
+  // 3. Ollama (last resort)
   console.warn('[AssistantRouter] All external providers failed — using Ollama');
   return ollamaChat(messages, opts, modelOverride);
 }
@@ -410,7 +413,7 @@ export async function chatCompletion(
 /**
  * Stream a chat response. Returns a ReadableStream of raw bytes.
  *
- * Free tier:  GLM → Ollama
+ * Free tier:  Ollama (local, zero cost)
  * Paid tier:  GLM → OpenRouter → Ollama
  *
  * GLM returns Anthropic SSE (event: content_block_delta, data: {delta:{text:"..."}}).
@@ -428,20 +431,23 @@ export async function chatCompletionStream(
   model: string;
   provider: PaidProvider;
 }> {
-  // ── 1. GLM (tried first for ALL tiers) ──
+  // ── Free tier → straight to Ollama (local, zero cost) ──
+  if (tier !== 'paid') {
+    return ollamaStream(messages, opts, modelOverride);
+  }
+
+  // ── Paid tier: GLM → OpenRouter → Ollama ──
+  // 1. GLM
   const glmKey = await getGLMKey();
   if (glmKey) {
     try {
       return await glmStream(messages, opts);
     } catch (err) {
-      console.warn(`[AssistantRouter] GLM stream failed: ${(err as Error).message} — trying ${tier === 'paid' ? 'OpenRouter' : 'Ollama'}`);
+      console.warn(`[AssistantRouter] GLM stream failed: ${(err as Error).message} — trying OpenRouter`);
     }
   }
 
-  // ── 2. OpenRouter (paid tier only) ──
-  if (tier !== 'paid') {
-    return ollamaStream(messages, opts, modelOverride);
-  }
+  // 2. OpenRouter
   const orKey = await getOpenRouterKey();
   if (orKey) {
     try {
@@ -451,7 +457,7 @@ export async function chatCompletionStream(
     }
   }
 
-  // ── 3. Ollama (last resort) ──
+  // 3. Ollama (last resort)
   console.warn('[AssistantRouter] All external stream providers failed — using Ollama');
   return ollamaStream(messages, opts, modelOverride);
 }
