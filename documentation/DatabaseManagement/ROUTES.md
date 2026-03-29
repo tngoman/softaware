@@ -21,7 +21,7 @@ router.use(requireAuth, requireDeveloper);
 
 ### `GET /api/database/connections`
 **Auth**: requireAuth + requireDeveloper  
-**Purpose**: List all saved database connections (shared across all users).
+**Purpose**: List saved database connections. Admins see all; non-admin developers see only connections they've been granted access to via `db_connection_access`.
 
 | Param | Location | Required | Description |
 |-------|----------|----------|-------------|
@@ -50,22 +50,27 @@ router.use(requireAuth, requireDeveloper);
       },
       "createdBy": "user-uuid",
       "createdAt": "2025-03-01T...",
-      "updatedAt": "2025-03-01T..."
+      "updatedAt": "2025-03-01T...",
+      "accessUsers": [
+        { "userId": "uuid", "name": "Jane Dev", "email": "jane@example.com" }
+      ]
     }
   ]
 }
 ```
 
 **Flow**:
-1. Query `SELECT * FROM db_connections ORDER BY name ASC`
-2. Map flat DB rows to nested `Connection` shape (converts `ssh_host` → `tunnel.sshHost`, etc.)
-3. Return array
+1. Call `isAdminUser()` to check `users.is_admin` for requesting user
+2. If admin: `SELECT * FROM db_connections ORDER BY name ASC`
+3. If non-admin: filter by `JOIN db_connection_access WHERE user_id = requestingUserId`
+4. For each connection, JOIN `db_connection_access` + `users` to build `accessUsers[]`
+5. Map flat DB rows to nested `Connection` shape and return
 
 ---
 
 ### `POST /api/database/connections`
-**Auth**: requireAuth + requireDeveloper  
-**Purpose**: Create or update a connection (upsert).
+**Auth**: requireAuth + requireDeveloper + **admin only**  
+**Purpose**: Create or update a connection (upsert) and set per-user access. Returns 403 for non-admin users.
 
 | Param | Location | Required | Description |
 |-------|----------|----------|-------------|
@@ -78,24 +83,32 @@ router.use(requireAuth, requireDeveloper);
 | `database` | Body | No | Default database name |
 | `type` | Body | Yes | `'mysql'` or `'mssql'` |
 | `tunnel` | Body | No | SSH tunnel config object |
+| `accessUserIds` | Body | No | Array of user UUIDs to grant access to this connection |
 
 **Response** `200`:
 ```json
 { "success": true, "id": "a1b2c3d4-..." }
 ```
 
+**Response** `403` (non-admin):
+```json
+{ "success": false, "error": "Admin access required" }
+```
+
 **Flow**:
-1. Validate `name`, `host`, and `type` required
-2. Extract `userId` from JWT (via `AuthRequest`)
-3. Generate UUID if no `id` provided
-4. `INSERT INTO db_connections ... ON DUPLICATE KEY UPDATE`
-5. Return connection ID
+1. Check `isAdminUser()` — return 403 if not admin
+2. Validate `name`, `host`, and `type` required
+3. Extract `userId` from JWT (via `AuthRequest`)
+4. Generate UUID if no `id` provided
+5. `INSERT INTO db_connections ... ON DUPLICATE KEY UPDATE`
+6. Sync `db_connection_access`: delete existing rows for this connection, re-insert one row per `accessUserIds` entry (with `granted_by = userId`)
+7. Return connection ID
 
 ---
 
 ### `DELETE /api/database/connections/:id`
-**Auth**: requireAuth + requireDeveloper  
-**Purpose**: Delete a saved connection.
+**Auth**: requireAuth + requireDeveloper + **admin only**  
+**Purpose**: Delete a saved connection and all its access entries. Returns 403 for non-admin users.
 
 | Param | Location | Required | Description |
 |-------|----------|----------|-------------|
@@ -106,9 +119,45 @@ router.use(requireAuth, requireDeveloper);
 { "success": true }
 ```
 
+**Response** `403` (non-admin):
+```json
+{ "success": false, "error": "Admin access required" }
+```
+
+**Flow**:
+1. Check `isAdminUser()` — return 403 if not admin
+2. `DELETE FROM db_connection_access WHERE connection_id = ?`
+3. `DELETE FROM db_connections WHERE id = ?`
+
 ---
 
 ## SSH Key Endpoint
+
+---
+
+### `GET /api/database/developer-users`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: List all users with the `developer` role. Used by the ConnectionDialog access panel to populate the user checkbox list.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| — | — | — | No parameters |
+
+**Response** `200`:
+```json
+{
+  "success": true,
+  "users": [
+    { "id": "uuid", "name": "Jane Dev", "email": "jane@example.com" }
+  ]
+}
+```
+
+**Flow**:
+1. Query `users` JOIN `user_roles` JOIN `roles` WHERE `r.slug = 'developer'`
+2. Return `id`, `name`, `email` for each matching user
+
+---
 
 ### `GET /api/database/keys`
 **Auth**: requireAuth + requireDeveloper  
@@ -712,6 +761,110 @@ id,name,email
 
 ---
 
+## Database Export Endpoints
+
+### `POST /api/database/export-database`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Start a full database SQL dump. Writes to server filesystem asynchronously; responds immediately with the output filename. MySQL only (MSSQL returns 400).
+
+| Param | Location | Required | Default | Description |
+|-------|----------|----------|---------|-------------|
+| `host`, `port`, `user`, `password`, `type` | Body | Yes | — | Connection details |
+| `database` | Body | Yes | — | Database to export |
+| `tunnel` | Body | No | — | SSH tunnel config |
+| `exportType` | Body | No | `'structure_and_data'` | `'structure'`, `'data'`, or `'structure_and_data'` |
+| `selectedTables` | Body | No | all tables | Array of table names to include |
+| `addDropTable` | Body | No | `true` | Prepend `DROP TABLE IF EXISTS` before each CREATE |
+| `addCreateDatabase` | Body | No | `false` | Prepend `CREATE DATABASE IF NOT EXISTS` + `USE` |
+
+**Response** `200` (immediate — export runs in background):
+```json
+{ "success": true, "filename": "mydb_structure_and_data_2026-03-28_14-30-00.sql", "message": "Export started" }
+```
+
+**Error Response** `400`:
+```json
+{ "success": false, "error": "Database export is currently supported for MySQL only" }
+```
+
+**Flow**:
+1. Validate `database` required, reject MSSQL
+2. Generate filename: `{safeDbName}_{exportType}_{timestamp}.sql`
+3. Respond immediately with `{success, filename, message}`
+4. In background: open `fs.WriteStream` to `EXPORTS_DIR/filename`
+5. Write SQL header lines, SET statements
+6. If no `selectedTables`, query `information_schema.TABLES` for all base tables
+7. For each table: write DROP/CREATE DDL (if structure), write batched INSERT statements (if data, 100 rows/batch)
+8. Write `SET FOREIGN_KEY_CHECKS = 1` footer
+9. On error: write `-- EXPORT FAILED: {message}` to file, close stream
+
+**File location**: `/var/opt/backend/db-exports/{filename}`
+
+---
+
+### `GET /api/database/export-files`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: List all SQL export files stored on the server.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| — | — | — | No parameters |
+
+**Response** `200`:
+```json
+{
+  "success": true,
+  "files": [
+    {
+      "name": "mydb_structure_and_data_2026-03-28_14-30-00.sql",
+      "size": 2048576,
+      "createdAt": "2026-03-28T14:30:00.000Z",
+      "modifiedAt": "2026-03-28T14:30:45.000Z"
+    }
+  ]
+}
+```
+
+**Flow**: Read `EXPORTS_DIR`, filter `.sql` files, stat each, sort by `modifiedAt` descending.
+
+---
+
+### `GET /api/database/export-files/:filename/download`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Stream a specific export file to the client as a download.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `filename` | URL | Yes | Filename (must end in `.sql`) |
+
+**Response** `200`:
+```
+Content-Type: application/sql
+Content-Disposition: attachment; filename="mydb_export.sql"
+[file contents streamed]
+```
+
+**Security**: `path.basename()` applied to `filename` param to prevent path traversal. Only `.sql` files allowed.
+
+---
+
+### `DELETE /api/database/export-files/:filename`
+**Auth**: requireAuth + requireDeveloper  
+**Purpose**: Delete a specific export file from the server.
+
+| Param | Location | Required | Description |
+|-------|----------|----------|-------------|
+| `filename` | URL | Yes | Filename (must end in `.sql`) |
+
+**Response** `200`:
+```json
+{ "success": true }
+```
+
+**Security**: `path.basename()` applied to prevent path traversal. Only `.sql` extension allowed.
+
+---
+
 ## Frontend Routes
 
 | Route Path | Component | Guard | Description |
@@ -726,8 +879,9 @@ id,name,email
 |-----------------|----------|---------|
 | Component mount | `GET /database/keys` | `useEffect` on mount |
 | Load connections | `GET /database/connections` | `useEffect` on mount |
-| Save connection | `POST /database/connections` | Save button in ConnectionDialog |
-| Delete connection | `DELETE /database/connections/:id` | Delete button (with SweetAlert2 confirm) |
+| Load developer users | `GET /database/developer-users` | `useEffect` on mount (admin only — used for access panel) |
+| Save connection | `POST /database/connections` | Save button in ConnectionDialog (admin only) |
+| Delete connection | `DELETE /database/connections/:id` | Delete button (admin only, with SweetAlert2 confirm) |
 | Connect to server | `POST /database/connect` | "Test Connection" button or connection click |
 | Load databases | `POST /database/databases` | After successful connect |
 | Load tables | `POST /database/tables` | After successful connect + on database switch |
@@ -743,6 +897,10 @@ id,name,email
 | Execute SQL | `POST /database/query` | Ctrl+Enter or Execute button |
 | View processes | `POST /database/processes` | Click Processes tab or toolbar button |
 | View server status | `POST /database/status` | Click Server tab or toolbar button |
+| Start database export | `POST /database/export-database` | "Start Export" button on Export tab |
+| List export files | `GET /database/export-files` | Export tab open + Refresh button + post-export polling (3s, 8s, 20s) |
+| Download export file | `GET /database/export-files/:filename/download` | Download button on file list row (direct `<a href>`) |
+| Delete export file | `DELETE /database/export-files/:filename` | Delete button on file list row (with SweetAlert2 confirm) |
 | Export CSV (client) | — (client-side) | CSV export button on Results tab |
 | Export JSON (client) | — (client-side) | JSON export button on Results tab |
 | Copy to clipboard | — (client-side) | Copy button on Results tab |

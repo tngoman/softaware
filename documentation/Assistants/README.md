@@ -1,7 +1,7 @@
 # Assistants Module — Overview
 
-**Version:** 2.4.0  
-**Last Updated:** 2026-03-14
+**Version:** 2.5.0  
+**Last Updated:** 2026-03-28
 
 ---
 
@@ -32,7 +32,9 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 - **Enhanced staff assistant UI** — dark gradient header, quick-stats strip, card-based personality/voice picker, section-grouped form
 - **Visual parity** — staff assistant view mode redesigned to match client-side visual quality
 - **Chat persistence (staff)** — staff chat messages survive modal close/reopen; explicit trash icon to clear
-- **Chat persistence (client)** — per-assistant chat history stored via `chatHistoryRef`, keyed by assistant ID; survives modal close
+- **Chat persistence (client)** — conversations persisted server-side via `mobile_conversations` + `mobile_messages` tables; `AssistantChatModal` loads history on open
+- **Shared chat modal** — single `AssistantChatModal` component (v2.5.0) replaces all inline chat UIs in Dashboard.tsx and AssistantsPage.tsx; features conversation history sidebar, search, delete, sender labels ("You" / assistant name), and new chat button
+- **ChatInterface.tsx removed** — full-page chat route (`/portal/assistants/:assistantId/chat`) deleted; all chat now uses the shared modal
 - **Staff chat UI** — real-time chat with AI assistant via `MobileModel.sendIntent()` in StaffAssistantTab, with full tool access
 - **"Help me write this with AI"** — button next to Personality Flare textarea generates creative personality text via AI
 - **SSE streaming fixes** — line buffering, `response.ok` check, conversation history in requests, error display in chat bubbles
@@ -70,9 +72,9 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 | Backend route files | 5 (assistants.ts, assistantIngest.ts, myAssistant.ts, staffAssistant.ts, mobileIntent.ts) |
 | Backend service files | 9 (vectorStore.ts, knowledgeCategorizer.ts, ingestionWorker.ts, ingestionAIRouter.ts, **assistantAIRouter.ts**, mobileTools.ts, mobileAIProcessor.ts, mobileActionExecutor.ts, **analyticsLogger.ts**) |
 | Backend LOC | ~7,600 |
-| Frontend source files | 5 (AssistantsPage.tsx, CreateAssistant.tsx, Dashboard.tsx, KnowledgeHealthBadge.tsx, KnowledgeHealthScore.tsx) + Profile.tsx (StaffAssistantTab) + SystemModels.ts |
-| Frontend LOC | ~4,800 |
-| Total LOC | ~12,400 |
+| Frontend source files | 6 (AssistantChatModal.tsx, AssistantsPage.tsx, CreateAssistant.tsx, Dashboard.tsx, KnowledgeHealthBadge.tsx, KnowledgeHealthScore.tsx) + Profile.tsx (StaffAssistantTab) + SystemModels.ts |
+| Frontend LOC | ~4,850 |
+| Total LOC | ~12,450 |
 | API endpoints | 38 (+ 2 telemetry consent) |
 | Staff AI tools | 59 (53 staff-accessible) — 22 task tools + 31 other staff tools |
 | MySQL tables | 4 (assistants, ingestion_jobs, mobile_conversations, staff_software_tokens) + 3 task tables (task_sources, local_tasks, task_sync_log) + 1 legacy (assistant_knowledge) + telemetry columns on `users` |
@@ -90,23 +92,24 @@ The Assistants module manages the full lifecycle of AI assistants: creation, con
 │  │ Dashboard.tsx     │  │ CreateAssistant.tsx │  │ KnowledgeHealth    │ │
 │  │ • Assistant cards │  │ • 4-step wizard     │  │ Score.tsx (full)   │ │
 │  │ • Delete + KB opt │  │ • Text editing      │  │ • Full ring + list │ │
-│  │ • Test Chat modal │  │ • Source management │  │ • Add custom item  │ │
+│  │ • Chat (modal)    │  │ • Source management │  │ • Add custom item  │ │
 │  └──────┬───────────┘  └──────────┬──────────┘  └──────────┬─────────┘ │
 │         │                          │                         │           │
-│  ┌──────────────────┐  ┌─────────────────────┐                          │
-│  │ AssistantsPage   │  │ Profile.tsx          │                          │
-│  │ • Card grid list │  │ StaffAssistantTab   │                          │
-│  │ • Capabilities   │  │ • Dark gradient card│                          │
-│  │   helper panel   │  │ • 10-cat tool panel │                          │
-│  │ • Embed/Chat     │  │ • Webhook info card │                          │
-│  │ • Empty state    │  │ • Card-based form   │                          │
-│  └──────┬───────────┘  └──────────┬──────────┘                          │
-│         │                          │                                     │
-│         ▼                          ▼                                     │
+│  ┌──────────────────┐  ┌─────────────────────┐  ┌────────────────────┐ │
+│  │ AssistantsPage   │  │ Profile.tsx          │  │ AssistantChat      │ │
+│  │ • Card grid list │  │ StaffAssistantTab   │  │ Modal.tsx ⭐       │ │
+│  │ • Capabilities   │  │ • Dark gradient card│  │ • Sidebar history  │ │
+│  │   helper panel   │  │ • 10-cat tool panel │  │ • Search/delete    │ │
+│  │ • Embed/Chat     │  │ • Webhook info card │  │ • Sender labels    │ │
+│  │ • Empty state    │  │ • Card-based form   │  │ • Persistence API  │ │
+│  └──────┬───────────┘  └──────────┬──────────┘  └──────────┬─────────┘ │
+│         │                          │                         │           │
+│         ▼                          ▼                         ▼           │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
 │  │  api.ts — Axios client                                         │    │
 │  │  GET /assistants | DELETE /assistants/:id?clearKnowledge=...   │    │
-│  │  GET /assistants/:id/knowledge-health | POST /assistants/chat  │    │
+│  │  GET /assistants/:id/knowledge-health                          │    │
+│  │  POST /api/v1/mobile/intent | GET /api/v1/mobile/conversations │    │
 │  └──────────────────────────┬──────────────────────────────────────┘    │
 └──────────────────────────────┼───────────────────────────────────────────┘
                                │

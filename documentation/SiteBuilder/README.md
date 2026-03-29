@@ -359,10 +359,31 @@ injectNavigation() adds nav bar across all pages
 
 ---
 
-## 7. Related Documentation
+## 7. Studio Integration ★ NEW
+
+The **Softaware Studio** creative builder extends SiteBuilder into a staff-facing design workspace.
+Studio reuses the same `generated_sites` and `site_pages` tables and adds:
+
+| Addition | Description |
+|----------|-------------|
+| `site_id` on `client_custom_data` | Collections are now site-scoped (migration 034) |
+| `collection_metadata` table | Public-write flag and schema templates per collection |
+| `site_api_keys` table | Per-site API key management for headless access |
+| `studio_snapshots` table | Design version snapshots (page data + styles) |
+| `studio_sticky_notes` + `studio_note_replies` | Collaborative annotations on the canvas |
+| Public Site Data API | Unauthenticated read/write at `/api/v1/public/site-data/:siteId/:collection` |
+| Studio Sites API | Staff-only CRUD at `/api/v1/studio/sites/*` (wraps same `generated_sites` rows) |
+| 16 AI design tools | Injected into staff assistants when `context === 'studio'` |
+
+See [Studio Documentation](../Studio/) for full details.
+
+---
+
+## 8. Related Documentation
 
 - [Routes](ROUTES.md) — Detailed API endpoint specifications (22 user + 6 admin)
 - [Fields](FIELDS.md) — Database schema and table definitions (3 tables)
 - [Files](FILES.md) — Source file inventory with LOC counts
 - [Patterns](PATTERNS.md) — Architecture patterns and anti-patterns
 - [Changes](CHANGES.md) — Version history and known issues
+- [Studio](../Studio/) — Softaware Studio creative builder (staff-facing)

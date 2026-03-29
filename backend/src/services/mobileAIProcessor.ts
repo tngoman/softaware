@@ -18,6 +18,7 @@ import { chatCompletion, chatCompletionWithVision, type VisionChatMessage } from
 import { resolveModelTier } from './packageResolver.js';
 import { getToolsForRole, getMobileToolsSystemPrompt, type MobileRole } from './mobileTools.js';
 import { executeMobileAction, type MobileExecutionContext } from './mobileActionExecutor.js';
+import { getStudioTools, getStudioToolsPrompt, STUDIO_CONTEXT_INSTRUCTIONS } from './studioAITools.js';
 import { getConfigsByContactId } from './clientApiGateway.js';
 import { getEndpoint } from './enterpriseEndpoints.js';
 import { logAnonymizedChat } from '../utils/analyticsLogger.js';
@@ -46,6 +47,16 @@ export interface MobileIntentRequest {
   language?: string;
   /** Base64 data-URI of an attached image (data:image/png;base64,...) */
   image?: string;
+  /** Studio context — when set to 'studio', injects design tools + creative prompt */
+  context?: 'studio' | 'default';
+  /** Active site ID when in studio context */
+  siteId?: string;
+  /** Additional context payload from Studio (selected component, viewport, etc.) */
+  studioContext?: {
+    selectedComponent?: { id: string; type: string; html: string; css: string };
+    viewport?: 'desktop' | 'tablet' | 'mobile';
+    siteContext?: { businessName: string; industry: string; colorPalette: string[]; pageCount: number; currentPageType: string };
+  };
 }
 
 export interface MobileIntentResponse {
@@ -163,8 +174,18 @@ export async function processMobileIntent(
   const userObj = await db.queryOne<{ai_developer_tools_granted: number}>('SELECT ai_developer_tools_granted FROM users WHERE id = ?', [userId]);
   const isDev = !!userObj?.ai_developer_tools_granted;
   
-  const tools: ToolDefinition[] = getToolsForRole(userRole, isDev);
-  const toolsPrompt = getMobileToolsSystemPrompt(tools);
+  let tools: ToolDefinition[] = getToolsForRole(userRole, isDev);
+  let toolsPrompt = getMobileToolsSystemPrompt(tools);
+
+  // --- STUDIO CONTEXT INJECTION ---
+  // When the request originates from Softaware Studio, inject additional
+  // design/site/data tools and augment the system prompt with creative instructions.
+  const isStudioContext = req.context === 'studio';
+  if (isStudioContext && userRole === 'staff') {
+    const studioTools = getStudioTools();
+    tools = [...tools, ...studioTools];
+    toolsPrompt += '\n' + getStudioToolsPrompt(studioTools);
+  }
 
   // --- Load assistant if selected (prompt stitching) ---
   let assistantRow: AssistantPromptRow | null = null;
@@ -178,6 +199,29 @@ export async function processMobileIntent(
 
   // --- THE PROMPT STITCHING (The Guardrail) ---
   let systemPrompt = buildStitchedPrompt(assistantRow, toolsPrompt, userRole, isDev);
+
+  // --- STUDIO CONTEXT AUGMENTATION ---
+  // Append studio creative instructions + active design context when in studio mode.
+  if (isStudioContext && userRole === 'staff') {
+    systemPrompt += '\n\n' + STUDIO_CONTEXT_INSTRUCTIONS;
+    if (req.studioContext) {
+      const sc = req.studioContext;
+      let contextBlock = '\nCURRENT STUDIO STATE:';
+      if (sc.viewport) contextBlock += `\nViewport: ${sc.viewport}`;
+      if (sc.siteContext) {
+        contextBlock += `\nBusiness: ${sc.siteContext.businessName}`;
+        if (sc.siteContext.industry) contextBlock += ` (${sc.siteContext.industry})`;
+        if (sc.siteContext.colorPalette?.length) contextBlock += `\nColor palette: ${sc.siteContext.colorPalette.join(', ')}`;
+        contextBlock += `\nPages: ${sc.siteContext.pageCount}, Current page type: ${sc.siteContext.currentPageType}`;
+      }
+      if (sc.selectedComponent) {
+        contextBlock += `\nSelected component: [${sc.selectedComponent.type}] id="${sc.selectedComponent.id}"`;
+        contextBlock += `\nComponent HTML:\n${sc.selectedComponent.html.slice(0, 2000)}`;
+        if (sc.selectedComponent.css) contextBlock += `\nComponent CSS:\n${sc.selectedComponent.css.slice(0, 1000)}`;
+      }
+      systemPrompt += contextBlock;
+    }
+  }
 
   // --- GATEWAY CONTEXT INJECTION ---
   // If this client user has gateway configs (client_api_configs rows for their contact_id),

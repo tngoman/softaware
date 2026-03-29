@@ -1,7 +1,7 @@
 # Assistants Module — Changelog & Known Issues
 
-**Version:** 2.4.0  
-**Last Updated:** 2026-03-14
+**Version:** 2.5.0  
+**Last Updated:** 2026-03-28
 
 ---
 
@@ -9,6 +9,7 @@
 
 | Date | Version | Description |
 |------|---------|-------------|
+| 2026-03-28 | 2.5.0 | Shared chat modal — `AssistantChatModal` replaces all inline chat UIs; conversation history sidebar with search, persistence via mobile intent API; `ChatInterface.tsx` removed; Dashboard + AssistantsPage refactored to use shared component |
 | 2026-03-14 | 2.4.0 | Widget customization — inline chat UI (no iframe), theme color picker, proactive greeting toggle, custom welcome message, squircle FAB, cache busting, dark text input; frontend config UI in CreateAssistant.tsx |
 | 2026-03-13 | 2.3.0 | Voice interaction awareness — VOICE INTERACTION section added to STAFF_CORE_DEFAULT and CLIENT_CORE_DEFAULT; AI no longer claims it "can't hear" users or formats responses with markdown when used via mobile voice |
 | 2026-03-12 | 2.2.0 | AI Telemetry — POPIA-compliant anonymized chat analytics, PII sanitization, consent API, frontend consent modal with opt-out for paid users |
@@ -27,7 +28,62 @@
 
 ---
 
-| 2026-03-14 | 2.4.0 | Widget customization — inline chat UI (no iframe), theme color picker, proactive greeting toggle, custom welcome message, squircle FAB, cache busting, dark text input; frontend config UI in CreateAssistant.tsx |
+| 2026-03-28 | 2.5.0 | Shared chat modal — `AssistantChatModal` replaces all inline chat UIs; conversation history sidebar with search, persistence via mobile intent API; `ChatInterface.tsx` removed; Dashboard + AssistantsPage refactored to use shared component |
+
+---
+
+## 1.4 v2.5.0 — Shared Chat Modal & Conversation Persistence
+
+**Date:** 2026-03-28  
+**Scope:** Replace all duplicated inline chat UIs with a single shared `AssistantChatModal` component. Add conversation history sidebar with search, persistence via mobile intent API, and sender identification labels.
+
+### Summary
+
+The portal had three separate chat implementations: `Dashboard.tsx` (inline modal), `AssistantsPage.tsx` (inline modal), and `ChatInterface.tsx` (full-page). All three have been consolidated into a single shared component `AssistantChatModal.tsx` in `src/components/AI/`. The full-page `ChatInterface.tsx` was deleted along with its route (`/portal/assistants/:assistantId/chat`) and barrel export.
+
+The new shared component features:
+- **Conversation history sidebar** (272px, collapsible) showing previous conversations per assistant
+- **Server-side persistence** via `POST /api/v1/mobile/intent` and `GET /api/v1/mobile/conversations`
+- **Sender labels** ("You" / assistant name) above each message bubble
+- **Search** across conversation history
+- **Delete** individual conversations
+- **New Chat** button to start fresh conversations
+
+### Changes — Frontend
+
+| File | Action | Details |
+|------|--------|---------|
+| `src/components/AI/AssistantChatModal.tsx` | **CREATED** (~475 LOC) | Shared modal with sidebar, persistence, sender labels |
+| `src/pages/portal/Dashboard.tsx` | MODIFIED (564 → ~600 LOC) | Removed ~150 lines inline chat code; imports `AssistantChatModal` |
+| `src/pages/portal/AssistantsPage.tsx` | MODIFIED (592 → ~370 LOC) | Removed ~220 lines inline chat code; imports `AssistantChatModal` |
+| `src/pages/portal/ChatInterface.tsx` | **DELETED** | Full-page chat replaced by shared modal |
+| `src/pages/portal/index.ts` | MODIFIED | Removed `ChatInterface` export |
+| `src/App.tsx` | MODIFIED | Removed `/portal/assistants/:assistantId/chat` route |
+
+### Changes — Architecture
+
+- **Before:** 3 chat implementations (Dashboard inline, AssistantsPage inline, ChatInterface full-page) each with their own SSE streaming via `POST /api/assistants/chat`
+- **After:** 1 shared component (`AssistantChatModal`) using `POST /api/v1/mobile/intent` for persistence-backed chat
+- **API change:** Chat now uses the mobile intent API (JSON response) instead of the assistants chat API (SSE streaming). Conversations are stored server-side in `mobile_conversations` + `mobile_messages` tables.
+- **Route removed:** `/portal/assistants/:assistantId/chat` no longer exists
+
+### AssistantChatModal Props
+
+```typescript
+export interface AssistantChatTarget {
+  id: string;
+  name: string;
+}
+
+interface Props {
+  assistant: AssistantChatTarget;
+  onClose: () => void;
+}
+```
+
+### No Database Changes
+
+This release uses existing `mobile_conversations` and `mobile_messages` tables. No migrations required.
 
 ---
 

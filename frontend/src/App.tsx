@@ -83,6 +83,8 @@ import {
   GatewaysPage,
 } from './pages/portal';
 import AdminSites from './pages/admin/AdminSites';
+import StudioDashboard from './pages/staff/StudioDashboard';
+import StudioWorkspace from './pages/staff/StudioWorkspace';
 import { useAuth } from './hooks/useAuth';
 import { useTheme } from './hooks/useTheme';
 import { useAppStore } from './store';
@@ -207,6 +209,8 @@ const App: React.FC = () => {
           <Route path="/admin/client-api" element={<AdminRoute><Layout><ClientApiConfigs /></Layout></AdminRoute>} />
           <Route path="/admin/cases" element={<AdminRoute><Layout><AdminCaseManagement /></Layout></AdminRoute>} />
           <Route path="/admin/sites" element={<AdminRoute><Layout><AdminSites /></Layout></AdminRoute>} />
+          <Route path="/studio" element={<AdminRoute><Layout><StudioDashboard /></Layout></AdminRoute>} />
+          <Route path="/studio/:siteId" element={<AdminRoute><StudioWorkspace /></AdminRoute>} />
           <Route path="/admin/payroll" element={<AdminRoute><Layout><AdminPayroll /></Layout></AdminRoute>} />
           <Route path="/admin/audit-log" element={<AdminRoute><Layout><AuditLog /></Layout></AdminRoute>} />
           <Route path="/webmail" element={<ProtectedRoute><Layout><Webmail /></Layout></ProtectedRoute>} />

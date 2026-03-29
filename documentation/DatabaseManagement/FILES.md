@@ -48,6 +48,11 @@
 
 ---
 
+### `/var/opt/backend/db-exports/` (directory)
+**Purpose**: Server-side storage for SQL database export files. Created automatically on backend startup via `mkdirSync({ recursive: true })` if it does not exist. All `.sql` dump files written by `POST /export-database` land here. Files are served via `GET /export-files/:filename/download` and deleted via `DELETE /export-files/:filename`.
+
+---
+
 ### `/var/opt/backend/src/middleware/requireDeveloper.ts` (54 LOC)
 **Purpose**: Express middleware that restricts access to users with developer, admin, or super_admin roles. Must be chained after `requireAuth`.
 
@@ -69,53 +74,47 @@ LIMIT 1
 
 ## Frontend Files
 
-### `/var/opt/frontend/src/pages/general/DatabaseManager.tsx` (~1939 LOC)
-**Purpose**: Full database administration interface with shared connection management, SQL editor, Adminer-like table browser with inline CRUD, SQL import, table actions, and server monitoring.
+### `/var/opt/frontend/src/pages/general/DatabaseManager.tsx` (~2100+ LOC)
+**Purpose**: Full database administration interface with shared connection management (admin-only CUD, per-connection access grants), SQL editor, Adminer-like table browser with inline CRUD, SQL import, filesystem-based database export with file browser, table actions, and server monitoring.
 
 | Section | Lines (approx.) | Description |
 |---------|-----------------|-------------|
-| Imports | 1–47 | React (useState, useEffect, useRef, useCallback), 40+ Heroicons, `notify`, `Swal`, `api` |
+| Imports | 1–50 | React hooks, 40+ Heroicons, `notify`, `Swal`, `api`, `API_BASE_URL`, `useAppStore` |
 | `TunnelConfig` interface | 56–62 | SSH tunnel parameters |
-| `Connection` interface | 64–74 | `id`, `name`, `host`, `port`, `user`, `password`, `database`, `type`, `tunnel` |
-| `QueryResult` interface | 76–83 | `columns`, `rows`, `affectedRows?`, `executionTime?`, `error?`, `message?` |
-| `TableInfo` interface | 85–90 | `name`, `type`, `rows?`, `engine?` |
-| `SSHKeyInfo` interface | 92–96 | `name`, `hasPublicKey`, `size` |
-| `MainTab` type | 98 | `'query' \| 'browse' \| 'structure' \| 'info' \| 'processes' \| 'status' \| 'import'` |
-| `connPayload()` helper | 100 | Builds API request body from Connection + optional extras |
-| **ConnectionDialog** component | 107–350 | Modal dialog for creating/editing connections. SSH Tunnel section (amber border, required): SSH Host, SSH Port (default 22), SSH User, Key File dropdown (from `GET /keys`), SSH Password. Database section: Host, Port, Username, Password, Database. Test Connection button. Always-visible edit button (PencilSquareIcon). |
-| **TableBrowser** component | 355–800 | Adminer-like paginated data browser with: server-side sorting (click column headers, ASC/DESC/none), server-side filtering (column selector, operator dropdown, value input), inline row editing (click edit icon, input fields, save/cancel), new row insertion (form at bottom), row deletion (with SweetAlert2 confirm), multi-select with checkboxes, bulk delete, export buttons (CSV/JSON/clipboard), row count display, pagination (first/prev/next/last). Props: `conn`, `tableName`, `onRunQuery`, `onRefreshTables`. |
-| **DatabaseManager** — state declarations | 805–870 | Connections (from API `GET /database/connections`), `loadingConnections`, `sshKeys`, `activeConnection`, `connected`, `connecting`, `sql`, `result`, `executing`, `databases`, `tables`, `loadingTables`, `expandedTable`, `tableColumns`, `dialogOpen`, `editingConn`, `mainTab`, `browsingTable`, `queryHistory`, `savedQueries`, `showHistory`, `showSaved`, `sidebarCollapsed`, `tableInfo`, `tableIndexes`, `createSQL`, `processes`, `serverStatus`, `infoTable` |
-| Load connections effect | 870–885 | Fetches connections from `GET /database/connections` API on mount. Shows loading spinner. |
-| SSH keys effect | 886–892 | Loads key list from `GET /database/keys` on mount |
-| `saveConnection()` | 894–910 | Calls `POST /database/connections`, refreshes connections list from API on success |
-| `deleteConnection()` | 912–930 | SweetAlert2 confirmation → `DELETE /database/connections/:id`, refreshes connections list |
-| `handleConnect()` | 932–960 | Sets `activeConnection`, calls `POST /connect`, then `fetchTables()` + `fetchDatabases()` in parallel |
-| `handleDisconnect()` | 962–970 | Resets connection state |
-| `fetchTables()` | 972–985 | Calls `POST /database/tables`, updates `tables` state |
-| `fetchDatabases()` | 987–995 | Calls `POST /database/databases`, updates `databases` state |
-| `fetchTableColumns()` | 997–1010 | Calls `POST /database/describe`, caches in `tableColumns[tableName]` |
-| `switchDatabase()` | 1012–1020 | Updates `activeConnection.database`, calls `fetchTables()` |
-| `handleExecute()` | 1022–1060 | Executes SQL via `POST /database/query`. Auto-adds to history (dedup, max 100). On DDL, auto-refreshes tables. |
-| `handleKeyDown()` | 1062–1075 | Keyboard handler: Ctrl+Enter → execute, Tab → insert 2 spaces |
-| Export helpers | 1077–1110 | `exportCSV()`, `exportJSON()`, `copyToClipboard()` — client-side export functions |
-| `loadTableInfo()` | 1112–1135 | Parallel fetch: `/table-size` + `/indexes` + `/table-create-sql`. Includes truncate/drop actions. |
-| `loadProcesses()` | 1137–1145 | Calls `POST /database/processes` |
-| `loadStatus()` | 1147–1155 | Calls `POST /database/status` |
-| `saveQuery()` | 1157–1170 | SweetAlert2 input prompt → saves to localStorage |
-| `quickSelect()` / `quickCount()` | 1172–1185 | Engine-aware SQL template generators |
-| **JSX — Sidebar** | 1190–1400 | Collapsible sidebar (w-64 / w-12). Connection list with connect/edit/delete. Database selector dropdown. Tables tree with expand/collapse. Action buttons per table: SELECT, Browse, Info, Truncate (hover), Drop (hover). |
-| **JSX — SQL Editor toolbar** | 1402–1470 | Execute button, Ctrl+Enter hint, Save/Saved/History toggles, Processes/Status buttons, connection status. |
-| **JSX — Saved queries panel** | 1472–1495 | Dropdown with saved queries list |
-| **JSX — History panel** | 1497–1515 | Dropdown with last 20 queries |
-| **JSX — SQL textarea** | 1517–1530 | Dark themed (`bg-[#1e1e2e]`, `text-[#cdd6f4]`), monospace |
-| **JSX — Tab bar** | 1532–1580 | 7 tabs: Results, Browse, Info, Processes, Server, Import. Export buttons on Results tab. |
-| **JSX — Results tab** | 1582–1660 | Results table with stats bar, sticky headers, NULL styling, boolean badges |
-| **JSX — Browse tab** | 1662–1680 | Renders `<TableBrowser>` with full CRUD capabilities |
-| **JSX — Info tab** | 1682–1780 | Table stats cards, columns table, indexes table, CREATE SQL, Truncate/Drop buttons in header |
-| **JSX — Processes tab** | 1782–1810 | Dynamic table from `processes` array with refresh |
-| **JSX — Server Status tab** | 1812–1835 | Key-value cards with refresh |
-| **JSX — Import tab** | 1837–1920 | File upload area (drag-and-drop + click), textarea for pasting SQL, execute button with progress. Shows results summary (executed count, errors). |
-| ConnectionDialog render | 1922–1939 | Renders `<ConnectionDialog>` with props |
+| `DeveloperUser` interface | 63–67 | `id`, `name`, `email` — used for access panel |
+| `Connection` interface | 69–82 | `id`, `name`, `host`, `port`, `user`, `password`, `database`, `type`, `tunnel`, `accessUsers?[]` |
+| `QueryResult` interface | 84–91 | `columns`, `rows`, `affectedRows?`, `executionTime?`, `error?`, `message?` |
+| `TableInfo` interface | 93–98 | `name`, `type`, `rows?`, `engine?` |
+| `SSHKeyInfo` interface | 100–104 | `name`, `hasPublicKey`, `size` |
+| `MainTab` type | 106 | `'query' \| 'browse' \| 'structure' \| 'info' \| 'processes' \| 'status' \| 'import' \| 'export'` |
+| `connPayload()` helper | 108 | Builds API request body from Connection + optional extras |
+| **ConnectionDialog** component | 112–380 | Modal dialog for creating/editing connections (admin-only). User Access panel: checkbox list of developer-role users with search and select all/clear all. SSH Tunnel + Database sections unchanged. |
+| **TableBrowser** component | 385–830 | Adminer-like paginated data browser with server-side sort/filter, inline CRUD, multi-select bulk delete, export (CSV/JSON/clipboard). |
+| **DatabaseManager** — state declarations | 835–900 | Connections, `loadingConnections`, `sshKeys`, `activeConnection`, `connected`, `connecting`, `sql`, `result`, `executing`, `databases`, `tables`, `loadingTables`, `expandedTable`, `tableColumns`, `dialogOpen`, `editingConn`, `mainTab`, `browsingTable`, `queryHistory`, `savedQueries`, `showHistory`, `showSaved`, `sidebarCollapsed`, `tableInfo`, `tableIndexes`, `createSQL`, `processes`, `serverStatus`, `infoTable`, `developerUsers`, `isAdmin` |
+| Load connections effect | 900–915 | Fetches connections from `GET /database/connections` on mount |
+| SSH keys effect | 916–922 | Loads key list from `GET /database/keys` on mount |
+| Developer users effect | 923–932 | Fetches `GET /database/developer-users` on mount (admin only) |
+| `saveConnection()` | 934–950 | Calls `POST /database/connections` with `accessUserIds`, refreshes connections |
+| `deleteConnection()` | 952–970 | SweetAlert2 confirm → `DELETE /database/connections/:id` |
+| `handleConnect()` | 972–1000 | Sets `activeConnection`, tests connection, loads tables + databases |
+| `handleDisconnect()` | 1002–1010 | Resets connection state |
+| `fetchTables()` | 1012–1025 | Calls `POST /database/tables` |
+| `fetchDatabases()` | 1027–1035 | Calls `POST /database/databases` |
+| `fetchTableColumns()` | 1037–1050 | Calls `POST /database/describe`, caches result |
+| `switchDatabase()` | 1052–1060 | Updates `activeConnection.database`, calls `fetchTables()` |
+| `handleExecute()` | 1062–1100 | Executes SQL, adds to history, auto-refreshes on DDL |
+| Export state | 1229–1237 | `exportType`, `exportAddDropTable`, `exportAddCreateDb`, `exportSelectedTables`, `exportLoading`, `exportFiles`, `exportFilesLoading` |
+| `fetchExportFiles()` | 1267–1280 | Calls `GET /database/export-files`, updates `exportFiles` state |
+| `handleExportDatabase()` | 1282–1300 | Posts to `POST /export-database` (fire-and-forget), shows toast, polls file list at 3s/8s/20s |
+| `handleDeleteExportFile()` | 1302–1320 | SweetAlert2 confirm → `DELETE /database/export-files/:filename` |
+| Initialize export tables effect | 1326–1332 | Sets all tables selected when `tables` changes |
+| Fetch export files on tab effect | 1334–1337 | Calls `fetchExportFiles()` when `mainTab === 'export'` |
+| **JSX — Sidebar** | 1400–1660 | Collapsible sidebar. Connection list with connect button (all users), edit/delete buttons (admin only). Database selector, tables tree, table actions. |
+| **JSX — SQL Editor** | 1660–1820 | Toolbar, history, saved queries, dark textarea |
+| **JSX — Tab bar** | 1820–1870 | 8 tabs: Results, Browse, Info, Processes, Server, Import, Export |
+| **JSX — Export tab** | 1870–2020 | Export type selector, options (DROP TABLE, CREATE DATABASE), per-table checklist, "Start Export" button, "Export Files on Server" panel (file list with Download + Delete per row, Refresh button) |
+| **JSX — Import tab** | 2020–2120 | File upload area, paste textarea, execute button with progress |
+| **JSX — Results/Browse/Info/Processes/Status tabs** | various | Unchanged from previous version |
 
 **Key patterns**:
 - Three sub-components: `ConnectionDialog` (modal), `TableBrowser` (Adminer-like browser), `DatabaseManager` (main)

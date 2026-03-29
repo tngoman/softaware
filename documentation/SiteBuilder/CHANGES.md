@@ -1,7 +1,45 @@
 # Site Builder Module — Changelog
 
-**Version:** 3.1.0  
-**Last Updated:** 2026-03-15
+**Version:** 3.2.0  
+**Last Updated:** 2026-03-18
+
+---
+
+## Version 3.2.0 — Studio Integration (2026-03-18)
+
+### New Features
+
+| Feature | Description |
+|---------|-------------|
+| **Studio creative workspace** | Staff-facing design builder at `/studio` and `/studio/:siteId` — visual editor with AI-assisted design, sticky notes, snapshots, collections, and component library. See [Studio docs](../Studio/). |
+| **Site-scoped collections** | `client_custom_data` now supports `site_id` column, enabling per-site CMS collections rather than only per-client. |
+| **Public Site Data API** | New unauthenticated API at `/api/v1/public/site-data/:siteId/:collectionName` — deployed sites can fetch/write collection data (rate-limited, public-write gated per collection). |
+| **Collection metadata** | New `collection_metadata` table with `allow_public_write` flag and `schema_template` per collection. |
+| **Site API keys** | New `site_api_keys` table for headless API key management per site. |
+| **Studio snapshots** | Version snapshots capturing full page + styles state for undo/comparison. |
+| **Sticky notes** | Collaborative canvas annotations with replies, positioning, colors, and resolve status. |
+| **16 Studio AI tools** | Design tools (generate_page, generate_component, suggest_color_palette, improve_component, etc.) injected into staff assistants when `context === 'studio'`. |
+
+### Database Changes
+
+| Change | Type | Migration |
+|--------|------|-----------|
+| Add `site_id` to `client_custom_data` | ALTER TABLE | 034_studio_tables.ts |
+| Add `allow_public_write` to `client_custom_data` | ALTER TABLE | 034_studio_tables.ts |
+| Create `site_api_keys` | CREATE TABLE | 034_studio_tables.ts |
+| Create `studio_snapshots` | CREATE TABLE | 034_studio_tables.ts |
+| Create `studio_sticky_notes` | CREATE TABLE | 034_studio_tables.ts |
+| Create `studio_note_replies` | CREATE TABLE | 034_studio_tables.ts |
+| Create `collection_metadata` | CREATE TABLE | 034_studio_tables.ts |
+
+### Security Changes
+
+| Change | Description |
+|--------|-------------|
+| Public API rate limiting | Read: 60 req/min/IP, Write: 10 req/min/IP per site |
+| Public write gating | Collection-level `allow_public_write` flag checked before any unauthenticated write |
+| Document size limit | 64KB max per collection document (public + staff writes) |
+| Staff auth | Studio routes require `requireAuth`; mounted with `auditLogger` middleware |
 
 ---
 

@@ -102,27 +102,39 @@ Request → requireAuth → requireDeveloper → createTunnel() → createConnec
 **Trade-off**: Maximum isolation and simplicity — no state to manage, no stale connections. However, every request pays the SSH handshake + TCP connect overhead (~100-500ms per request depending on network).
 
 ### 6. Server-Side Connection Persistence (MySQL `db_connections` table)
-Connection configurations are stored in the application's MySQL database in the `db_connections` table, shared across all authorized users:
+Connection configurations are stored in the application's MySQL database in the `db_connections` table. Non-admin developers only see connections they've been explicitly granted in `db_connection_access`. Admin users see all connections.
 
 ```typescript
-// Save (upsert)
+// Save (upsert) — admin only
 await db.query(
-  `INSERT INTO db_connections (id, name, host, port, user, password, ..., created_by)
-   VALUES (?, ?, ?, ?, ?, ?, ..., ?)
+  `INSERT INTO db_connections (id, name, host, ..., created_by)
+   VALUES (?, ?, ?, ..., ?)
    ON DUPLICATE KEY UPDATE name = VALUES(name), host = VALUES(host), ...`,
-  [connId, name, host, port, user, password, ..., userId]
+  [connId, name, host, ..., userId]
 );
 
-// Load all
-const rows = await db.query('SELECT * FROM db_connections ORDER BY name ASC');
-// Map flat rows to nested Connection shape
-const connections = rows.map(r => ({
-  ...r,
-  tunnel: { sshHost: r.ssh_host, sshPort: r.ssh_port, sshUser: r.ssh_user, ... }
-}));
+// Sync access grants
+await db.query('DELETE FROM db_connection_access WHERE connection_id = ?', [connId]);
+for (const uid of accessUserIds) {
+  await db.query(
+    'INSERT INTO db_connection_access (id, connection_id, user_id, granted_by) VALUES (?, ?, ?, ?)',
+    [crypto.randomUUID(), connId, uid, userId]
+  );
+}
+
+// Load — admin sees all; non-admin filtered by access
+const isAdmin = await isAdminUser(req);
+const rows = isAdmin
+  ? await db.query('SELECT * FROM db_connections ORDER BY name ASC')
+  : await db.query(
+      `SELECT dc.* FROM db_connections dc
+       JOIN db_connection_access dca ON dca.connection_id = dc.id
+       WHERE dca.user_id = ? ORDER BY dc.name ASC`,
+      [userId]
+    );
 ```
 
-**Rationale**: Connections are shared resources — all developers need access to the same database connections. Server-side storage also avoids XSS credential exposure that localStorage had. Query history and saved queries remain in localStorage as they are user-specific and non-sensitive.
+**Rationale**: Connections are shared resources. Server-side storage avoids XSS credential exposure. Per-connection access restricts sensitive connections to selected developers. Query history and saved queries remain in localStorage (user-specific, non-sensitive).
 
 ### 7. `connPayload()` Request Builder
 A single helper function transforms a `Connection` object into the flat request body format expected by all backend endpoints:
@@ -148,6 +160,73 @@ const handleExecute = async () => {
   }
 };
 ```
+
+---
+
+### 9. Admin-Gated UI with `isAdminUser()`
+The backend helper `isAdminUser()` queries `users.is_admin` per-request to enforce admin-only operations. The frontend reads `user.is_admin` from Zustand store to conditionally show/hide controls.
+
+```typescript
+// Backend helper
+async function isAdminUser(req: Request): Promise<boolean> {
+  const userId = (req as AuthRequest).userId;
+  const row = await db.queryOne<{ is_admin: number }>('SELECT is_admin FROM users WHERE id = ?', [userId]);
+  return !!row?.is_admin;
+}
+
+// Protect mutation endpoints
+router.post('/connections', async (req, res) => {
+  if (!await isAdminUser(req)) return res.status(403).json({ success: false, error: 'Admin access required' });
+  // ... proceed with upsert
+});
+
+// Frontend — hide controls for non-admins
+{isAdmin && (
+  <button onClick={() => openDialog()}>New Connection</button>
+)}
+```
+
+**Pattern**: Guard is at the action level, not the route level, so non-admins can still LIST and USE connections (read-only).
+
+---
+
+### 10. Filesystem Export (Fire-and-Forget + Poll)
+The database export endpoint responds immediately with the filename then writes to disk in the background. The frontend polls the file list a few times after triggering to pick up the new file.
+
+```typescript
+// Backend — respond immediately, write in background
+router.post('/export-database', async (req, res) => {
+  const filename = `${safeDbName}_${exportType}_${timestamp}.sql`;
+  res.json({ success: true, filename, message: 'Export started' });  // immediate
+
+  const stream = fs.createWriteStream(path.join(EXPORTS_DIR, filename));
+  try {
+    await withMySQL(body, async (conn) => {
+      // write header, table DDL, INSERT batches line by line
+      await write(`-- Export: ${dbName}`);
+      for (const table of tables) {
+        const [rows, fields] = await conn.query(`SELECT * FROM \`${table}\``);
+        // ... batch write INSERTs
+      }
+    });
+  } catch (err) {
+    stream.write(`-- EXPORT FAILED: ${err.message}\n`);
+  } finally {
+    stream.end();
+  }
+});
+
+// Frontend — fire and poll
+const handleExportDatabase = async () => {
+  await api.post('/database/export-database', { ...connPayload(conn), exportType, ... });
+  notify.success('Export started');
+  setTimeout(() => fetchExportFiles(), 3000);
+  setTimeout(() => fetchExportFiles(), 8000);
+  setTimeout(() => fetchExportFiles(), 20000);
+};
+```
+
+**Rationale**: Large database exports previously timed out because the entire dump was accumulated in memory and sent in one HTTP response. Writing to disk line-by-line removes the memory cap and the request timeout constraints. The file-list UI lets users download whenever the export completes.
 
 ### 9. Quick Query Generators
 Engine-aware SQL templates for common operations:

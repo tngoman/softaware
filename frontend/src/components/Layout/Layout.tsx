@@ -36,6 +36,7 @@ import {
   CalendarIcon,
   CommandLineIcon,
   ServerStackIcon,
+  PaintBrushIcon,
 } from '@heroicons/react/24/outline';
 import { useAppStore } from '../../store';
 import { usePermissions } from '../../hooks/usePermissions';
@@ -103,6 +104,7 @@ const navSections: NavSection[] = [
       { name: 'Enterprise Endpoints', href: '/admin/enterprise', icon: SignalIcon, adminOnly: true },
       { name: 'Client API Gateway', href: '/admin/client-api', icon: ServerStackIcon, adminOnly: true },
       { name: 'Sites', href: '/admin/sites', icon: GlobeAltIcon, adminOnly: true },
+      { name: 'Studio', href: '/studio', icon: PaintBrushIcon, adminOnly: true },
     ],
   },
   {

@@ -1,7 +1,7 @@
 # Assistants Module — File Inventory
 
-**Version:** 2.4.0  
-**Last Updated:** 2026-03-14
+**Version:** 2.5.0  
+**Last Updated:** 2026-03-28
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine.
 
@@ -16,7 +16,7 @@
 | **Backend route files** | 5 (~2,620 LOC) |
 | **Backend service files** | 9 (~4,600 LOC) |
 | **Backend migration files** | 3 (77 + 62 + 45 LOC) |
-| **Frontend files** | 5 (~4,266 LOC) + models ~630 LOC |
+| **Frontend files** | 6 (~4,440 LOC) + models ~630 LOC |
 | **Static widget files** | 3 (widget.js, chat-widget.js, embed.js) |
 
 ### Directory Tree
@@ -42,8 +42,9 @@ Backend:
   src/db/migrations/026_ai_telemetry.ts    (45 LOC)  ⭐ NEW migration — telemetry consent columns
 
 Frontend:
-  src/pages/portal/Dashboard.tsx           (564 LOC)  ⭐ recently modified
-  src/pages/portal/AssistantsPage.tsx      (592 LOC)  ⭐ ENHANCED (v1.7.0) — SSE fixes, per-assistant chat persistence, trash icon
+  src/components/AI/AssistantChatModal.tsx  (475 LOC)  ⭐ NEW (v2.5.0) — shared chat modal with sidebar, persistence, sender labels
+  src/pages/portal/Dashboard.tsx           (600 LOC)  ⭐ MODIFIED (v2.5.0) — inline chat removed, uses AssistantChatModal
+  src/pages/portal/AssistantsPage.tsx      (370 LOC)  ⭐ MODIFIED (v2.5.0) — inline chat removed, uses AssistantChatModal
   src/pages/portal/CreateAssistant.tsx     (1537 LOC) ⭐ 4-step wizard + widget config (theme, greeting, proactive toggle) + telemetry consent modal
   src/pages/general/Profile.tsx            (2227 LOC) ⭐ ENHANCED (v2.0.0) — image attachment, voice, chat history sidebar
   src/components/KnowledgeHealthBadge.tsx  (107 LOC)
@@ -676,14 +677,14 @@ mobileActionExecutor.ts                     External Software API
 
 ## 3. Frontend Files
 
-### 3.1 `src/pages/portal/Dashboard.tsx` — Portal Dashboard ⭐ RECENTLY MODIFIED
+### 3.1 `src/pages/portal/Dashboard.tsx` — Portal Dashboard ⭐ MODIFIED (v2.5.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/portal/Dashboard.tsx` |
-| **LOC** | 564 |
-| **Purpose** | Portal dashboard with usage metrics, assistant cards (per-assistant health badge + delete), quick actions, inline test chat modal |
-| **Dependencies** | react, react-router-dom, @heroicons/react, sweetalert2, api.ts, KnowledgeHealthBadge |
+| **LOC** | ~600 |
+| **Purpose** | Portal dashboard with usage metrics, assistant cards (per-assistant health badge + delete), quick actions; chat via shared `AssistantChatModal` |
+| **Dependencies** | react, react-router-dom, @heroicons/react, sweetalert2, api.ts, KnowledgeHealthBadge, **AssistantChatModal** |
 | **Exports** | `default` (PortalDashboard component) |
 
 #### Key Changes (v1.0.0)
@@ -701,8 +702,6 @@ mobileActionExecutor.ts                     External Software API
 | Function | Description |
 |----------|-------------|
 | `loadData()` | Parallel fetch of `/dashboard/metrics` + `/assistants` |
-| `sendMessage()` | SSE streaming chat handler for test chat modal |
-| `handleChatKeyDown(e)` | Enter-to-send (Shift+Enter for newline) |
 | `handleDeleteAssistant(assistant)` | SweetAlert2 confirmation → `DELETE /assistants/:id?clearKnowledge=...` → reload |
 | `usagePercent(used, limit)` | Percentage calculation clamped to 100 |
 | `barColor(pct)` | Red ≥90%, amber ≥70%, blue otherwise |
@@ -729,14 +728,14 @@ mobileActionExecutor.ts                     External Software API
 
 ---
 
-### 3.2 `src/pages/portal/AssistantsPage.tsx` — Client Assistant List ⭐ NEW (v1.6.0)
+### 3.2 `src/pages/portal/AssistantsPage.tsx` — Client Assistant List ⭐ MODIFIED (v2.5.0)
 
 | Property | Value |
 |----------|-------|
 | **Location** | `/var/opt/frontend/src/pages/portal/AssistantsPage.tsx` |
-| **LOC** | 548 |
-| **Purpose** | Client-facing assistant list with card grid, capabilities helper panel, embed modal, inline chat modal, enhanced empty state |
-| **Dependencies** | react, react-router-dom, @heroicons/react (14 icons), api.ts, sweetalert2 |
+| **LOC** | ~370 |
+| **Purpose** | Client-facing assistant list with card grid, capabilities helper panel, embed modal; chat via shared `AssistantChatModal`; enhanced empty state |
+| **Dependencies** | react, react-router-dom, @heroicons/react, api.ts, sweetalert2, **AssistantChatModal** |
 | **Exports** | `default` (AssistantsPage component) |
 
 #### State
@@ -746,12 +745,9 @@ mobileActionExecutor.ts                     External Software API
 | `assistants` | `Assistant[]` | Loaded assistant list |
 | `loading` | `boolean` | Loading state |
 | `embedModal` | `Assistant \| null` | Selected assistant for embed code modal |
-| `chatModal` | `Assistant \| null` | Selected assistant for inline chat |
+| `chatModal` | `Assistant \| null` | Selected assistant for chat (opens AssistantChatModal) |
 | `copied` | `boolean` | Clipboard copy confirmation |
-| `messages` | `ChatMessage[]` | Chat messages in inline modal |
-| `chatInput` | `string` | Current chat input |
-| `streaming` | `boolean` | SSE stream active |
-| `showCapabilities` | `boolean` | **NEW:** Toggle for capabilities panel |
+| `showCapabilities` | `boolean` | Toggle for capabilities panel |
 
 #### Constants
 
@@ -764,8 +760,6 @@ mobileActionExecutor.ts                     External Software API
 | Function | Description |
 |----------|-------------|
 | `loadAssistants()` | Fetches `GET /assistants` |
-| `sendMessage()` | SSE streaming chat with event-stream parsing |
-| `handleChatKeyDown(e)` | Enter-to-send, Shift+Enter for newline |
 | `handleDelete(id, name)` | SweetAlert2 → `DELETE /assistants/:id` |
 | `getEmbedCode(assistantId)` | Generates `<script>` embed snippet |
 | `copyToClipboard(text)` | Navigator clipboard API |
@@ -792,7 +786,69 @@ mobileActionExecutor.ts                     External Software API
   │       ├── Action buttons: Chat, Embed, Edit, Delete
   │       └── Status badges
   ├── Embed Modal (fixed overlay with code snippet + copy)
-  └── Chat Modal (fixed overlay with SSE streaming)
+  └── Chat Modal (→ AssistantChatModal component)
+```
+
+---
+
+### 3.2.1 `src/components/AI/AssistantChatModal.tsx` — Shared Chat Modal ⭐ NEW (v2.5.0)
+
+| Property | Value |
+|----------|-------|
+| **Location** | `/var/opt/frontend/src/components/AI/AssistantChatModal.tsx` |
+| **LOC** | ~475 |
+| **Purpose** | Reusable chat modal with conversation history sidebar, server-side persistence via mobile intent API, sender labels, search, and delete |
+| **Dependencies** | react, @heroicons/react (10 icons), `API_BASE_URL` from `../../services/api` |
+| **Exports** | `default` (AssistantChatModal), `AssistantChatTarget` (interface) |
+
+#### Props
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `assistant` | `AssistantChatTarget` | `{ id: string, name: string }` — target assistant |
+| `onClose` | `() => void` | Callback to close the modal |
+
+#### State
+
+| State Variable | Type | Description |
+|---------------|------|-------------|
+| `conversations` | `Conversation[]` | Loaded conversation history for this assistant |
+| `activeConversationId` | `string \| null` | Currently selected conversation ID |
+| `messages` | `Message[]` | Messages in active conversation |
+| `input` | `string` | Current input text |
+| `loading` | `boolean` | Sending message / loading |
+| `loadingConversations` | `boolean` | Sidebar loading state |
+| `sidebarOpen` | `boolean` | Sidebar visibility toggle |
+| `searchQuery` | `string` | Conversation search filter |
+
+#### Functions
+
+| Function | Description |
+|----------|-------------|
+| `loadConversations()` | `GET /api/v1/mobile/conversations` → filter by `assistant.id` |
+| `loadConversation(convId)` | `GET /api/v1/mobile/conversations/:id/messages` |
+| `sendMessage()` | `POST /api/v1/mobile/intent` with JWT, returns JSON (not SSE) |
+| `deleteConversation(convId)` | `DELETE /api/v1/mobile/conversations/:id` |
+| `startNewChat()` | Clears active conversation, resets messages |
+| `formatRelativeDate(dateStr)` | "2m ago", "3h ago", "Yesterday", date string |
+
+#### Component Structure
+
+```
+<AssistantChatModal> (fixed overlay, z-50)
+  ┌────────────────────┬───────────────────────────────────┐
+  │ Sidebar (w-72)     │ Header: toggle + name + close      │
+  ├────────────────────┼───────────────────────────────────┤
+  │ [+ New Chat]       │                                   │
+  │ [🔍 Search...]      │ Sender: "You"                     │
+  │                    │ [user message bubble]             │
+  │ ● Conv 1 (active)  │                                   │
+  │   preview... [🗑]  │ Sender: "{assistant.name}"         │
+  │ ○ Conv 2          │ [assistant message bubble]        │
+  │   preview... [🗑]  │                                   │
+  ├────────────────────┼───────────────────────────────────┤
+  │                    │ [textarea input] [➤ Send]        │
+  └────────────────────┴───────────────────────────────────┘
 ```
 
 ---

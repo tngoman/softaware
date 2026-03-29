@@ -100,6 +100,8 @@ import { adminPayrollRouter } from './routes/adminPayroll.js';
 import { adminLeaveRouter } from './routes/adminLeave.js';
 import { staffPayrollRouter } from './routes/staffPayroll.js';
 import { staffLeaveRouter } from './routes/staffLeave.js';
+import studioSitesRouter from './routes/studioSites.js';
+import publicSiteDataRouter from './routes/publicSiteData.js';
 import { startHealthMonitoring } from './services/healthMonitor.js';
 import { startCmsEmbeddingWorker } from './services/cmsEmbeddingQueue.js';
 import { startTrialEnforcer } from './services/trialEnforcer.js';
@@ -256,6 +258,8 @@ export function createApp() {
   apiRouter.use('/admin/leave', auditLogger as any, adminLeaveRouter);
   apiRouter.use('/staff/payroll', staffPayrollRouter);
   apiRouter.use('/staff/leave', staffLeaveRouter);
+  apiRouter.use('/v1/studio', auditLogger as any, studioSitesRouter);
+  apiRouter.use('/v1/public/site-data', publicSiteDataRouter);
   apiRouter.use('/financial-reports', financialReportsRouter);
   apiRouter.use('/expense-categories', expenseCategoriesRouter);
   apiRouter.use('/reports', reportsRouter);

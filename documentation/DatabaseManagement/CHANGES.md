@@ -2,6 +2,41 @@
 
 ## Change Log
 
+### 2026-03 — Access Control per Connection + Filesystem Database Export
+
+#### 🔒 Per-Connection Access Control
+- **Created `db_connection_access` table** — grants individual developer-role users access to specific connections. Schema: `(id, connection_id, user_id, granted_by, created_at)` with `UNIQUE(connection_id, user_id)`. Migration: `033_db_connection_access.ts`.
+- **Added `isAdminUser()` backend helper** — checks `users.is_admin` for the requesting user. Used to gate admin-only operations without a separate middleware.
+- **Updated `GET /connections`** — non-admin developers see only connections they've been granted (`db_connection_access` JOIN filter). Admins see all. Response now includes `accessUsers[]` per connection.
+- **Updated `POST /connections`** — now admin-only (403 for non-admins). Accepts `accessUserIds[]` and syncs `db_connection_access` (delete all existing rows for the connection, re-insert one per user ID).
+- **Updated `DELETE /connections/:id`** — now admin-only (403 for non-admins). Deletes `db_connection_access` rows before the connection row.
+- **Added `GET /developer-users`** — lists users with the `developer` role. Used by the ConnectionDialog user access panel.
+- **Updated ConnectionDialog (frontend)** — added User Access panel (blue section) with: checkbox list of developer-role users, search filter, Select All / Clear All buttons. Only visible to admin users.
+- **Admin-gated sidebar buttons** — New Connection, Edit, and Delete buttons in the sidebar are hidden for non-admin users. Non-admin empty state shows "Ask an admin to grant you access to a connection".
+
+#### 📤 Filesystem Database Export (replaces in-memory stream)
+- **Rewrote `POST /export-database`** — previously accumulated the entire SQL dump in a `lines[]` array in memory and sent via `res.send()`, causing request timeouts and memory exhaustion for large databases. Now:
+  - Responds immediately with `{ success: true, filename, message: 'Export started' }`
+  - Writes to `/var/opt/backend/db-exports/{filename}` via `fs.createWriteStream()` in a background async flow
+  - Writes line-by-line (header, per-table DDL and INSERT batches of 100 rows) to avoid memory accumulation
+  - On error, writes `-- EXPORT FAILED: {message}` marker to the file and closes stream cleanly
+- **Added `EXPORTS_DIR`** constant (`/var/opt/backend/db-exports/`) with `mkdirSync` guard on module load.
+- **Added `GET /export-files`** — lists `.sql` files in `EXPORTS_DIR`, sorted by modified date descending. Returns `name`, `size`, `createdAt`, `modifiedAt`.
+- **Added `GET /export-files/:filename/download`** — streams the file to browser. `path.basename()` prevents path traversal; `.sql` extension enforced.
+- **Added `DELETE /export-files/:filename`** — deletes a file. Same security guards as download.
+- **Updated Export tab (frontend)**:
+  - "Export Database" button renamed to **"Start Export"** — fires `POST /export-database` as fire-and-forget (no blob download)
+  - Shows toast "Export started — file will appear in the list below shortly"
+  - Polls `GET /export-files` at 3s, 8s, and 20s after export start
+  - New **Export Files on Server** panel below the form — shows file list with name, size (KB), date; per-row **Download** button (direct `<a href>` to download endpoint) and **Delete** button (SweetAlert2 confirmation)
+  - **Refresh** button to manually reload the file list
+  - File list auto-fetched when Export tab is opened (`useEffect` on `mainTab`)
+- **Added `API_BASE_URL` import** in `DatabaseManager.tsx` (from `services/api`) for constructing direct download links.
+- **Added `MainTab` value `'export'`** — eighth tab alongside existing tabs.
+- **Added `exportFiles` and `exportFilesLoading` state** to `DatabaseManager` component.
+
+---
+
 ### 2025-03 — Major Enhancement: Authentication, Shared Connections, Adminer-like Features
 
 #### 🔒 Security — Authentication Added
@@ -85,17 +120,36 @@
 |----|-------|------|--------|--------|
 | DBM-013 | **No TypeScript response types** — Backend endpoints return untyped objects. | `databaseManager.ts` | ⚠️ Open | No compile-time safety |
 | DBM-014 | **No SQL syntax highlighting** — Plain `<textarea>` with dark theme. | `DatabaseManager.tsx` | ⚠️ Open | Poor editing experience |
-| DBM-015 | **Static export filenames** — CSV exports use `export.csv`. | `databaseManager.ts` | ⚠️ Open | Confusing for multiple exports |
+| DBM-015 | ~~**Static export filenames** — CSV exports use `export.csv`.~~ | `databaseManager.ts` | ✅ **RESOLVED** — Database exports now use timestamped filenames (`{db}_{type}_{timestamp}.sql`). CSV export endpoint still uses static name. | ~~Confusing for multiple exports~~ |
 | DBM-016 | **No EXPLAIN / query plan support** | — | ⚠️ Open | Missing optimization feature |
 | DBM-017 | **MySQL SHOW INDEX is denormalized** — Returns one row per column vs aggregated MSSQL. | `databaseManager.ts` | ⚠️ Open | Inconsistent display |
 | DBM-018 | **No keyboard shortcut documentation** | `DatabaseManager.tsx` | ⚠️ Open | Discoverability issue |
 | DBM-019 | **Query history duplicate by position** — Dedup only checks most recent entry. | `DatabaseManager.tsx` | ⚠️ Open | Minor clutter |
+| DBM-021 | **Export files not access-controlled** — A developer who has access to the `/database` route can list, download, or delete any export file, even if they don't have access to the source connection. | `databaseManager.ts` | ⚠️ New | Cross-connection data access via export files |
+| DBM-022 | **No cleanup of old export files** — The `db-exports/` directory grows indefinitely. No TTL, no automatic deletion, no disk quota enforcement. | `databaseManager.ts` | ⚠️ New | Disk space exhaustion |
 
 ---
 
 ## Migration Notes
 
-### Server-Side Connection Storage (DB Migration)
+### Per-Connection Access Control (DB Migration — 2026-03)
+Migration file: `/var/opt/backend/src/db/migrations/033_db_connection_access.ts`
+
+```sql
+CREATE TABLE IF NOT EXISTS db_connection_access (
+  id VARCHAR(36) NOT NULL PRIMARY KEY,
+  connection_id VARCHAR(36) NOT NULL,
+  user_id VARCHAR(36) NOT NULL,
+  granted_by VARCHAR(36) DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_conn_user (connection_id, user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+**Note**: After applying this migration, admin users must grant access to existing connections via the Connection Dialog. Non-admin developers will see an empty connection list until access is granted.
+
+### Server-Side Connection Storage (DB Migration — 2025-03)
+
 ```sql
 CREATE TABLE IF NOT EXISTS db_connections (
   id VARCHAR(36) PRIMARY KEY,
@@ -156,11 +210,13 @@ const decryptedPassword = decrypt(row.password, process.env.DB_ENCRYPTION_KEY);
 - [ ] Implement server-side connection sessions to avoid sending credentials per-request (DBM-004)
 - [ ] Add query whitelist/blacklist or read-only mode option (DBM-005)
 - [ ] Add rate limiting per user (DBM-009)
+- [ ] Access-control export file list/download by source connection (DBM-021)
 
-### Priority 2 — Performance
+### Priority 2 — Performance & Maintenance
 - [ ] Implement SSH tunnel + connection pooling with TTL (DBM-006)
 - [x] ~~Add server-side WHERE filtering for table browser (DBM-011)~~
 - [ ] Add deterministic ORDER BY for MSSQL pagination (DBM-010)
+- [ ] Add TTL / auto-cleanup for old export files in `db-exports/` (DBM-022)
 
 ### Priority 3 — Feature Parity
 - [ ] Implement MSSQL CREATE TABLE DDL generation (DBM-007)

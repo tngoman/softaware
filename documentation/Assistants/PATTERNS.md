@@ -1,7 +1,7 @@
 # Assistants Module — Architecture Patterns
 
-**Version:** 2.4.0  
-**Last Updated:** 2026-03-14
+**Version:** 2.5.0  
+**Last Updated:** 2026-03-28
 
 > **See also:** [SQLITE_VEC_ARCHITECTURE.md](SQLITE_VEC_ARCHITECTURE.md) for a deep-dive into the vector storage engine internals.
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-This document catalogs the architecture patterns found in the Assistants module, covering knowledge ingestion, RAG retrieval, health scoring, dashboard display, assistant deletion, frontend UI customization, widget inline chat delivery, and dynamic theming.
+This document catalogs the architecture patterns found in the Assistants module, covering knowledge ingestion, RAG retrieval, health scoring, dashboard display, assistant deletion, frontend UI customization, widget inline chat delivery, dynamic theming, and shared chat modal with conversation persistence.
 
 ---
 
@@ -218,7 +218,7 @@ ollamaResponse.data.on('end', () => {
 **Implementation (Frontend):**
 
 ```typescript
-// Dashboard.tsx — sendMessage()
+// Widget chat — SSE streaming (portal chat now uses mobile intent API, see 2.15)
 const response = await fetch(`${API_BASE_URL}/assistants/chat`, { method: 'POST', ... });
 const reader = response.body?.getReader();
 
@@ -242,7 +242,7 @@ while (true) {
 **Drawbacks:**
 - ❌ No reconnection logic on client disconnect
 - ❌ 90-second timeout — long responses may be truncated
-- ❌ No conversation persistence — history exists only in client state
+- ❌ Widget chat still uses SSE streaming (`POST /api/assistants/chat`); portal chat switched to mobile intent API (v2.5.0)
 
 ---
 
@@ -765,6 +765,90 @@ if (a.proactiveGreeting) {
 
 ---
 
+### 2.15 Shared Chat Modal Pattern ⭐ NEW (v2.5.0)
+
+**Context:** The portal had three separate chat implementations (`Dashboard.tsx` inline modal, `AssistantsPage.tsx` inline modal, `ChatInterface.tsx` full-page) with duplicated SSE streaming, state management, and UI code. DRY violation made chat updates require changes in 3 places.
+
+**Implementation:**
+
+```typescript
+// AssistantChatModal.tsx — single shared component
+export interface AssistantChatTarget {
+  id: string;
+  name: string;
+}
+
+interface Props {
+  assistant: AssistantChatTarget;
+  onClose: () => void;
+}
+
+// Usage in Dashboard.tsx and AssistantsPage.tsx:
+{chatModal && (
+  <AssistantChatModal
+    assistant={{ id: chatModal.id, name: chatModal.name }}
+    onClose={() => setChatModal(null)}
+  />
+)}
+```
+
+**Persistence via Mobile Intent API:**
+
+```typescript
+// Send message — creates/continues conversation server-side
+const res = await fetch(`${API_BASE_URL}/api/v1/mobile/intent`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+  body: JSON.stringify({ text: input, conversationId, assistantId: assistant.id }),
+});
+const data = await res.json();
+// data.reply = AI response, data.conversationId = persisted conversation ID
+
+// Load conversation history
+const convRes = await fetch(`${API_BASE_URL}/api/v1/mobile/conversations`, { headers });
+// Returns conversations filtered by assistant.id on the client
+
+// Load messages for a conversation
+const msgRes = await fetch(`${API_BASE_URL}/api/v1/mobile/conversations/${convId}/messages`, { headers });
+```
+
+**Sidebar Structure:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ ☰ Sidebar (272px)  │  Chat with {name}       ×  │
+├────────────────────┼────────────────────────────────────┘
+│ [+ New Chat]       │                                    │
+│ [🔍 Search...]      │  You:                              │
+│                    │  How do I reset my password?        │
+│ ● Conversation 1   │                                    │
+│   "How do I..."    │  {Assistant Name}:                  │
+│   2m ago      [🗑] │  You can reset your password...     │
+│                    │                                    │
+│ ○ Conversation 2   │                                    │
+│   "What is..."     │                                    │
+│   1h ago      [🗑] │                                    │
+│                    │  [▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁] [➤]  │
+└────────────────────┴────────────────────────────────────┘
+```
+
+**Benefits:**
+- ✅ Single source of truth — chat UI changes only need to be made in one file
+- ✅ Server-side persistence — conversations survive page refresh, logout/login
+- ✅ Conversation history — users can resume previous chats
+- ✅ Sender identification — "You" / assistant name labels above each message
+- ✅ Searchable — conversation sidebar supports text search
+- ✅ Minimal integration — parent page only needs `chatModal` state + 4-line JSX
+
+**Drawbacks:**
+- ❌ JSON response (not SSE streaming) — response arrives all at once rather than token-by-token
+- ❌ Requires JWT auth — only works for logged-in portal users (not widget)
+- ❌ Sidebar loads all conversations up front — could be slow with many conversations
+
+**Trade-off:** The mobile intent API provides persistence but doesn't stream. This was accepted because portal test chat prioritizes history/persistence over token-by-token streaming.
+
+---
+
 ## 3. Anti-Patterns & Technical Debt
 
 ### 3.1 🟡 N+1 Knowledge Health Requests
@@ -807,13 +891,11 @@ if (a.proactiveGreeting) {
 
 ---
 
-### 3.5 🟢 No Chat Persistence
+### 3.5 ✅ ~~No Chat Persistence~~ (RESOLVED v2.5.0)
 
-**Location:** `Dashboard.tsx` — chat messages exist only in React state.
+**Location:** Previously `Dashboard.tsx` — chat messages existed only in React state.
 
-**Impact:** Closing the chat modal or navigating away loses all conversation history.
-
-**Recommended Fix:** Add a `chat_messages` table and persist conversations.
+**Resolution:** `AssistantChatModal` (v2.5.0) now persists conversations server-side via `POST /api/v1/mobile/intent` and loads history via `GET /api/v1/mobile/conversations`. Data stored in `mobile_conversations` + `mobile_messages` tables. Conversation history sidebar with search and delete.
 
 ---
 

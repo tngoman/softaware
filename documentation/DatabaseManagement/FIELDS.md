@@ -8,7 +8,7 @@
 | `port` | `number` | Yes | Database server port (3306 for MySQL, 1433 for MSSQL) |
 | `user` | `string` | Yes | Database username |
 | `password` | `string` | Yes | Database password |
-| `database` | `string` | Some endpoints | Target database name (required for tables, describe, indexes, table-data, table-size, table-create-sql, row-*, truncate, drop-table, import-sql) |
+| `database` | `string` | Some endpoints | Target database name (required for tables, describe, indexes, table-data, table-size, table-create-sql, row-*, truncate, drop-table, import-sql, export-database) |
 | `type` | `'mysql' \| 'mssql'` | Yes | Database engine type |
 | `tunnel` | `TunnelConfig \| null` | No | SSH tunnel configuration (see below) |
 | `table` | `string` | Some endpoints | Target table name (for describe, indexes, table-data, table-size, table-create-sql, row-*, truncate, drop-table) |
@@ -21,6 +21,11 @@
 | `row` | `Record<string, any>` | Some endpoints | Key-value object of column→value pairs (for row-insert, row-update) |
 | `where` | `Record<string, any>` | Some endpoints | Key-value object of primary key columns for WHERE clause (for row-update, row-delete) |
 | `primaryKeys` | `string[]` | No | Array of primary key column names (reserved, not currently used) |
+| `exportType` | `'structure' \| 'data' \| 'structure_and_data'` | No | Export content type (for export-database, default `'structure_and_data'`) |
+| `selectedTables` | `string[]` | No | Tables to include in export (for export-database; omit for all tables) |
+| `addDropTable` | `boolean` | No | Add `DROP TABLE IF EXISTS` before each CREATE (for export-database, default `true`) |
+| `addCreateDatabase` | `boolean` | No | Add `CREATE DATABASE IF NOT EXISTS` + `USE` header (for export-database, default `false`) |
+| `accessUserIds` | `string[]` | No | User UUIDs to grant access to a connection (for POST /connections, admin only) |
 
 ## Request Body: `FilterObject`
 
@@ -77,6 +82,22 @@
 
 ---
 
+## Database Table: `db_connection_access`
+
+Grants per-user access to specific connections. Admin users bypass this table and always see all connections.
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `id` | `VARCHAR(36)` | NO | — | UUID primary key |
+| `connection_id` | `VARCHAR(36)` | NO | — | FK to `db_connections.id` |
+| `user_id` | `VARCHAR(36)` | NO | — | FK to `users.id` |
+| `granted_by` | `VARCHAR(36)` | YES | — | Admin user UUID who granted access |
+| `created_at` | `TIMESTAMP` | YES | `CURRENT_TIMESTAMP` | Grant timestamp |
+
+**Unique constraint**: `(connection_id, user_id)` — prevents duplicate grants.
+
+---
+
 ## API Responses
 
 ### `GET /api/database/connections`
@@ -84,7 +105,7 @@
 | Field | Type | Description |
 |-------|------|-------------|
 | `success` | `boolean` | `true` |
-| `connections[]` | `Connection[]` | Array of connection objects |
+| `connections[]` | `Connection[]` | Array of connection objects (filtered by access for non-admins) |
 | `connections[].id` | `string` | UUID |
 | `connections[].name` | `string` | Display name |
 | `connections[].host` | `string` | Database host |
@@ -97,6 +118,42 @@
 | `connections[].createdBy` | `string \| null` | Creator user UUID |
 | `connections[].createdAt` | `string` | ISO timestamp |
 | `connections[].updatedAt` | `string` | ISO timestamp |
+| `connections[].accessUsers[]` | `{ userId, name, email }[]` | Users granted access to this connection |
+
+---
+
+### `GET /api/database/developer-users`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `users[]` | `DeveloperUser[]` | Users with the `developer` role |
+| `users[].id` | `string` | User UUID |
+| `users[].name` | `string` | Full name |
+| `users[].email` | `string` | Email address |
+
+---
+
+### `POST /api/database/export-database`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` (response is immediate; export runs in background) |
+| `filename` | `string` | Generated filename e.g. `mydb_structure_and_data_2026-03-28_14-30-00.sql` |
+| `message` | `string` | `"Export started"` |
+
+---
+
+### `GET /api/database/export-files`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | `true` |
+| `files[]` | `ExportFile[]` | List of SQL files on server, sorted by modified date desc |
+| `files[].name` | `string` | Filename |
+| `files[].size` | `number` | File size in bytes |
+| `files[].createdAt` | `string` | ISO timestamp (file birth time) |
+| `files[].modifiedAt` | `string` | ISO timestamp (last write) |
 
 ---
 
