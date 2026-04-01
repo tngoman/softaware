@@ -105,8 +105,8 @@ invoicesRouter.get('/', async (req: AuthRequest, res: Response, next) => {
     let query = `SELECT ${INVOICE_SELECT}
        FROM invoices i
        LEFT JOIN contacts c ON c.id = i.contact_id
-       WHERE i.active = 1`;
-    let countQuery = 'SELECT COUNT(*) as count FROM invoices i LEFT JOIN contacts c ON c.id = i.contact_id WHERE i.active = 1';
+       WHERE 1=1`;
+    let countQuery = 'SELECT COUNT(*) as count FROM invoices i LEFT JOIN contacts c ON c.id = i.contact_id WHERE 1=1';
     const params: any[] = [];
     const countParams: any[] = [];
 

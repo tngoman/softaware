@@ -35,8 +35,8 @@ const registerLimiter = rateLimit({
 
 // ─── Helper: Build frontend-compatible User shape ──────────────────
 export async function buildFrontendUser(userId: string) {
-    const user = await db.queryOne<User & { is_admin?: number; is_staff?: number; ai_developer_tools_granted?: number }>(
-      'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, ai_developer_tools_granted, createdAt, updatedAt FROM users WHERE id = ?',
+    const user = await db.queryOne<User & { is_admin?: number; is_staff?: number; ai_developer_tools_granted?: number; oauth_provider?: string }>(
+      'SELECT id, email, name, phone, avatarUrl, is_admin, is_staff, ai_developer_tools_granted, oauth_provider, createdAt, updatedAt FROM users WHERE id = ?',
       [userId]
   );
   if (!user) return null;
@@ -99,6 +99,7 @@ export async function buildFrontendUser(userId: string) {
     is_active: true,
     created_at: user.createdAt,
     updated_at: user.updatedAt,
+    oauth_provider: (user as any).oauth_provider || null,
     role: userRole,
     permissions,
   };
@@ -1325,8 +1326,38 @@ authRouter.get('/google', (req, res) => {
   }
 
   const state = crypto.randomBytes(16).toString('hex');
+  const cookieOpts = { httpOnly: true, maxAge: 5 * 60 * 1000, sameSite: 'lax' as const };
+
   // Store state in a short-lived cookie for CSRF protection
-  res.cookie('oauth_state', state, { httpOnly: true, maxAge: 5 * 60 * 1000, sameSite: 'lax' });
+  res.cookie('oauth_state', state, cookieOpts);
+
+  // Remember which frontend origin initiated the flow so the callback redirects back correctly
+  const origin = req.headers.origin || req.headers.referer;
+  if (origin) {
+    const parsed = new URL(origin);
+    res.cookie('oauth_origin', parsed.origin, cookieOpts);
+  }
+
+  // Support ?mode=link for account-linking (user must already be authenticated)
+  const mode = req.query.mode === 'link' ? 'link' : 'login';
+  res.cookie('oauth_mode', mode, cookieOpts);
+  if (mode === 'link') {
+    // Extract userId from JWT (inline — route isn't behind requireAuth)
+    let linkUserId: string | null = null;
+    const authHeader = req.header('authorization');
+    const bearerToken = authHeader?.toLowerCase().startsWith('bearer ') ? authHeader.slice(7) : null;
+    const cookieToken = (req as any).cookies?.sw_token;
+    const token = bearerToken || cookieToken;
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, env.JWT_SECRET) as any;
+        if (decoded?.userId) linkUserId = String(decoded.userId);
+      } catch { /* token invalid — ignore */ }
+    }
+    if (linkUserId) {
+      res.cookie('oauth_link_user', linkUserId, cookieOpts);
+    }
+  }
 
   const authUrl = googleClient.generateAuthUrl({
     access_type: 'offline',
@@ -1338,7 +1369,7 @@ authRouter.get('/google', (req, res) => {
   res.json({ success: true, data: { url: authUrl } });
 });
 
-// ─── GET /auth/google/callback — Exchange code for user session ───
+// ─── GET /auth/google/callback — Exchange code for user session or link ───
 authRouter.get('/google/callback', async (req, res, next) => {
   try {
     const { code, state } = req.query;
@@ -1352,6 +1383,12 @@ authRouter.get('/google/callback', async (req, res, next) => {
       throw badRequest('Invalid OAuth state — possible CSRF');
     }
     res.clearCookie('oauth_state');
+
+    // Read mode cookies
+    const mode = req.cookies?.oauth_mode || 'login';
+    const linkUserId = req.cookies?.oauth_link_user || null;
+    res.clearCookie('oauth_mode');
+    res.clearCookie('oauth_link_user');
 
     // Exchange code for tokens
     const { tokens } = await googleClient.getToken(code);
@@ -1374,7 +1411,41 @@ authRouter.get('/google/callback', async (req, res, next) => {
     const name = payload.name || email.split('@')[0];
     const avatar = payload.picture || null;
 
-    // Check if this Google account is already linked
+    // Determine frontend origin for redirect
+    const savedOrigin = req.cookies?.oauth_origin;
+    res.clearCookie('oauth_origin');
+    const frontendOrigin = savedOrigin || (env.CORS_ORIGIN !== '*' ? env.CORS_ORIGIN : 'https://softaware.net.za');
+
+    // ── LINK MODE: attach Google to existing authenticated user ──
+    if (mode === 'link' && linkUserId) {
+      // Check if this Google account is already linked to another user
+      const existing = await db.queryOne<{ id: string }>(
+        'SELECT id FROM users WHERE oauth_provider = ? AND oauth_provider_id = ? AND id != ?',
+        ['google', googleId, linkUserId],
+      );
+      if (existing) {
+        return res.redirect(`${frontendOrigin}/account-settings?link_error=${encodeURIComponent('This Google account is already linked to another user')}`);
+      }
+
+      // Check if current user already has a provider linked
+      const currentUser = await db.queryOne<{ oauth_provider: string | null }>(
+        'SELECT oauth_provider FROM users WHERE id = ?',
+        [linkUserId],
+      );
+      if (currentUser?.oauth_provider) {
+        return res.redirect(`${frontendOrigin}/account-settings?link_error=${encodeURIComponent('Your account already has a connected login provider')}`);
+      }
+
+      // Link Google to existing account
+      await db.execute(
+        'UPDATE users SET oauth_provider = ?, oauth_provider_id = ?, avatarUrl = COALESCE(avatarUrl, ?) WHERE id = ?',
+        ['google', googleId, avatar, linkUserId],
+      );
+
+      return res.redirect(`${frontendOrigin}/account-settings?linked=google`);
+    }
+
+    // ── LOGIN MODE: find or create user ──
     let user = await db.queryOne<User>(
       'SELECT * FROM users WHERE oauth_provider = ? AND oauth_provider_id = ?',
       ['google', googleId],
@@ -1457,8 +1528,7 @@ authRouter.get('/google/callback', async (req, res, next) => {
     const frontendUser = await buildFrontendUser(user.id);
 
     // Redirect to frontend with token (for OAuth redirect flow)
-    const frontendOrigin = env.CORS_ORIGIN !== '*' ? env.CORS_ORIGIN : 'https://mcp.softaware.net.za';
-    res.redirect(`${frontendOrigin}/auth/oauth-callback?token=${encodeURIComponent(token)}`);
+    res.redirect(`${frontendOrigin}/oauth/callback?token=${encodeURIComponent(token)}`);
   } catch (err) {
     next(err);
   }
@@ -1573,6 +1643,38 @@ authRouter.post('/google/token', loginLimiter, async (req, res, next) => {
       expiresIn: env.JWT_EXPIRES_IN,
       user: frontendUser,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── DELETE /auth/google/link — Unlink Google account from current user ─────
+authRouter.delete('/google/link', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const userId = req.userId!;
+
+    // Make sure user has a password set (otherwise they'd be locked out)
+    const user = await db.queryOne<{ passwordHash: string; oauth_provider: string | null }>(
+      'SELECT passwordHash, oauth_provider FROM users WHERE id = ?',
+      [userId],
+    );
+    if (!user) {
+      throw badRequest('User not found');
+    }
+    if (!user.oauth_provider) {
+      throw badRequest('No connected account to unlink');
+    }
+    if (!user.passwordHash) {
+      throw badRequest('Cannot unlink — you have no password set. Please set a password first.');
+    }
+
+    await db.execute(
+      'UPDATE users SET oauth_provider = NULL, oauth_provider_id = NULL WHERE id = ?',
+      [userId],
+    );
+
+    const frontendUser = await buildFrontendUser(userId);
+    res.json({ success: true, message: 'Account unlinked successfully', data: { user: frontendUser } });
   } catch (err) {
     next(err);
   }

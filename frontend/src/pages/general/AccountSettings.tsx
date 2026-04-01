@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
+import { useSearchParams } from 'react-router-dom';
 import { 
   LockClosedIcon, 
   ShieldCheckIcon,
   CheckCircleIcon,
-  ExclamationCircleIcon
+  ExclamationCircleIcon,
+  LinkIcon,
 } from '@heroicons/react/24/outline';
 import { AuthModel } from '../../models';
 import { useAppStore } from '../../store';
@@ -12,6 +14,7 @@ import TwoFactorSetup from '../../components/TwoFactorSetup';
 import MobileAuthQR from '../../components/MobileAuthQR';
 import PinSetup from '../../components/PinSetup';
 import { notify } from '../../utils/notify';
+import Swal from 'sweetalert2';
 
 interface PasswordFormData {
   current_password: string;
@@ -22,10 +25,36 @@ interface PasswordFormData {
 const AccountSettings: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
-  const { user } = useAppStore();
+  const [linkingProvider, setLinkingProvider] = useState<string | null>(null);
+  const [unlinkingProvider, setUnlinkingProvider] = useState<string | null>(null);
+  const { user, setUser } = useAppStore();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // Check if user is staff or admin
   const isStaffOrAdmin = !!(user?.is_admin || user?.is_staff);
+
+  // Handle ?linked=google or ?link_error=... from the OAuth redirect
+  useEffect(() => {
+    const linked = searchParams.get('linked');
+    const linkError = searchParams.get('link_error');
+
+    if (linked) {
+      notify.success(`${linked.charAt(0).toUpperCase() + linked.slice(1)} account linked successfully`);
+      // Refresh user profile to get updated oauth_provider
+      AuthModel.me().then(({ user: updatedUser }) => {
+        setUser({ ...user!, ...updatedUser });
+      }).catch(() => {});
+      // Clean up the URL
+      searchParams.delete('linked');
+      setSearchParams(searchParams, { replace: true });
+    }
+
+    if (linkError) {
+      notify.error(linkError);
+      searchParams.delete('link_error');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const {
     register,
@@ -83,6 +112,60 @@ const AccountSettings: React.FC = () => {
   };
 
   const passwordStrength = getPasswordStrength(newPassword || '');
+
+  // ── Connected Accounts (OAuth providers) ──────────────────────────
+  const providers = [
+    {
+      id: 'google',
+      name: 'Google',
+      icon: (
+        <svg className="h-5 w-5" viewBox="0 0 24 24">
+          <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+          <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+          <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+          <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+        </svg>
+      ),
+      color: 'border-gray-300 hover:border-gray-400',
+      onLink: async () => {
+        setLinkingProvider('google');
+        try {
+          const url = await AuthModel.getGoogleLinkUrl();
+          window.location.href = url;
+        } catch (err: any) {
+          notify.error(err.response?.data?.message || 'Failed to start Google linking');
+          setLinkingProvider(null);
+        }
+      },
+    },
+    // Future providers go here:
+    // { id: 'facebook', name: 'Facebook', icon: ..., color: ..., onLink: async () => { ... } },
+  ];
+
+  const handleUnlink = async (providerName: string) => {
+    const result = await Swal.fire({
+      title: `Unlink ${providerName}?`,
+      text: 'You can always re-link later. You\'ll still be able to sign in with your email and password.',
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#e74c3c',
+      confirmButtonText: 'Yes, unlink',
+    });
+    if (!result.isConfirmed) return;
+
+    setUnlinkingProvider(providerName.toLowerCase());
+    try {
+      const response = await AuthModel.unlinkOAuthAccount();
+      if (response.data?.user) {
+        setUser({ ...user!, ...response.data.user });
+      }
+      notify.success(`${providerName} account unlinked`);
+    } catch (err: any) {
+      notify.error(err.response?.data?.message || 'Failed to unlink account');
+    } finally {
+      setUnlinkingProvider(null);
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -258,6 +341,66 @@ const AccountSettings: React.FC = () => {
             </button>
           </div>
         </form>
+      </div>
+
+      {/* Connected Accounts */}
+      <div className="bg-white shadow rounded-lg p-6">
+        <div className="flex items-center space-x-2 mb-2">
+          <LinkIcon className="h-6 w-6 text-gray-700" />
+          <h2 className="text-lg font-semibold text-gray-900">Connected Accounts</h2>
+        </div>
+        <p className="text-sm text-gray-500 mb-6">
+          Link external accounts to sign in faster. You can link one provider at a time.
+        </p>
+
+        <div className="space-y-3">
+          {providers.map((provider) => {
+            const isLinked = user?.oauth_provider === provider.id;
+            const isBusy = linkingProvider === provider.id || unlinkingProvider === provider.id;
+
+            return (
+              <div
+                key={provider.id}
+                className={`flex items-center justify-between p-4 rounded-lg border ${
+                  isLinked ? 'border-green-200 bg-green-50/50' : 'border-gray-200 bg-gray-50/50'
+                }`}
+              >
+                <div className="flex items-center space-x-3">
+                  <div className="flex-shrink-0">{provider.icon}</div>
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{provider.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {isLinked ? (
+                        <span className="text-green-600 font-medium">✓ Connected</span>
+                      ) : (
+                        'Not connected'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                {isLinked ? (
+                  <button
+                    onClick={() => handleUnlink(provider.name)}
+                    disabled={isBusy}
+                    className="px-4 py-1.5 text-sm font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+                  >
+                    {isBusy ? 'Unlinking…' : 'Unlink'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={provider.onLink}
+                    disabled={isBusy || !!user?.oauth_provider}
+                    className="px-4 py-1.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50"
+                    title={user?.oauth_provider ? 'Unlink the current provider first' : undefined}
+                  >
+                    {isBusy ? 'Linking…' : 'Link'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Quick PIN Login */}

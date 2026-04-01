@@ -24,9 +24,13 @@ import { sendPushToUser } from '../services/firebaseService.js';
 import { getLinkPreviewForContent, fetchLinkPreview, extractFirstUrl } from '../services/linkPreview.js';
 import { processImage, processVideo, processAudio, isImageCompressionAvailable } from '../services/mediaProcessor.js';
 import axios from 'axios';
+import { absoluteUrlMiddleware, resolveUrlFields } from '../utils/absoluteUrl.js';
 
 export const staffChatRouter = Router();
 staffChatRouter.use(requireAuth);
+
+// Convert relative image/avatar paths to absolute URLs so mobile clients can load them
+staffChatRouter.use(absoluteUrlMiddleware);
 
 /* ═══════════════════════════════════════════════════════════════
    Unified Staff Chat API — DMs + Groups
@@ -110,6 +114,30 @@ function displayName(row: any): string {
   if (row.name) return row.name;
   if (row.email) return row.email;
   return row.email || 'Unknown';
+}
+
+/**
+ * Serialize Date objects to ISO strings in a message object.
+ * MySQL driver returns Date objects for DATETIME fields, but socket.io and REST API
+ * clients expect strings. This ensures consistent serialization.
+ */
+function serializeMessageDates(msg: any): any {
+  if (!msg) return msg;
+  
+  const dateFields = ['created_at', 'edited_at', 'deleted_for_everyone_at', 'last_seen_at'];
+  
+  for (const field of dateFields) {
+    if (msg[field] instanceof Date) {
+      msg[field] = msg[field].toISOString();
+    }
+  }
+  
+  // Handle reply_to nested object
+  if (msg.reply_to && msg.reply_to.created_at instanceof Date) {
+    msg.reply_to.created_at = msg.reply_to.created_at.toISOString();
+  }
+  
+  return msg;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -755,6 +783,9 @@ staffChatRouter.post('/conversations/:id/messages', async (req: AuthRequest, res
     `, [msgId]);
 
     if (message) {
+      // Serialize date fields to ISO strings
+      serializeMessageDates(message);
+      
       message.reactions = [];
       message.status = 'sent';
       message.reply_to = null;
@@ -777,10 +808,13 @@ staffChatRouter.post('/conversations/:id/messages', async (req: AuthRequest, res
       delete message.link_preview_json;
     }
 
-    res.status(201).json({ success: true, data: message });
+    // Resolve relative paths to absolute URLs for mobile clients
+    const resolved = resolveUrlFields(req, message) as any;
+
+    res.status(201).json({ success: true, data: resolved });
 
     // Emit to conversation room (exclude sender — they already have it from the API response)
-    emitNewMessage(Number(convId), message, userId);
+    emitNewMessage(Number(convId), resolved, userId);
 
     // Push notifications to offline members
     pushToOfflineMembers(members.map((m) => m.user_id), convId, message, userId);
@@ -824,6 +858,10 @@ staffChatRouter.put('/conversations/:id/messages/:msgId', async (req: AuthReques
     );
 
     const updated = await db.queryOne<any>('SELECT * FROM messages WHERE id = ?', [msgId]);
+    
+    // Serialize date fields to ISO strings
+    serializeMessageDates(updated);
+    
     res.json({ success: true, data: updated });
 
     emitMessageEdited(Number(convId), Number(msgId), input.content, updated?.edited_at);
@@ -931,9 +969,13 @@ staffChatRouter.post('/messages/:msgId/forward', async (req: AuthRequest, res: R
       `, [newMsgId]);
 
       if (fwdMsg) {
+        // Serialize date fields to ISO strings
+        serializeMessageDates(fwdMsg);
+        
         fwdMsg.reactions = [];
         fwdMsg.status = 'sent';
-        emitNewMessage(targetConvId, fwdMsg, userId);
+        const resolvedFwd = resolveUrlFields(req, fwdMsg) as any;
+        emitNewMessage(targetConvId, resolvedFwd, userId);
       }
     }
 
@@ -1067,6 +1109,15 @@ staffChatRouter.get('/starred', async (req: AuthRequest, res: Response, next) =>
       ORDER BY sm.created_at DESC
     `, [userId]);
 
+    // Serialize dates in starred messages
+    starred.forEach((msg: any) => {
+      serializeMessageDates(msg);
+      // Also serialize starred_at field
+      if (msg.starred_at instanceof Date) {
+        msg.starred_at = msg.starred_at.toISOString();
+      }
+    });
+
     res.json({ success: true, data: starred });
   } catch (err) {
     next(err);
@@ -1176,6 +1227,9 @@ staffChatRouter.get('/search', async (req: AuthRequest, res: Response, next) => 
       LIMIT ?
     `, [userId, `${q}*`, userId, limit]);
 
+    // Serialize dates in search results
+    results.forEach(serializeMessageDates);
+
     res.json({ success: true, data: results });
   } catch (err) {
     next(err);
@@ -1207,6 +1261,9 @@ staffChatRouter.get('/conversations/:id/search', async (req: AuthRequest, res: R
       ORDER BY m.created_at DESC
       LIMIT 50
     `, [convId, `${q}*`, userId]);
+
+    // Serialize dates in search results
+    results.forEach(serializeMessageDates);
 
     res.json({ success: true, data: results });
   } catch (err) {
@@ -1254,6 +1311,9 @@ staffChatRouter.get('/conversations/:id/media', async (req: AuthRequest, res: Re
       ORDER BY m.created_at DESC
       LIMIT ? OFFSET ?
     `, [convId, limit, offset]);
+
+    // Serialize dates in media messages
+    media.forEach(serializeMessageDates);
 
     res.json({ success: true, data: media });
   } catch (err) {
@@ -1366,6 +1426,11 @@ staffChatRouter.get('/sync', async (req: AuthRequest, res: Response, next) => {
        WHERE ms.timestamp > ?`,
       [userId, since],
     );
+
+    // Serialize dates in all messages
+    newMessages.forEach(serializeMessageDates);
+    editedMessages.forEach(serializeMessageDates);
+    statusUpdates.forEach(serializeMessageDates);
 
     res.json({
       success: true,

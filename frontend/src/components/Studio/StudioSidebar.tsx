@@ -37,6 +37,47 @@ export default function StudioSidebar() {
     });
   };
 
+  const handleAddPage = () => {
+    const name = window.prompt('Enter page name:');
+    if (name) {
+      console.log('Add page:', name);
+      // TODO: Implement page creation
+    }
+  };
+
+  const handleDeletePage = (e: React.MouseEvent, pageId: string) => {
+    e.stopPropagation();
+    if (window.confirm('Delete this page?')) {
+      console.log('Delete page:', pageId);
+      // TODO: Implement page deletion
+    }
+  };
+
+  const handleEditPage = (e: React.MouseEvent, pageId: string) => {
+    e.stopPropagation();
+    const name = window.prompt('Enter new page name:');
+    if (name) {
+      console.log('Rename page:', pageId, name);
+      // TODO: Implement page rename
+    }
+  };
+
+  const handleComponentDragStart = (e: React.DragEvent, component: string) => {
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('text/plain', component);
+    console.log('Drag start:', component);
+  };
+
+  const handleColorChange = (color: string) => {
+    console.log('Color change:', color);
+    // TODO: Update site primary color
+  };
+
+  const handleFontChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    console.log('Font change:', e.target.value);
+    // TODO: Update site font family
+  };
+
   return (
     <div className="flex flex-col h-full">
       {/* Tab bar */}
@@ -62,6 +103,7 @@ export default function StudioSidebar() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-gray-400 font-medium uppercase tracking-wide">Pages</span>
               <button
+                onClick={handleAddPage}
                 className="p-1 text-gray-500 hover:text-indigo-400"
                 title="Add page"
               >
@@ -84,11 +126,19 @@ export default function StudioSidebar() {
                   >
                     <DocumentIcon className="w-3.5 h-3.5 shrink-0" />
                     <span className="truncate flex-1">{page.name}</span>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
-                      <button className="p-0.5 hover:text-indigo-400">
+                    <div className="flex items-center gap-0.5 opacity-0 hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => handleEditPage(e, page.id)}
+                        className="p-0.5 hover:text-indigo-400"
+                        title="Edit page"
+                      >
                         <PencilSquareIcon className="w-3 h-3" />
                       </button>
-                      <button className="p-0.5 hover:text-red-400">
+                      <button
+                        onClick={(e) => handleDeletePage(e, page.id)}
+                        className="p-0.5 hover:text-red-400"
+                        title="Delete page"
+                      >
                         <TrashIcon className="w-3 h-3" />
                       </button>
                     </div>
@@ -125,7 +175,8 @@ export default function StudioSidebar() {
                       <div
                         key={item}
                         draggable
-                        className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300 cursor-grab hover:border-indigo-500 hover:text-white transition-colors text-center"
+                        onDragStart={(e) => handleComponentDragStart(e, item)}
+                        className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300 cursor-grab active:cursor-grabbing hover:border-indigo-500 hover:text-white transition-colors text-center"
                       >
                         {item}
                       </div>
@@ -160,9 +211,11 @@ export default function StudioSidebar() {
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Primary Color</label>
                 <div className="flex items-center gap-2">
-                  <div
-                    className="w-6 h-6 rounded border border-gray-700"
-                    style={{ backgroundColor: state.site?.primary_color || '#6366f1' }}
+                  <input
+                    type="color"
+                    value={state.site?.primary_color || '#6366f1'}
+                    onChange={(e) => handleColorChange(e.target.value)}
+                    className="w-6 h-6 rounded border border-gray-700 cursor-pointer"
                   />
                   <span className="text-xs text-gray-400">{state.site?.primary_color || '#6366f1'}</span>
                 </div>
@@ -171,7 +224,11 @@ export default function StudioSidebar() {
               {/* Font family */}
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Font Family</label>
-                <select className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300">
+                <select
+                  value={state.site?.font_family || 'Inter'}
+                  onChange={handleFontChange}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300"
+                >
                   <option>Inter</option>
                   <option>Roboto</option>
                   <option>Poppins</option>

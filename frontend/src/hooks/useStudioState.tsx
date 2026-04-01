@@ -20,6 +20,7 @@ export interface StudioState {
   pendingActions: StudioAction[];
   isDirty: boolean;
   codeEditorOpen: boolean;
+  componentStyles: Record<string, Record<string, string>>;
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────────
@@ -39,7 +40,8 @@ type StudioAction_ =
   | { type: 'REMOVE_PENDING_ACTION'; index: number }
   | { type: 'SET_DIRTY'; dirty: boolean }
   | { type: 'TOGGLE_CODE_EDITOR' }
-  | { type: 'UPDATE_PAGE'; pageId: string; updates: Partial<StudioPage> };
+  | { type: 'UPDATE_PAGE'; pageId: string; updates: Partial<StudioPage> }
+  | { type: 'UPDATE_COMPONENT_STYLE'; componentId: string; property: string; value: string };
 
 const initialState: StudioState = {
   site: null,
@@ -55,6 +57,7 @@ const initialState: StudioState = {
   pendingActions: [],
   isDirty: false,
   codeEditorOpen: false,
+  componentStyles: {},
 };
 
 function studioReducer(state: StudioState, action: StudioAction_): StudioState {
@@ -91,6 +94,18 @@ function studioReducer(state: StudioState, action: StudioAction_): StudioState {
       return {
         ...state,
         pages: state.pages.map(p => p.id === action.pageId ? { ...p, ...action.updates } : p),
+        isDirty: true,
+      };
+    case 'UPDATE_COMPONENT_STYLE':
+      return {
+        ...state,
+        componentStyles: {
+          ...state.componentStyles,
+          [action.componentId]: {
+            ...(state.componentStyles[action.componentId] || {}),
+            [action.property]: action.value,
+          },
+        },
         isDirty: true,
       };
     default:

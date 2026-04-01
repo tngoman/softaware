@@ -17,23 +17,50 @@ purchaseOrdersRouter.use(requireAuth, requireAdmin);
 const createPOSchema = z.object({
   po_number: z.string().optional(),
   contact_id: z.coerce.number().int().positive(),
+  po_contact_id: z.coerce.number().int().positive().optional(),
   invoice_id: z.coerce.number().int().positive().optional().nullable(),
   po_amount: z.coerce.number().optional(),
   po_date: z.string().optional(),
   due_date: z.string().optional().nullable(),
+  po_due_date: z.string().optional().nullable(),
   po_status: z.coerce.number().optional(),
   remarks: z.string().optional().nullable(),
+  po_notes: z.string().optional().nullable(),
   items: z.array(z.object({
     item_description: z.string().optional(),
+    item_product: z.string().optional(),
     item_cost: z.coerce.number().optional(),
     item_price: z.coerce.number().optional(),
     item_quantity: z.coerce.number().optional(),
+    item_qty: z.coerce.number().optional(),
     item_discount: z.coerce.number().optional(),
     item_vat: z.coerce.number().optional(),
   })).optional(),
 });
 
-const updatePOSchema = createPOSchema.partial();
+const updatePOSchema = z.object({
+  po_number: z.string().optional(),
+  contact_id: z.coerce.number().int().positive().optional(),
+  po_contact_id: z.coerce.number().int().positive().optional(),
+  invoice_id: z.coerce.number().int().positive().optional().nullable(),
+  po_amount: z.coerce.number().optional(),
+  po_date: z.string().optional(),
+  due_date: z.string().optional().nullable(),
+  po_due_date: z.string().optional().nullable(),
+  po_status: z.coerce.number().optional(),
+  remarks: z.string().optional().nullable(),
+  po_notes: z.string().optional().nullable(),
+  items: z.array(z.object({
+    item_description: z.string().optional(),
+    item_product: z.string().optional(),
+    item_cost: z.coerce.number().optional(),
+    item_price: z.coerce.number().optional(),
+    item_quantity: z.coerce.number().optional(),
+    item_qty: z.coerce.number().optional(),
+    item_discount: z.coerce.number().optional(),
+    item_vat: z.coerce.number().optional(),
+  })).optional(),
+});
 
 /* ── SQL fragment for aliased columns ─────────────────────── */
 
@@ -173,8 +200,11 @@ purchaseOrdersRouter.post('/', async (req: AuthRequest, res: Response, next) => 
   try {
     const data = createPOSchema.parse(req.body);
 
+    const contactId = data.contact_id || data.po_contact_id;
+    if (!contactId) throw badRequest('Contact ID is required');
+
     // Verify contact exists
-    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [data.contact_id]);
+    const contact = await db.queryOne('SELECT id FROM contacts WHERE id = ?', [contactId]);
     if (!contact) throw badRequest('Contact not found');
 
     // Auto-generate PO number
@@ -188,24 +218,29 @@ purchaseOrdersRouter.post('/', async (req: AuthRequest, res: Response, next) => 
 
     const now = toMySQLDate(new Date());
     const poDate = data.po_date || new Date().toISOString().split('T')[0];
-    const dueDate = data.due_date || null;
+    const dueDate = data.due_date || data.po_due_date || null;
+    const remarks = data.remarks || data.po_notes || null;
 
     // Compute amount from items
     let poAmount = data.po_amount || 0;
     if (data.items && data.items.length > 0 && !data.po_amount) {
-      poAmount = data.items.reduce((sum, it) => sum + (it.item_cost || 0) * (it.item_quantity || 1), 0);
+      poAmount = data.items.reduce((sum, it) => {
+        const cost = it.item_cost || 0;
+        const qty = it.item_quantity || it.item_qty || 1;
+        return sum + (cost * qty);
+      }, 0);
     }
 
     const insertId = await db.insertOne('purchase_orders', {
       po_number: poNumber,
-      contact_id: data.contact_id,
+      contact_id: contactId,
       invoice_id: data.invoice_id || null,
       po_amount: poAmount,
       po_date: poDate,
       due_date: dueDate,
       po_status: data.po_status || 0,
       po_user_id: req.user?.id || null,
-      remarks: data.remarks || null,
+      remarks: remarks,
       active: 1,
       created_at: now,
       updated_at: now,
@@ -214,12 +249,15 @@ purchaseOrdersRouter.post('/', async (req: AuthRequest, res: Response, next) => 
     // Insert items
     if (data.items && data.items.length > 0) {
       for (const item of data.items) {
+        const description = item.item_description || item.item_product || '';
+        const qty = item.item_quantity || item.item_qty || 1;
+        
         await db.insertOne('purchase_order_items', {
           purchase_order_id: insertId,
-          item_description: item.item_description || '',
+          item_description: description,
           item_cost: item.item_cost != null ? item.item_cost : 0,
           item_price: item.item_price != null ? item.item_price : 0,
-          item_quantity: item.item_quantity || 1,
+          item_quantity: qty,
           item_discount: item.item_discount || 0,
           item_vat: item.item_vat || 0,
           created_at: now,
@@ -254,12 +292,18 @@ purchaseOrdersRouter.put('/:id', async (req: AuthRequest, res: Response, next) =
     const now = toMySQLDate(new Date());
     const updateData: any = { updated_at: now };
 
-    if (data.contact_id !== undefined) updateData.contact_id = data.contact_id;
+    const contactId = data.contact_id || data.po_contact_id;
+    if (contactId !== undefined) updateData.contact_id = contactId;
     if (data.invoice_id !== undefined) updateData.invoice_id = data.invoice_id;
     if (data.po_date !== undefined) updateData.po_date = data.po_date;
-    if (data.due_date !== undefined) updateData.due_date = data.due_date;
+    
+    const dueDate = data.due_date || data.po_due_date;
+    if (dueDate !== undefined) updateData.due_date = dueDate;
+    
     if (data.po_status !== undefined) updateData.po_status = data.po_status;
-    if (data.remarks !== undefined) updateData.remarks = data.remarks;
+    
+    const remarks = data.remarks || data.po_notes;
+    if (remarks !== undefined) updateData.remarks = remarks;
 
     // Update items if provided
     if (data.items) {
@@ -268,13 +312,14 @@ purchaseOrdersRouter.put('/:id', async (req: AuthRequest, res: Response, next) =
 
       let total = 0;
       for (const item of data.items) {
+        const description = item.item_description || item.item_product || '';
         const cost = item.item_cost != null ? item.item_cost : 0;
-        const qty = item.item_quantity || 1;
+        const qty = item.item_quantity || item.item_qty || 1;
         total += cost * qty;
 
         await db.insertOne('purchase_order_items', {
           purchase_order_id: id,
-          item_description: item.item_description || '',
+          item_description: description,
           item_cost: cost,
           item_price: item.item_price != null ? item.item_price : 0,
           item_quantity: qty,
@@ -491,10 +536,12 @@ purchaseOrdersRouter.post('/create-from-invoice/:invoiceId', async (req: AuthReq
     const existingPO = await db.queryOne('SELECT id FROM purchase_orders WHERE po_number = ?', [poNumber]);
     if (existingPO) finalPONumber = `${poNumber}-${Date.now()}`;
 
-    // Calculate total from cost prices (fall back to sale price if cost is missing)
-    const poTotal = invoiceItems.reduce((sum: number, it: any) =>
-      sum + (Number(it.item_cost) || Number(it.item_price) || 0) * (Number(it.item_quantity) || 1), 0
-    );
+    // Calculate total from cost prices
+    const poTotal = invoiceItems.reduce((sum: number, it: any) => {
+      const cost = it.item_cost != null ? Number(it.item_cost) : 0;
+      const qty = Number(it.item_quantity) || 1;
+      return sum + (cost * qty);
+    }, 0);
 
     const insertId = await db.insertOne('purchase_orders', {
       po_number: finalPONumber,
@@ -511,13 +558,12 @@ purchaseOrdersRouter.post('/create-from-invoice/:invoiceId', async (req: AuthReq
       updated_at: now,
     });
 
-    // Copy items — use cost price as the PO cost, fall back to sale price if cost is missing
+    // Copy items — use cost price as the PO cost
     for (const item of invoiceItems) {
-      const cost = Number(item.item_cost) || Number(item.item_price) || 0;
       await db.insertOne('purchase_order_items', {
         purchase_order_id: insertId,
         item_description: item.item_description || '',
-        item_cost: cost,
+        item_cost: item.item_cost != null ? Number(item.item_cost) : 0,
         item_price: item.item_price || 0,
         item_quantity: item.item_quantity || 1,
         item_discount: item.item_discount || 0,

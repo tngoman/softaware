@@ -487,4 +487,27 @@ export class AuthModel {
     }>('/auth/google/token', { id_token: idToken });
     return response.data;
   }
+
+  /**
+   * Link a Google account to the current authenticated user.
+   * Uses the redirect flow: gets the consent URL with mode=link, then browser redirects.
+   * After linking, Google redirects back to /account-settings?linked=google.
+   */
+  static async getGoogleLinkUrl(): Promise<string> {
+    const response = await api.get<{ success: boolean; data: { url: string } }>('/auth/google?mode=link');
+    return response.data.data.url;
+  }
+
+  /**
+   * Unlink the connected OAuth account from the current user.
+   * Requires the user to have a password set (so they don't get locked out).
+   */
+  static async unlinkOAuthAccount() {
+    const response = await api.delete<{
+      success: boolean;
+      message: string;
+      data: { user: User };
+    }>('/auth/google/link');
+    return response.data;
+  }
 }

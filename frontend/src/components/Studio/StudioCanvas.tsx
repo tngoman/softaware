@@ -12,6 +12,21 @@ export default function StudioCanvas() {
   const width = VIEWPORT_WIDTHS[state.viewport];
   const scale = state.zoom / 100;
 
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const component = e.dataTransfer.getData('text/plain');
+    if (component) {
+      console.log('Dropped component:', component);
+      // TODO: Add component to page
+      alert(`Add ${component} component (not yet implemented)`);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
   // Listen for messages from iframe for element selection
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -72,6 +87,8 @@ export default function StudioCanvas() {
     <div
       ref={containerRef}
       className="w-full h-full flex items-center justify-center overflow-auto relative"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
     >
       {/* Grid overlay */}
       {state.showGrid && (

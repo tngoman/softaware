@@ -18,6 +18,7 @@ import {
   sanitize,
   renderMarkdown,
   getInitials,
+  normalizeDateValue,
   formatMessageTime,
   formatDateSeparator,
   getFileUrl,
@@ -393,10 +394,12 @@ export default function MessageList({
     let newMsgDividerShown = false;
 
     for (const msg of messages) {
-      const msgDate = msg.created_at.slice(0, 10); // YYYY-MM-DD
+      const createdAt = normalizeDateValue(msg.created_at);
+      
+      const msgDate = createdAt.slice(0, 10); // YYYY-MM-DD
       if (msgDate !== lastDate) {
         lastDate = msgDate;
-        items.push(<DateSeparator key={`date-${msgDate}`} date={msg.created_at} />);
+        items.push(<DateSeparator key={`date-${msgDate}`} date={createdAt} />);
       }
 
       // New messages divider: show after the last read message
@@ -551,7 +554,7 @@ export default function MessageList({
               <div className={`flex items-center justify-end gap-1 mt-0.5 ${
                 isMine ? 'text-blue-200' : 'text-gray-400'
               }`}>
-                <span className="text-[10px]">{formatMessageTime(msg.created_at)}</span>
+                <span className="text-[10px]">{formatMessageTime(createdAt)}</span>
                 {isMine && <StatusTicks status={msg.status || 'sent'} />}
                 {starredIds.has(msg.id) && (
                   <StarIconSolid className="w-3 h-3 text-yellow-400" />
@@ -728,12 +731,16 @@ export default function MessageList({
       {/* Image Lightbox */}
       {lightboxIndex !== null && imageMessages.length > 0 && (
         <ImageLightbox
-          images={imageMessages.map((m) => ({
-            url: m.file_url!,
-            name: m.file_name || undefined,
-            senderName: m.sender_name,
-            date: m.created_at,
-          }))}
+          images={imageMessages.map((m) => {
+            const createdAt = normalizeDateValue(m.created_at);
+            
+            return {
+              url: m.file_url!,
+              name: m.file_name || undefined,
+              senderName: m.sender_name,
+              date: createdAt,
+            };
+          })}
           initialIndex={lightboxIndex}
           onClose={() => setLightboxIndex(null)}
         />

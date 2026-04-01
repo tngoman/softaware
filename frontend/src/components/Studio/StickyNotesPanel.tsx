@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStudioState } from '../../hooks/useStudioState';
 import { StudioModel, type StickyNote, type NoteReply } from '../../models/StudioModels';
 import {
@@ -22,6 +22,10 @@ export default function StickyNotesPanel() {
   const [newColor, setNewColor] = useState('yellow');
   const [showCreate, setShowCreate] = useState(false);
   const [replyText, setReplyText] = useState('');
+  const [position, setPosition] = useState({ x: 16, y: 16 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{ startX: number; startY: number; initialX: number; initialY: number } | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const siteId = state.site?.id;
 
@@ -36,6 +40,43 @@ export default function StickyNotesPanel() {
   }, [siteId]);
 
   useEffect(() => { loadNotes(); }, [loadNotes]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button, textarea, input')) return;
+    setIsDragging(true);
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initialX: position.x,
+      initialY: position.y,
+    };
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging || !dragRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      setPosition({
+        x: Math.max(0, dragRef.current.initialX + dx),
+        y: Math.max(0, dragRef.current.initialY + dy),
+      });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      dragRef.current = null;
+    };
+
+    if (isDragging) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isDragging]);
 
   const createNote = async () => {
     if (!siteId || !newContent.trim()) return;
@@ -77,9 +118,20 @@ export default function StickyNotesPanel() {
   const getColorStyle = (color: string) => NOTE_COLORS.find(c => c.value === color) || NOTE_COLORS[0];
 
   return (
-    <div className="absolute right-4 top-4 w-72 max-h-[80vh] bg-gray-900 border border-gray-700 rounded-xl shadow-xl flex flex-col z-20">
+    <div
+      ref={panelRef}
+      className="absolute w-72 max-h-[80vh] bg-gray-900 border border-gray-700 rounded-xl shadow-xl flex flex-col z-20"
+      style={{
+        left: `${position.x}px`,
+        top: `${position.y}px`,
+        cursor: isDragging ? 'grabbing' : 'default',
+      }}
+    >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800">
+      <div
+        className="flex items-center justify-between px-3 py-2 border-b border-gray-800 cursor-grab active:cursor-grabbing"
+        onMouseDown={handleMouseDown}
+      >
         <div className="flex items-center gap-2">
           <ChatBubbleOvalLeftEllipsisIcon className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-medium">Notes</span>

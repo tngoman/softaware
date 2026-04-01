@@ -20,6 +20,23 @@ export default function StudioToolbar() {
   const { state, dispatch } = useStudioState();
   const { canUndo, canRedo, undo, redo } = useStudioHistory();
 
+  const handlePreview = () => {
+    if (!state.site?.custom_domain) {
+      const domain = `${state.site?.business_name?.toLowerCase().replace(/\s+/g, '-')}.softaware.net.za`;
+      window.open(`https://${domain}`, '_blank');
+    } else {
+      window.open(`https://${state.site.custom_domain}`, '_blank');
+    }
+  };
+
+  const handleDeploy = async () => {
+    if (!state.site?.id) return;
+    if (!window.confirm('Deploy this site to production?')) return;
+    console.log('Deploy site:', state.site.id);
+    // TODO: Implement deployment
+    alert('Deployment not yet implemented');
+  };
+
   return (
     <div className="flex items-center justify-between flex-1 gap-4 text-sm">
       {/* Left: site name + page */}
@@ -136,10 +153,15 @@ export default function StudioToolbar() {
 
         <div className="w-px h-5 bg-gray-700 mx-1" />
 
-        <button className="p-1.5 text-gray-400 hover:text-white" title="Preview">
+        <button
+          onClick={handlePreview}
+          className="p-1.5 text-gray-400 hover:text-white"
+          title="Preview"
+        >
           <EyeIcon className="w-4 h-4" />
         </button>
         <button
+          onClick={handleDeploy}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-medium transition-colors"
           title="Deploy"
         >

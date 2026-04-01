@@ -320,6 +320,8 @@ export interface User {
   // Two-factor authentication
   two_factor_enabled?: boolean;
   two_factor_method?: 'totp' | 'email' | 'sms';
+  // OAuth
+  oauth_provider?: string | null;
   // Legacy fields for compatibility
   user_id?: number;
   user_email?: string;

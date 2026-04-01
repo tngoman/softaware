@@ -115,9 +115,48 @@ export function getInitials(name?: string | null): string {
     .toUpperCase();
 }
 
-export function formatTime(dateStr?: string | null): string {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
+export function normalizeDateValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number') {
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? '' : d.toISOString();
+  }
+  if (value instanceof Date) return isNaN(value.getTime()) ? '' : value.toISOString();
+
+  if (typeof value === 'object') {
+    const maybeIso = (value as { toISOString?: () => string }).toISOString;
+    if (typeof maybeIso === 'function') {
+      try {
+        const out = maybeIso.call(value);
+        if (typeof out === 'string') return out;
+      } catch {
+        // ignore and continue
+      }
+    }
+  }
+
+  return String(value);
+}
+
+function parseDateValue(value: unknown): Date | null {
+  const raw = normalizeDateValue(value);
+  if (!raw) return null;
+
+  let d = new Date(raw);
+  if (!isNaN(d.getTime())) return d;
+
+  // Common MySQL DATETIME format: YYYY-MM-DD HH:mm:ss
+  d = new Date(raw.replace(' ', 'T'));
+  if (!isNaN(d.getTime())) return d;
+
+  return null;
+}
+
+export function formatTime(dateStr?: unknown): string {
+  const d = parseDateValue(dateStr);
+  if (!d) return '';
+
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffDays = Math.floor(diffMs / 86400000);
@@ -132,13 +171,16 @@ export function formatTime(dateStr?: string | null): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-export function formatMessageTime(dateStr?: string | null): string {
-  if (!dateStr) return '';
-  return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+export function formatMessageTime(dateStr?: unknown): string {
+  const d = parseDateValue(dateStr);
+  if (!d) return '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export function formatDateSeparator(dateStr: string): string {
-  const d = new Date(dateStr);
+export function formatDateSeparator(dateStr: unknown): string {
+  const d = parseDateValue(dateStr);
+  if (!d) return '';
+
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffDays = Math.floor(diffMs / 86400000);

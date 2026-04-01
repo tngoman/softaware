@@ -12,8 +12,14 @@ const PROP_TABS: { key: PropsTab; label: string }[] = [
 ];
 
 export default function StudioRightPanel() {
-  const { state } = useStudioState();
+  const { state, dispatch } = useStudioState();
   const [tab, setTab] = useState<PropsTab>('layout');
+
+  const updateStyle = (property: string, value: string) => {
+    if (state.selectedComponent) {
+      dispatch({ type: 'UPDATE_COMPONENT_STYLE', componentId: state.selectedComponent, property, value });
+    }
+  };
 
   if (!state.selectedComponent) {
     return (
@@ -47,11 +53,11 @@ export default function StudioRightPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4">
-        {tab === 'layout' && <LayoutProps />}
-        {tab === 'typography' && <TypographyProps />}
-        {tab === 'colors' && <ColorProps />}
-        {tab === 'spacing' && <SpacingProps />}
-        {tab === 'effects' && <EffectsProps />}
+        {tab === 'layout' && <LayoutProps updateStyle={updateStyle} currentStyles={state.componentStyles[state.selectedComponent] || {}} />}
+        {tab === 'typography' && <TypographyProps updateStyle={updateStyle} currentStyles={state.componentStyles[state.selectedComponent] || {}} />}
+        {tab === 'colors' && <ColorProps updateStyle={updateStyle} currentStyles={state.componentStyles[state.selectedComponent] || {}} />}
+        {tab === 'spacing' && <SpacingProps updateStyle={updateStyle} currentStyles={state.componentStyles[state.selectedComponent] || {}} />}
+        {tab === 'effects' && <EffectsProps updateStyle={updateStyle} currentStyles={state.componentStyles[state.selectedComponent] || {}} />}
       </div>
     </div>
   );
@@ -66,21 +72,23 @@ function PropField({ label, children }: { label: string; children: React.ReactNo
   );
 }
 
-function PropInput({ placeholder, defaultValue }: { placeholder?: string; defaultValue?: string }) {
+function PropInput({ placeholder, defaultValue, onChange }: { placeholder?: string; defaultValue?: string; onChange?: (value: string) => void }) {
   return (
     <input
       type="text"
       placeholder={placeholder}
       defaultValue={defaultValue}
+      onChange={(e) => onChange?.(e.target.value)}
       className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 focus:border-indigo-500 focus:outline-none"
     />
   );
 }
 
-function PropSelect({ options, defaultValue }: { options: string[]; defaultValue?: string }) {
+function PropSelect({ options, defaultValue, onChange }: { options: string[]; defaultValue?: string; onChange?: (value: string) => void }) {
   return (
     <select
       defaultValue={defaultValue}
+      onChange={(e) => onChange?.(e.target.value)}
       className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 focus:border-indigo-500 focus:outline-none"
     >
       {options.map(o => <option key={o} value={o}>{o}</option>)}
@@ -88,11 +96,20 @@ function PropSelect({ options, defaultValue }: { options: string[]; defaultValue
   );
 }
 
-function LayoutProps() {
+interface StyleEditorProps {
+  updateStyle: (property: string, value: string) => void;
+  currentStyles: Record<string, string>;
+}
+
+function LayoutProps({ updateStyle, currentStyles }: StyleEditorProps) {
   return (
     <>
       <PropField label="Display">
-        <PropSelect options={['block', 'flex', 'grid', 'inline', 'inline-flex', 'none']} defaultValue="block" />
+        <PropSelect
+          options={['block', 'flex', 'grid', 'inline', 'inline-flex', 'none']}
+          defaultValue={currentStyles.display || 'block'}
+          onChange={(val) => updateStyle('display', val)}
+        />
       </PropField>
       <PropField label="Position">
         <PropSelect options={['static', 'relative', 'absolute', 'fixed', 'sticky']} defaultValue="static" />
@@ -118,7 +135,7 @@ function LayoutProps() {
   );
 }
 
-function TypographyProps() {
+function TypographyProps({ updateStyle, currentStyles }: StyleEditorProps) {
   return (
     <>
       <PropField label="Font Family">
@@ -145,7 +162,7 @@ function TypographyProps() {
   );
 }
 
-function ColorProps() {
+function ColorProps({ updateStyle, currentStyles }: StyleEditorProps) {
   return (
     <>
       <PropField label="Text Color">
@@ -171,7 +188,7 @@ function ColorProps() {
   );
 }
 
-function SpacingProps() {
+function SpacingProps({ updateStyle, currentStyles }: StyleEditorProps) {
   return (
     <>
       <PropField label="Margin">
@@ -199,7 +216,7 @@ function SpacingProps() {
   );
 }
 
-function EffectsProps() {
+function EffectsProps({ updateStyle, currentStyles }: StyleEditorProps) {
   return (
     <>
       <PropField label="Box Shadow"><PropInput placeholder="none" /></PropField>

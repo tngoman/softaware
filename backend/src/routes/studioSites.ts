@@ -149,7 +149,15 @@ router.get('/sites/:siteId', async (req: Request, res: Response) => {
     if (!site) return res.status(404).json({ error: 'Site not found' });
 
     const pages = await db.query<Record<string, unknown>>(
-      `SELECT * FROM site_pages WHERE site_id = ? ORDER BY sort_order ASC`,
+      `SELECT id, site_id, page_type, 
+              page_title AS title, page_title AS name, 
+              page_slug AS slug, 
+              generated_html AS html_content,
+              content_data AS css_content,
+              sort_order, 
+              CASE WHEN is_published = 1 THEN 'published' ELSE 'draft' END AS status,
+              created_at, updated_at
+       FROM site_pages WHERE site_id = ? ORDER BY sort_order ASC`,
       [siteId]
     );
 
@@ -223,6 +231,12 @@ router.post('/sites', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'businessName is required' });
     }
 
+    // Use clientId if provided, otherwise fall back to authenticated staff user
+    const userId = (clientId as string) || staffId(req);
+    if (!userId) {
+      return res.status(400).json({ error: 'clientId is required (or must be authenticated)' });
+    }
+
     const id = `site-${Date.now()}`;
     const now = toMySQLDate(new Date());
 
@@ -232,7 +246,7 @@ router.post('/sites', async (req: Request, res: Response) => {
           max_pages, status, tier, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'paid', ?, ?)`,
       [
-        id, clientId || null, businessName, tagline || '', about || '', services || '',
+        id, userId, businessName, tagline || '', about || '', services || '',
         primaryColor || '#3B82F6', fontFamily || 'Inter', maxPages, now, now,
       ]
     );
@@ -240,8 +254,8 @@ router.post('/sites', async (req: Request, res: Response) => {
     // Create default home page
     const pageId = randomUUID();
     await db.execute(
-      `INSERT INTO site_pages (id, site_id, page_type, title, slug, sort_order, status, created_at, updated_at)
-       VALUES (?, ?, 'home', 'Home', '/', 0, 'draft', ?, ?)`,
+      `INSERT INTO site_pages (id, site_id, page_type, page_title, page_slug, sort_order, is_published, created_at, updated_at)
+       VALUES (?, ?, 'home', 'Home', '/', 0, 1, ?, ?)`,
       [pageId, id, now, now]
     );
 
@@ -374,6 +388,7 @@ router.get('/sites/:siteId/notes', async (req: Request, res: Response) => {
 
     return res.json({ success: true, notes });
   } catch (err) {
+    console.error('[Studio Notes] Error fetching notes:', err);
     return res.status(500).json({ error: 'Failed to fetch notes' });
   }
 });

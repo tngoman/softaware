@@ -129,7 +129,7 @@ const App: React.FC = () => {
           <Route path="/landing" element={<LandingPage />} />
           <Route path="/login" element={<AuthPage />} />
           <Route path="/register" element={<AuthPage />} />
-          <Route path="/auth/oauth-callback" element={<OAuthCallback />} />
+          <Route path="/oauth/callback" element={<OAuthCallback />} />
           <Route path="/activate" element={<ActivatePage />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
           

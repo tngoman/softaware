@@ -588,8 +588,6 @@ const ClientApiConfigs: React.FC = () => {
           }
         }
 
-        console.log('[SPEC IMPORT DEBUG]', { metaType, toolNamesCount: toolNames.length, toolNames, toolDetailsCount: toolDetails.length });
-
         // Filter out placeholder secrets
         const cleanSecret = shared_secret && !shared_secret.startsWith('<') && shared_secret.length > 5 ? shared_secret : undefined;
 

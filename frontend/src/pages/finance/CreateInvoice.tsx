@@ -291,7 +291,11 @@ const CreateInvoice: React.FC = () => {
       delete (invoiceData as any).invoice_due_date;
       delete (invoiceData as any).invoice_payment_status;
       delete (invoiceData as any).invoice_payment_date;
- 
+
+      // For new invoices, remove invoice_status so backend defaults to active=1
+      if (!isEditMode) {
+        delete (invoiceData as any).invoice_status;
+      }
 
       if (isEditMode && id) {
         // Update existing invoice
